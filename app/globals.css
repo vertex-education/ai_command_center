@@ -141,10 +141,14 @@ button {
   display: grid;
   place-items: center;
   margin-bottom: 16px;
-  color: #fff;
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: 30px;
-  font-weight: 700;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.rail-logo img {
+  width: 27px;
+  height: 27px;
+  display: block;
 }
 
 .rail-item {
@@ -214,6 +218,12 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.brand-wordmark {
+  width: 116px;
+  height: auto;
+  display: block;
 }
 
 .topbar h1 {
@@ -1386,6 +1396,7 @@ kbd {
 }
 
 .composer {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 38px 38px auto 48px;
   gap: 8px;
@@ -1396,6 +1407,29 @@ kbd {
   padding: 9px;
   background: #fff;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.composer-popover {
+  position: absolute;
+  right: 68px;
+  bottom: calc(100% + 10px);
+  z-index: 35;
+  width: min(320px, calc(100vw - 40px));
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px;
+  background: #fff;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.18);
+}
+
+.composer-popover.attachment {
+  right: 150px;
+}
+
+.composer-popover.workspace {
+  right: 104px;
 }
 
 .composer input {

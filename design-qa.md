@@ -31,6 +31,9 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Manage access opens an access modal and persists the chosen view/edit mode in the access block.
 - Notifications, model, workspace, and attachment popovers open and close from visible controls.
 - Artifact rows select an artifact, and Create artifact generates a new draft artifact from the current idea.
+- Official Vertex logo assets from `brand.vertexeducation.com` render in the rail and header.
+- Project switching now loads project-specific chat lists and demo conversations for Vertex Hub, LMS Next Gen, Data Migration, and AI Innovation Lab.
+- Attachment, workspace/web, and model popovers are anchored to the composer and no longer render at the top of the page.
 
 **Patches Made Since Previous QA Pass**
 - Added stable test IDs and explicit labels for modal, detail, and composer controls.
@@ -38,11 +41,15 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Added `min-height: 0` and hidden overflow to the workspace shell so grid children respect viewport height.
 - Styled nested panel scrollbars to reduce visual noise.
 - Added full stateful interactions for rail navigation, project/chat selection, access management, topbar popovers, artifact selection/generation, and decision status toggles.
+- Added official Vertex brand SVG assets from `brand.vertexeducation.com`.
+- Added project-specific chat maps and realistic conversation content.
+- Split composer controls into composer-local popovers so attachment, workspace, and model menus open at the input area.
 
 **Validation Notes**
 - `npm run lint` passed.
 - `npm run build` passed.
 - Browser click validation passed for rail navigation, project switching, decision toggling, access mode saving, notification popover, artifact generation, desktop overflow, and mobile overflow.
+- Browser validation passed for brand logo rendering, LMS/Data Migration project chat switching, project-specific messages, and composer popover anchoring.
 - Browser text entry validation was partially blocked by the Browser plugin's virtual clipboard path, but the text-entry handlers compile, the fields are rendered, and the add-idea/chat submit logic was validated in the previous pass before this broader interaction expansion.
 
 **Follow-up Polish**
