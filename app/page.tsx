@@ -44,6 +44,8 @@ import { type FormEvent, type ReactNode, useMemo, useState } from "react";
 
 type IdeaStatus = "New" | "Review" | "Pilot" | "Approved" | "Implemented" | "Blocked";
 type TabName = "Chat" | "Ideas" | "Artifacts" | "Decisions" | "Prompts";
+type RailName = "Chat" | "Projects" | "Teams" | "Artifacts" | "Prompts" | "Settings";
+type TopbarMenu = "notifications" | "people" | "model" | "workspace" | "attachment" | null;
 
 type Idea = {
   id: string;
@@ -76,6 +78,23 @@ type ChatMessage = {
     meta: string;
     type: "doc" | "ppt" | "sheet";
   };
+};
+
+type Artifact = {
+  title: string;
+  type: string;
+  owner: string;
+  date: string;
+  status: "Final" | "Draft" | "Pinned";
+  summary: string;
+};
+
+type Decision = {
+  id: string;
+  title: string;
+  status: "Open" | "Blocked" | "Done";
+  owner: string;
+  due: string;
 };
 
 const avatarAlex =
@@ -314,31 +333,45 @@ const initialMessages: ChatMessage[] = [
   },
 ];
 
-const artifacts = [
+const initialArtifacts: Artifact[] = [
   {
     title: "Vertex Hub Roadmap Brief",
     type: "PPTX",
     owner: "Taylor Kim",
     date: "May 10, 2026",
+    status: "Final",
+    summary: "Executive-ready roadmap narrative with milestones, risks, and PMO improvement pilots.",
   },
   {
     title: "PMO Improvement Idea Register",
     type: "XLSX",
     owner: "PMO Assistant",
     date: "Jun 10, 2026",
+    status: "Pinned",
+    summary: "Prioritized improvement queue with impact, effort, owner, evidence, and recommended next step.",
   },
   {
     title: "Steering Committee Update",
     type: "PPTX",
     owner: "Taylor Kim",
     date: "May 9, 2026",
+    status: "Final",
+    summary: "Committee packet with status summary, decision asks, and risks requiring leadership attention.",
   },
   {
     title: "Launch Readiness Checklist",
     type: "DOCX",
     owner: "Alex Morgan",
     date: "May 7, 2026",
+    status: "Draft",
+    summary: "Readiness checklist for owners, dependencies, training, communications, and launch gates.",
   },
+];
+
+const initialDecisions: Decision[] = [
+  { id: "decision-raid", title: "Approve RAID Copilot pilot", status: "Open", owner: "Alex Morgan", due: "Due Jun 14" },
+  { id: "decision-taxonomy", title: "Confirm stakeholder taxonomy", status: "Blocked", owner: "Jordan Lee", due: "Due Jun 12" },
+  { id: "decision-register", title: "Add idea register to packet", status: "Done", owner: "Taylor Kim", due: "Done" },
 ];
 
 const tabs: TabName[] = ["Chat", "Ideas", "Artifacts", "Decisions", "Prompts"];
@@ -388,8 +421,20 @@ export default function Home() {
   const [shareOpen, setShareOpen] = useState(false);
   const [toast, setToast] = useState("Prototype ready");
   const [rightOpen, setRightOpen] = useState(true);
+  const [activeRail, setActiveRail] = useState<RailName>("Chat");
+  const [activeProject, setActiveProject] = useState("Vertex Hub");
+  const [activeChat, setActiveChat] = useState("Shared Chat");
+  const [activeMode, setActiveMode] = useState("Team Project");
+  const [topbarMenu, setTopbarMenu] = useState<TopbarMenu>(null);
+  const [isAccessOpen, setIsAccessOpen] = useState(false);
+  const [accessLevel, setAccessLevel] = useState<"Read / Write" | "View only">("Read / Write");
+  const [model, setModel] = useState("GPT 5.5");
+  const [artifacts, setArtifacts] = useState<Artifact[]>(initialArtifacts);
+  const [selectedArtifactTitle, setSelectedArtifactTitle] = useState(initialArtifacts[1].title);
+  const [decisions, setDecisions] = useState<Decision[]>(initialDecisions);
 
   const selectedIdea = ideas.find((idea) => idea.id === selectedIdeaId) ?? ideas[0];
+  const selectedArtifact = artifacts.find((artifact) => artifact.title === selectedArtifactTitle) ?? artifacts[0];
 
   const filteredIdeas = useMemo(() => {
     return ideas.filter((idea) => {
@@ -491,25 +536,75 @@ export default function Home() {
     updateToast("Vote added");
   }
 
+  function handleRailClick(label: RailName) {
+    setActiveRail(label);
+    if (label === "Chat" || label === "Projects") setActiveTab("Chat");
+    if (label === "Artifacts") setActiveTab("Artifacts");
+    if (label === "Prompts") setActiveTab("Prompts");
+    if (label === "Teams") setTopbarMenu("people");
+    if (label === "Settings") setIsAccessOpen(true);
+    updateToast(`${label} opened`);
+  }
+
+  function handleProjectSelect(project: string) {
+    setActiveProject(project);
+    setActiveChat(project === "Vertex Hub" ? "Shared Chat" : "Roadmap Planning");
+    setActiveTab("Chat");
+    setRightOpen(true);
+    updateToast(`${project} selected`);
+  }
+
+  function handleChatSelect(chat: string) {
+    setActiveChat(chat);
+    setActiveTab(chat === "Decision Log" ? "Decisions" : "Chat");
+    updateToast(`${chat} opened`);
+  }
+
+  function handleCreateArtifact() {
+    const generated: Artifact = {
+      title: `Idea Summary ${artifacts.length + 1}`,
+      type: "DOCX",
+      owner: "PMO Assistant",
+      date: "Just now",
+      status: "Draft",
+      summary: `Draft summary generated from ${selectedIdea.title}, including owner, evidence, impact, effort, and next step.`,
+    };
+    setArtifacts((current) => [generated, ...current]);
+    setSelectedArtifactTitle(generated.title);
+    setActiveTab("Artifacts");
+    updateToast("Artifact created from current idea");
+  }
+
+  function toggleDecisionStatus(id: string) {
+    setDecisions((current) =>
+      current.map((decision) => {
+        if (decision.id !== id) return decision;
+        const nextStatus = decision.status === "Done" ? "Open" : "Done";
+        return { ...decision, status: nextStatus, due: nextStatus === "Done" ? "Done" : decision.due };
+      }),
+    );
+    updateToast("Decision status updated");
+  }
+
   return (
     <main className="prototype-shell">
       <div className="app-frame" aria-label="PMO Team Chat prototype">
         <aside className="primary-rail" aria-label="Global navigation">
           <div className="rail-logo">V</div>
-          <RailItem icon={<MessageCircle size={20} />} label="Chat" active />
-          <RailItem icon={<FolderOpen size={20} />} label="Projects" />
-          <RailItem icon={<Users size={20} />} label="Teams" />
-          <RailItem icon={<Archive size={20} />} label="Artifacts" />
-          <RailItem icon={<Sparkles size={20} />} label="Prompts" />
+          <RailItem icon={<MessageCircle size={20} />} label="Chat" active={activeRail === "Chat"} onClick={() => handleRailClick("Chat")} />
+          <RailItem icon={<FolderOpen size={20} />} label="Projects" active={activeRail === "Projects"} onClick={() => handleRailClick("Projects")} />
+          <RailItem icon={<Users size={20} />} label="Teams" active={activeRail === "Teams"} onClick={() => handleRailClick("Teams")} />
+          <RailItem icon={<Archive size={20} />} label="Artifacts" active={activeRail === "Artifacts"} onClick={() => handleRailClick("Artifacts")} />
+          <RailItem icon={<Sparkles size={20} />} label="Prompts" active={activeRail === "Prompts"} onClick={() => handleRailClick("Prompts")} />
           <div className="rail-spacer" />
-          <RailItem icon={<Settings size={20} />} label="Settings" />
+          <RailItem icon={<Settings size={20} />} label="Settings" active={activeRail === "Settings"} onClick={() => handleRailClick("Settings")} />
           <img className="rail-avatar" src={avatarPriya} alt="Priya Shah" />
         </aside>
 
         <section className="workspace-shell">
           <header className="topbar">
             <div className="topbar-title">
-              <button className="icon-button mobile-only" type="button" aria-label="Open menu">
+              <button className="icon-button mobile-only" type="button" aria-label="Open menu" onClick={() => handleRailClick("Projects")}>
                 <Menu size={20} />
               </button>
               <h1>PMO Team Chatbot</h1>
@@ -525,29 +620,41 @@ export default function Home() {
               <kbd>/</kbd>
             </label>
             <div className="topbar-actions">
-              <button className="icon-button" type="button" aria-label="Notifications">
+              <button className="icon-button" type="button" aria-label="Notifications" onClick={() => setTopbarMenu(topbarMenu === "notifications" ? null : "notifications")}>
                 <Bell size={18} />
               </button>
-              <button className="people-pill" type="button">
+              <button className="people-pill" type="button" onClick={() => setTopbarMenu(topbarMenu === "people" ? null : "people")}>
                 <Users size={17} />
                 <span>8</span>
                 <ChevronDown size={15} />
               </button>
             </div>
+            {topbarMenu ? (
+              <TopbarPopover
+                menu={topbarMenu}
+                model={model}
+                onModel={setModel}
+                onClose={() => setTopbarMenu(null)}
+                onToast={updateToast}
+              />
+            ) : null}
           </header>
 
           <section className="contextbar">
             <div className="crumbs" aria-label="Breadcrumb">
               <span>PMO Team</span>
               <ChevronRight size={14} />
-              <span>Vertex Hub</span>
+              <span>{activeProject}</span>
               <ChevronRight size={14} />
-              <strong>Shared Chat</strong>
+              <strong>{activeChat}</strong>
               <Star size={16} fill="#9aa4b2" strokeWidth={0} />
             </div>
             <div className="mode-tabs" aria-label="Chat mode">
               {["Personal", "Team Chat", "Project", "Team Project"].map((item) => (
-                <button className={item === "Team Project" ? "active" : ""} type="button" key={item}>
+                <button className={item === activeMode ? "active" : ""} type="button" key={item} onClick={() => {
+                  setActiveMode(item);
+                  updateToast(`${item} mode selected`);
+                }}>
                   {item}
                 </button>
               ))}
@@ -556,7 +663,7 @@ export default function Home() {
               <ShieldCheck size={18} />
               <div>
                 <strong>Team access</strong>
-                <span>Read / Write</span>
+                <span>{accessLevel}</span>
               </div>
               <div className="avatar-stack" aria-label="Team members">
                 {[avatarAlex, avatarJordan, avatarTaylor, avatarMaya].map((avatar) => (
@@ -564,14 +671,23 @@ export default function Home() {
                 ))}
                 <span>+3</span>
               </div>
-              <button className="secondary-button" type="button" onClick={() => updateToast("Access panel opened")}>
+              <button className="secondary-button" type="button" onClick={() => setIsAccessOpen(true)}>
                 Manage access
               </button>
             </div>
           </section>
 
           <div className="content-grid">
-            <ProjectNav />
+            <ProjectNav
+              activeProject={activeProject}
+              activeChat={activeChat}
+              onProjectSelect={handleProjectSelect}
+              onChatSelect={handleChatSelect}
+              onAdd={() => {
+                setIsAddOpen(true);
+                updateToast("Capture form opened");
+              }}
+            />
 
             <section className="main-panel" aria-label="Shared chat workspace">
               <div className="section-tabs" role="tablist" aria-label="Workspace tabs">
@@ -622,10 +738,20 @@ export default function Home() {
               ) : null}
 
               {activeTab === "Artifacts" ? (
-                <ArtifactView onShare={() => setShareOpen((current) => !current)} />
+                <ArtifactView
+                  artifacts={artifacts}
+                  selectedArtifact={selectedArtifact}
+                  onSelect={(artifact) => {
+                    setSelectedArtifactTitle(artifact.title);
+                    setRightOpen(true);
+                    updateToast(`${artifact.title} selected`);
+                  }}
+                  onShare={() => setShareOpen((current) => !current)}
+                  onCreateArtifact={handleCreateArtifact}
+                />
               ) : null}
 
-              {activeTab === "Decisions" ? <DecisionView /> : null}
+              {activeTab === "Decisions" ? <DecisionView decisions={decisions} onToggle={toggleDecisionStatus} /> : null}
               {activeTab === "Prompts" ? <PromptView onUsePrompt={setChatInput} /> : null}
 
               <form className="composer" onSubmit={handleSend}>
@@ -636,15 +762,15 @@ export default function Home() {
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
                 />
-                <button className="icon-button" type="button" aria-label="Attach file">
+                <button className="icon-button" type="button" aria-label="Attach file" onClick={() => setTopbarMenu(topbarMenu === "attachment" ? null : "attachment")}>
                   <Paperclip size={19} />
                 </button>
-                <button className="icon-button" type="button" aria-label="Browse workspace">
+                <button className="icon-button" type="button" aria-label="Browse workspace" onClick={() => setTopbarMenu(topbarMenu === "workspace" ? null : "workspace")}>
                   <Globe2 size={19} />
                 </button>
-                <button className="model-button" type="button">
+                <button className="model-button" type="button" onClick={() => setTopbarMenu(topbarMenu === "model" ? null : "model")}>
                   <Bot size={17} />
-                  GPT 5.5
+                  {model}
                   <ChevronDown size={14} />
                 </button>
                 <button className="send-button" type="submit" data-testid="send-message" aria-label="Send message">
@@ -690,9 +816,21 @@ export default function Home() {
                   </div>
                   <div className="artifact-list compact">
                     {artifacts.slice(0, 3).map((artifact) => (
-                      <ArtifactRow artifact={artifact} key={artifact.title} />
+                      <ArtifactRow artifact={artifact} selected={artifact.title === selectedArtifact.title} onSelect={() => {
+                        setSelectedArtifactTitle(artifact.title);
+                        setActiveTab("Artifacts");
+                      }} key={artifact.title} />
                     ))}
                   </div>
+                </section>
+
+                <section className="workspace-card artifact-detail-card">
+                  <div className="card-title-row">
+                    <h3>Selected Artifact</h3>
+                    <button type="button" onClick={handleCreateArtifact}>Generate new</button>
+                  </div>
+                  <p>{selectedArtifact.summary}</p>
+                  <span className="artifact-detail-meta">{selectedArtifact.type} - {selectedArtifact.status} - {selectedArtifact.owner}</span>
                 </section>
 
                 {shareOpen ? <SharePopover onToast={updateToast} /> : null}
@@ -720,20 +858,53 @@ export default function Home() {
           onSubmit={handleAddIdea}
         />
       ) : null}
+      {isAccessOpen ? (
+        <AccessModal
+          accessLevel={accessLevel}
+          onAccessLevel={setAccessLevel}
+          onClose={() => setIsAccessOpen(false)}
+          onSave={() => {
+            setIsAccessOpen(false);
+            updateToast(`Access updated to ${accessLevel}`);
+          }}
+        />
+      ) : null}
     </main>
   );
 }
 
-function RailItem({ icon, label, active = false }: { icon: ReactNode; label: string; active?: boolean }) {
+function RailItem({
+  icon,
+  label,
+  active = false,
+  onClick,
+}: {
+  icon: ReactNode;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+}) {
   return (
-    <button className={`rail-item ${active ? "active" : ""}`} type="button" aria-label={label}>
+    <button className={`rail-item ${active ? "active" : ""}`} type="button" aria-label={label} onClick={onClick}>
       {icon}
       <span>{label}</span>
     </button>
   );
 }
 
-function ProjectNav() {
+function ProjectNav({
+  activeProject,
+  activeChat,
+  onProjectSelect,
+  onChatSelect,
+  onAdd,
+}: {
+  activeProject: string;
+  activeChat: string;
+  onProjectSelect: (project: string) => void;
+  onChatSelect: (chat: string) => void;
+  onAdd: () => void;
+}) {
   const teamProjects = ["Vertex Hub", "LMS Next Gen", "Data Migration", "AI Innovation Lab"];
   const chats = ["Shared Chat", "Roadmap Planning", "Stakeholder Updates", "Risk & Issues", "Decision Log"];
 
@@ -741,7 +912,9 @@ function ProjectNav() {
     <aside className="project-nav" aria-label="Project navigation">
       <div className="nav-section-heading">
         <span>Projects</span>
-        <Plus size={17} />
+        <button className="nav-add-button" type="button" aria-label="Add project idea" onClick={onAdd}>
+          <Plus size={17} />
+        </button>
       </div>
 
       <div className="nav-group">
@@ -750,10 +923,10 @@ function ProjectNav() {
           Team Projects
         </div>
         {teamProjects.map((project) => (
-          <button className={`nav-link ${project === "Vertex Hub" ? "active" : ""}`} type="button" key={project}>
+          <button className={`nav-link ${project === activeProject ? "active" : ""}`} type="button" key={project} onClick={() => onProjectSelect(project)}>
             <Folder size={15} />
             <span>{project}</span>
-            {project === "Vertex Hub" ? <span className="nav-dot" /> : null}
+            {project === activeProject ? <span className="nav-dot" /> : null}
           </button>
         ))}
       </div>
@@ -764,7 +937,7 @@ function ProjectNav() {
           Chats
         </div>
         {chats.map((chat) => (
-          <button className={`nav-link ${chat === "Shared Chat" ? "active" : ""}`} type="button" key={chat}>
+          <button className={`nav-link ${chat === activeChat ? "active" : ""}`} type="button" key={chat} onClick={() => onChatSelect(chat)}>
             <MessageCircle size={15} />
             <span>{chat}</span>
           </button>
@@ -777,7 +950,7 @@ function ProjectNav() {
           Saved Chats
         </div>
         {["Q2 Planning Summary", "Resourcing Discussion"].map((chat) => (
-          <button className="nav-link" type="button" key={chat}>
+          <button className={`nav-link ${chat === activeChat ? "active" : ""}`} type="button" key={chat} onClick={() => onChatSelect(chat)}>
             <Archive size={15} />
             <span>{chat}</span>
           </button>
@@ -1105,7 +1278,19 @@ function ProgressMetric({ label, value }: { label: string; value: number }) {
   );
 }
 
-function ArtifactView({ onShare }: { onShare: () => void }) {
+function ArtifactView({
+  artifacts,
+  selectedArtifact,
+  onSelect,
+  onShare,
+  onCreateArtifact,
+}: {
+  artifacts: Artifact[];
+  selectedArtifact: Artifact;
+  onSelect: (artifact: Artifact) => void;
+  onShare: () => void;
+  onCreateArtifact: () => void;
+}) {
   return (
     <div className="artifact-view">
       <div className="ideas-toolbar">
@@ -1117,24 +1302,51 @@ function ArtifactView({ onShare }: { onShare: () => void }) {
           <Share2 size={16} />
           Share artifact
         </button>
+        <button className="primary-button" type="button" onClick={onCreateArtifact}>
+          <Plus size={16} />
+          Create artifact
+        </button>
       </div>
       <div className="artifact-list">
         {artifacts.map((artifact) => (
-          <ArtifactRow artifact={artifact} key={artifact.title} />
+          <ArtifactRow
+            artifact={artifact}
+            selected={artifact.title === selectedArtifact.title}
+            onSelect={() => onSelect(artifact)}
+            key={artifact.title}
+          />
         ))}
       </div>
+      <section className="workspace-card artifact-preview">
+        <span className="eyebrow">Artifact detail</span>
+        <h3>{selectedArtifact.title}</h3>
+        <p>{selectedArtifact.summary}</p>
+        <div className="tag-row">
+          <span>{selectedArtifact.type}</span>
+          <span>{selectedArtifact.status}</span>
+          <span>{selectedArtifact.owner}</span>
+        </div>
+      </section>
     </div>
   );
 }
 
-function ArtifactRow({ artifact }: { artifact: { title: string; type: string; owner: string; date: string } }) {
+function ArtifactRow({
+  artifact,
+  selected = false,
+  onSelect,
+}: {
+  artifact: Artifact;
+  selected?: boolean;
+  onSelect: () => void;
+}) {
   return (
-    <button className="artifact-row" type="button">
+    <button className={`artifact-row ${selected ? "selected" : ""}`} type="button" onClick={onSelect}>
       <span className={`file-badge ${artifact.type.toLowerCase()}`}>{iconForArtifact(artifact.type)}</span>
       <span>
         <strong>{artifact.title}</strong>
         <em>
-          {artifact.type} - Final - {artifact.owner} - {artifact.date}
+          {artifact.type} - {artifact.status} - {artifact.owner} - {artifact.date}
         </em>
       </span>
       <MoreHorizontal size={17} />
@@ -1142,13 +1354,7 @@ function ArtifactRow({ artifact }: { artifact: { title: string; type: string; ow
   );
 }
 
-function DecisionView() {
-  const decisions = [
-    ["Approve RAID Copilot pilot", "Due Jun 14", "Owner: Alex Morgan"],
-    ["Confirm stakeholder taxonomy", "Blocked", "Owner: Jordan Lee"],
-    ["Add idea register to packet", "Done", "Owner: Taylor Kim"],
-  ];
-
+function DecisionView({ decisions, onToggle }: { decisions: Decision[]; onToggle: (id: string) => void }) {
   return (
     <div className="decision-view">
       <div className="ideas-toolbar">
@@ -1157,14 +1363,14 @@ function DecisionView() {
           <h2>Open governance actions</h2>
         </div>
       </div>
-      {decisions.map(([title, status, owner]) => (
-        <button className="decision-row" type="button" key={title}>
+      {decisions.map((decision) => (
+        <button className={`decision-row ${decision.status.toLowerCase()}`} type="button" key={decision.id} onClick={() => onToggle(decision.id)}>
           <ClipboardList size={18} />
           <span>
-            <strong>{title}</strong>
-            <em>{owner}</em>
+            <strong>{decision.title}</strong>
+            <em>Owner: {decision.owner}</em>
           </span>
-          <span>{status}</span>
+          <span>{decision.status === "Open" ? decision.due : decision.status}</span>
         </button>
       ))}
     </div>
@@ -1198,6 +1404,111 @@ function PromptView({ onUsePrompt }: { onUsePrompt: (value: string) => void }) {
   );
 }
 
+function TopbarPopover({
+  menu,
+  model,
+  onModel,
+  onClose,
+  onToast,
+}: {
+  menu: Exclude<TopbarMenu, null>;
+  model: string;
+  onModel: (model: string) => void;
+  onClose: () => void;
+  onToast: (message: string) => void;
+}) {
+  const modelOptions = ["GPT 5.5", "Claude Opus 4.6", "Gemini Flash 3.5"];
+
+  return (
+    <div className={`topbar-popover ${menu}`}>
+      <div className="popover-header">
+        <strong>
+          {menu === "notifications" ? "Notifications" : null}
+          {menu === "people" ? "Team members" : null}
+          {menu === "model" ? "Select model" : null}
+          {menu === "workspace" ? "Workspace sources" : null}
+          {menu === "attachment" ? "Attach to chat" : null}
+        </strong>
+        <button type="button" onClick={onClose} aria-label="Close panel">
+          <X size={15} />
+        </button>
+      </div>
+
+      {menu === "notifications" ? (
+        <div className="popover-list">
+          {["Decision taxonomy is still blocked", "RAID Copilot pilot due Friday", "New idea register generated"].map((item) => (
+            <button type="button" key={item} onClick={() => onToast(item)}>
+              <Bell size={16} />
+              <span>{item}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {menu === "people" ? (
+        <div className="member-list">
+          {[
+            ["Alex Morgan", avatarAlex, "PMO lead"],
+            ["Jordan Lee", avatarJordan, "Governance"],
+            ["Taylor Kim", avatarTaylor, "Artifacts"],
+            ["Maya Chen", avatarMaya, "Intake"],
+          ].map(([name, avatar, role]) => (
+            <button type="button" key={name} onClick={() => onToast(`${name} profile opened`)}>
+              <img src={avatar} alt={name} />
+              <span>
+                <strong>{name}</strong>
+                <em>{role}</em>
+              </span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {menu === "model" ? (
+        <div className="popover-list">
+          {modelOptions.map((option) => (
+            <button
+              className={option === model ? "active" : ""}
+              type="button"
+              key={option}
+              onClick={() => {
+                onModel(option);
+                onToast(`${option} selected`);
+                onClose();
+              }}
+            >
+              <Bot size={16} />
+              <span>{option}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {menu === "workspace" ? (
+        <div className="popover-list">
+          {["Pinned knowledge", "Final artifacts", "Decision log", "Prompt templates"].map((source) => (
+            <button type="button" key={source} onClick={() => onToast(`${source} added as context`)}>
+              <Folder size={16} />
+              <span>{source}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {menu === "attachment" ? (
+        <div className="popover-list">
+          {["Upload status report", "Attach risk register", "Attach meeting notes"].map((source) => (
+            <button type="button" key={source} onClick={() => onToast(`${source} queued`)}>
+              <Paperclip size={16} />
+              <span>{source}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SharePopover({ onToast }: { onToast: (message: string) => void }) {
   const options = [
     ["Create magic link", "Anyone with the link can view", Link2],
@@ -1226,6 +1537,79 @@ function SharePopover({ onToast }: { onToast: (message: string) => void }) {
         <AlertTriangle size={15} />
         Links may grant access outside this project. Share responsibly.
       </div>
+    </div>
+  );
+}
+
+function AccessModal({
+  accessLevel,
+  onAccessLevel,
+  onClose,
+  onSave,
+}: {
+  accessLevel: "Read / Write" | "View only";
+  onAccessLevel: (value: "Read / Write" | "View only") => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  const members = [
+    ["Alex Morgan", avatarAlex, "Owner"],
+    ["Jordan Lee", avatarJordan, "Can edit"],
+    ["Taylor Kim", avatarTaylor, "Can edit"],
+    ["Maya Chen", avatarMaya, "Can view"],
+  ];
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal access-modal" aria-label="Manage team access">
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Team access</span>
+            <h2>Manage PMO workspace access</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close modal">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="access-choice">
+          {(["Read / Write", "View only"] as const).map((level) => (
+            <button
+              className={accessLevel === level ? "active" : ""}
+              type="button"
+              key={level}
+              onClick={() => onAccessLevel(level)}
+            >
+              {level === "Read / Write" ? <ShieldCheck size={18} /> : <CheckCircle2 size={18} />}
+              <span>
+                <strong>{level}</strong>
+                <em>{level === "Read / Write" ? "Team can chat, add ideas, and update statuses." : "Team can view the prototype without editing state."}</em>
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <div className="member-list modal-members">
+          {members.map(([name, avatar, role]) => (
+            <div key={name}>
+              <img src={avatar} alt={name} />
+              <span>
+                <strong>{name}</strong>
+                <em>{role}</em>
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary-button" type="button" onClick={onSave}>
+            Save access
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
