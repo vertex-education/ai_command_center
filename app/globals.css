@@ -338,20 +338,29 @@ a.icon-button {
 
 .contextbar {
   display: grid;
-  grid-template-columns: minmax(320px, 1fr) auto;
+  grid-template-columns: minmax(360px, 1fr) auto;
   align-items: center;
   gap: 14px;
-  padding: 18px 22px;
+  padding: 14px 22px;
   border-bottom: 1px solid var(--line);
   background: #fff;
 }
 
 .crumbs {
+  grid-column: 1;
+  grid-row: 2;
   display: flex;
   align-items: center;
   gap: 9px;
   color: #4b5563;
   font-size: 14px;
+}
+
+.crumbs .current,
+.crumbs > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
 }
 
 .crumbs strong {
@@ -360,6 +369,7 @@ a.icon-button {
 
 .mode-tabs {
   grid-column: 1;
+  grid-row: 1;
   display: inline-flex;
   width: fit-content;
   border: 1px solid var(--line);
@@ -368,7 +378,7 @@ a.icon-button {
 }
 
 .mode-tabs button {
-  min-width: 92px;
+  min-width: 118px;
   height: 36px;
   border: 0;
   border-right: 1px solid var(--line);
@@ -480,6 +490,10 @@ a.icon-button {
   margin-top: 18px;
 }
 
+.compact-group {
+  margin-top: 10px;
+}
+
 .nav-group-label {
   justify-content: flex-start;
   gap: 4px;
@@ -535,6 +549,7 @@ a.icon-button {
 }
 
 .section-tabs {
+  flex: 0 0 48px;
   height: 48px;
   display: flex;
   align-items: end;
@@ -567,6 +582,8 @@ a.icon-button {
 .ideas-view,
 .artifact-view,
 .decision-view,
+.approval-view,
+.task-view,
 .prompt-view {
   flex: 1;
   min-height: 0;
@@ -716,9 +733,23 @@ a.icon-button {
 }
 
 .idea-strip {
+  flex: 0 0 auto;
   border-bottom: 1px solid var(--line);
   padding: 14px 18px 12px;
   background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.pinned-strip .idea-strip-grid {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.pinned-strip .idea-card,
+.pinned-strip .pinned-artifact-card {
+  flex: 0 0 228px;
+  min-height: 120px;
 }
 
 .strip-header,
@@ -765,6 +796,16 @@ a.icon-button {
   padding: 12px;
   background: #fff;
   color: #172033;
+  text-align: left;
+}
+
+.idea-card-main {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
   text-align: left;
 }
 
@@ -816,6 +857,54 @@ a.icon-button {
 .idea-card-footer {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.pin-button {
+  width: fit-content;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pinned-artifact-card {
+  min-height: 142px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: #fff;
+  color: #172033;
+  text-align: left;
+}
+
+.pinned-artifact-card strong,
+.pinned-artifact-card em {
+  display: block;
+}
+
+.pinned-artifact-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.pinned-artifact-card em {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: normal;
 }
 
 .avatar-label {
@@ -940,8 +1029,15 @@ a.icon-button {
   margin-bottom: 12px;
 }
 
+.workspace-metric-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
 .metric-card {
-  min-height: 74px;
+  min-height: 76px;
   display: grid;
   gap: 4px;
   border: 1px solid var(--line);
@@ -1308,6 +1404,8 @@ a.icon-button {
 }
 
 .decision-view,
+.approval-view,
+.task-view,
 .prompt-view,
 .artifact-view {
   display: grid;

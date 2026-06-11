@@ -34,9 +34,13 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Official Vertex logo assets from `brand.vertexeducation.com` render in the rail and header.
 - Project switching now loads project-specific chat lists and demo conversations for Vertex Hub, LMS Next Gen, Data Migration, and AI Innovation Lab.
 - Attachment, workspace/web, and model popovers are anchored to the composer and no longer render at the top of the page.
-- Improvement ideas now render above the chat workspace tabs so triage context stays visible while switching between Chat, Ideas, Artifacts, Decisions, and Prompts.
+- Pinned items now render above the workspace tabs so triage context stays visible while switching between Ideas, Artifacts, Decisions, Approvals, Tasks, and Prompt Templates.
 - Artifact rows expose real downloadable Office files from `public/artifacts`, including DOCX, PPTX, and XLSX examples.
 - Artifact preview modal opens from artifact rows and the selected-artifact panel, showing a concise document preview plus a direct download action.
+- Workspace mode tabs now switch between Personal, Team, Personal Project, and Team Project contexts, with dynamic breadcrumbs below the mode tabs.
+- Main workspace tabs now focus on Ideas, Artifacts, Decisions, Approvals, Tasks, and Prompt Templates.
+- The right sidebar now surfaces workspace metrics, pinned artifacts, and selected idea context rather than artifact generation.
+- The left sidebar now includes quick access to global projects, team management, global artifacts, and the prompt catalog.
 
 **Patches Made Since Previous QA Pass**
 - Added stable test IDs and explicit labels for modal, detail, and composer controls.
@@ -49,6 +53,10 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Split composer controls into composer-local popovers so attachment, workspace, and model menus open at the input area.
 - Added generated downloadable Office artifact files and wired them into the artifact list, selected-artifact detail, and preview modal.
 - Moved the improvement idea strip above the tab bar and compacted the cards for the first viewport.
+- Removed create/generate artifact controls and replaced them with pin/unpin actions for workspace-scoped artifacts.
+- Refactored the improvement strip into a pinned-items rail for ideas and artifacts.
+- Added Approvals and Tasks views with realistic PMO follow-ups surfaced from project chats.
+- Fixed pinned-rail layout so workspace tabs keep full-height clickable hit targets.
 
 **Validation Notes**
 - `npm run lint` passed.
@@ -56,6 +64,7 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Browser click validation passed for rail navigation, project switching, decision toggling, access mode saving, notification popover, artifact generation, desktop overflow, and mobile overflow.
 - Browser validation passed for brand logo rendering, LMS/Data Migration project chat switching, project-specific messages, and composer popover anchoring.
 - Browser validation passed for improvement-strip tab order, artifact preview modal content, artifact download links, and local 200 responses for the generated DOCX/PPTX/XLSX files.
+- Browser validation passed for workspace mode switching, dynamic breadcrumbs, artifact pinning, no remaining create/generate artifact buttons, Approvals/Tasks tab switching, and pinned-rail hit targets.
 - Browser text entry validation was partially blocked by the Browser plugin's virtual clipboard path, but the text-entry handlers compile, the fields are rendered, and the add-idea/chat submit logic was validated in the previous pass before this broader interaction expansion.
 
 **Follow-up Polish**

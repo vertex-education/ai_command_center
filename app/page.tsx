@@ -9,7 +9,6 @@ import {
   BarChart3,
   Bell,
   Bot,
-  Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -18,7 +17,6 @@ import {
   Download,
   Eye,
   FileText,
-  Filter,
   Folder,
   FolderOpen,
   Globe2,
@@ -26,10 +24,8 @@ import {
   Link2,
   Menu,
   MessageCircle,
-  MoreHorizontal,
   Paperclip,
   Plus,
-  Rocket,
   Search,
   Send,
   Settings,
@@ -37,7 +33,6 @@ import {
   ShieldCheck,
   Sparkles,
   Star,
-  Target,
   Users,
   X,
   Zap,
@@ -45,8 +40,9 @@ import {
 import { type FormEvent, type ReactNode, useMemo, useState } from "react";
 
 type IdeaStatus = "New" | "Review" | "Pilot" | "Approved" | "Implemented" | "Blocked";
-type TabName = "Chat" | "Ideas" | "Artifacts" | "Decisions" | "Prompts";
+type TabName = "Ideas" | "Artifacts" | "Decisions" | "Approvals" | "Tasks" | "Prompt Templates";
 type RailName = "Chat" | "Projects" | "Teams" | "Artifacts" | "Prompts" | "Settings";
+type WorkspaceMode = "Personal" | "Team" | "Project" | "Team Project";
 type TopbarMenu = "notifications" | "people" | "model" | "workspace" | "attachment" | null;
 type ComposerMenu = "model" | "workspace" | "attachment" | null;
 
@@ -92,6 +88,7 @@ type Artifact = {
   summary: string;
   href: string;
   preview: string[];
+  pinnedTo: Array<"Personal" | "Team" | "Project" | "Team Project">;
 };
 
 type Decision = {
@@ -100,6 +97,22 @@ type Decision = {
   status: "Open" | "Blocked" | "Done";
   owner: string;
   due: string;
+};
+
+type Approval = {
+  id: string;
+  title: string;
+  owner: string;
+  due: string;
+  status: "Needed" | "Requested" | "Approved";
+};
+
+type Task = {
+  id: string;
+  title: string;
+  owner: string;
+  source: string;
+  status: "Open" | "In progress" | "Done";
 };
 
 const avatarAlex =
@@ -603,6 +616,7 @@ const initialArtifacts: Artifact[] = [
       "Highest-value PMO pilots: RAID Copilot, decision capture, and stakeholder summaries.",
       "Key risk: fragmented evidence across project chats and artifact folders.",
     ],
+    pinnedTo: ["Team Project"],
   },
   {
     title: "PMO Improvement Idea Register",
@@ -617,6 +631,7 @@ const initialArtifacts: Artifact[] = [
       "Pilot recommendations prioritize RAID automation and decision log hygiene.",
       "Blocked items need data ownership and intake governance decisions.",
     ],
+    pinnedTo: ["Team", "Team Project"],
   },
   {
     title: "Steering Committee Update",
@@ -631,6 +646,7 @@ const initialArtifacts: Artifact[] = [
       "Decision ask: approve RAID Copilot pilot scope and stakeholder taxonomy refresh.",
       "Next milestone: package final artifacts for committee review.",
     ],
+    pinnedTo: ["Team Project"],
   },
   {
     title: "Launch Readiness Checklist",
@@ -645,6 +661,7 @@ const initialArtifacts: Artifact[] = [
       "Open item: define escalation timing for unresolved UAT risks.",
       "Recommended next step: assign owners for final go-live criteria.",
     ],
+    pinnedTo: ["Project"],
   },
 ];
 
@@ -654,6 +671,19 @@ const initialDecisions: Decision[] = [
   { id: "decision-register", title: "Add idea register to packet", status: "Done", owner: "Taylor Kim", due: "Done" },
 ];
 
+const initialApprovals: Approval[] = [
+  { id: "approval-raid", title: "RAID Copilot pilot scope", owner: "Alex Morgan", due: "Due Jun 14", status: "Needed" },
+  { id: "approval-taxonomy", title: "Stakeholder taxonomy refresh", owner: "Jordan Lee", due: "Requested", status: "Requested" },
+  { id: "approval-register", title: "Publish PMO idea register", owner: "Taylor Kim", due: "Approved Jun 9", status: "Approved" },
+];
+
+const initialTasks: Task[] = [
+  { id: "task-readiness", title: "Assign owners for launch readiness gaps", owner: "Maya Chen", source: "Launch Readiness Checklist", status: "Open" },
+  { id: "task-decision", title: "Send nudges for decisions older than seven days", owner: "Jordan Lee", source: "Decision Log", status: "In progress" },
+  { id: "task-raid", title: "Package RAID Copilot evidence for Steering Committee", owner: "Alex Morgan", source: "Risk & Issues chat", status: "Open" },
+  { id: "task-register", title: "Confirm idea-register scoring with PMO team", owner: "Taylor Kim", source: "Shared Chat", status: "Done" },
+];
+
 const projectChats: Record<string, string[]> = {
   "Vertex Hub": ["Shared Chat", "Roadmap Planning", "Stakeholder Updates", "Risk & Issues", "Decision Log"],
   "LMS Next Gen": ["LMS Shared Chat", "Vendor Planning", "UAT Issues", "Release Decisions"],
@@ -661,7 +691,8 @@ const projectChats: Record<string, string[]> = {
   "AI Innovation Lab": ["AI Lab Shared Chat", "Pilot Intake", "Governance Review", "Adoption Metrics"],
 };
 
-const tabs: TabName[] = ["Chat", "Ideas", "Artifacts", "Decisions", "Prompts"];
+const tabs: TabName[] = ["Ideas", "Artifacts", "Decisions", "Approvals", "Tasks", "Prompt Templates"];
+const workspaceModes: WorkspaceMode[] = ["Personal", "Team", "Project", "Team Project"];
 const statusFilters: Array<IdeaStatus | "All"> = [
   "All",
   "New",
@@ -698,7 +729,7 @@ function iconForArtifact(type: "doc" | "ppt" | "sheet" | string) {
 export default function Home() {
   const [ideas, setIdeas] = useState<Idea[]>(initialIdeas);
   const [selectedIdeaId, setSelectedIdeaId] = useState(initialIdeas[0].id);
-  const [activeTab, setActiveTab] = useState<TabName>("Chat");
+  const [activeTab, setActiveTab] = useState<TabName>("Ideas");
   const [statusFilter, setStatusFilter] = useState<IdeaStatus | "All">("All");
   const [searchTerm, setSearchTerm] = useState("");
   const [isAddOpen, setIsAddOpen] = useState(false);
@@ -711,7 +742,7 @@ export default function Home() {
   const [activeRail, setActiveRail] = useState<RailName>("Chat");
   const [activeProject, setActiveProject] = useState("Vertex Hub");
   const [activeChat, setActiveChat] = useState("Shared Chat");
-  const [activeMode, setActiveMode] = useState("Team Project");
+  const [activeMode, setActiveMode] = useState<WorkspaceMode>("Team Project");
   const [topbarMenu, setTopbarMenu] = useState<TopbarMenu>(null);
   const [composerMenu, setComposerMenu] = useState<ComposerMenu>(null);
   const [isAccessOpen, setIsAccessOpen] = useState(false);
@@ -721,9 +752,28 @@ export default function Home() {
   const [selectedArtifactTitle, setSelectedArtifactTitle] = useState(initialArtifacts[1].title);
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [decisions, setDecisions] = useState<Decision[]>(initialDecisions);
+  const [approvals, setApprovals] = useState<Approval[]>(initialApprovals);
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [pinnedIdeaIds, setPinnedIdeaIds] = useState<string[]>([initialIdeas[0].id, initialIdeas[1].id]);
 
   const selectedIdea = ideas.find((idea) => idea.id === selectedIdeaId) ?? ideas[0];
   const selectedArtifact = artifacts.find((artifact) => artifact.title === selectedArtifactTitle) ?? artifacts[0];
+  const workspaceTitle =
+    activeMode === "Personal"
+      ? "Personal workspace"
+      : activeMode === "Team"
+        ? "PMO Team workspace"
+        : activeMode === "Project"
+          ? `${activeProject} personal project`
+          : `${activeProject} team project`;
+  const breadcrumbs =
+    activeMode === "Personal"
+      ? ["Personal Workspace"]
+      : activeMode === "Team"
+        ? ["PMO Team", "Team Workspace"]
+        : activeMode === "Project"
+          ? ["Personal Workspace", activeProject, activeChat]
+          : ["PMO Team", activeProject, activeChat];
   const conversationKey = `${activeProject}::${activeChat}`;
   const currentMessages = conversations[conversationKey] ?? [
     {
@@ -743,9 +793,14 @@ export default function Home() {
     });
   }, [ideas, searchTerm, statusFilter]);
 
-  const score = Math.round(
-    ideas.reduce((total, idea) => total + idea.impact * (idea.confidence / 100), 0) / ideas.length,
-  );
+  const pinnedIdeas = ideas.filter((idea) => pinnedIdeaIds.includes(idea.id));
+  const pinnedArtifacts = artifacts.filter((artifact) => artifact.pinnedTo.includes(activeMode));
+  const workspaceMetrics = [
+    { label: "Decisions needed", value: decisions.filter((decision) => decision.status !== "Done").length, icon: <ClipboardList size={18} /> },
+    { label: "Tasks surfaced", value: tasks.filter((task) => task.status !== "Done").length, icon: <CheckCircle2 size={18} /> },
+    { label: "Approvals needed", value: approvals.filter((approval) => approval.status !== "Approved").length, icon: <ShieldCheck size={18} /> },
+    { label: "Artifacts pinned", value: pinnedArtifacts.length, icon: <Archive size={18} /> },
+  ];
 
   function updateToast(message: string) {
     setToast(message);
@@ -840,9 +895,9 @@ export default function Home() {
 
   function handleRailClick(label: RailName) {
     setActiveRail(label);
-    if (label === "Chat" || label === "Projects") setActiveTab("Chat");
+    if (label === "Chat" || label === "Projects") setActiveTab("Ideas");
     if (label === "Artifacts") setActiveTab("Artifacts");
-    if (label === "Prompts") setActiveTab("Prompts");
+    if (label === "Prompts") setActiveTab("Prompt Templates");
     if (label === "Teams") setTopbarMenu("people");
     if (label === "Settings") setIsAccessOpen(true);
     updateToast(`${label} opened`);
@@ -851,7 +906,7 @@ export default function Home() {
   function handleProjectSelect(project: string) {
     setActiveProject(project);
     setActiveChat(projectChats[project]?.[0] ?? "Shared Chat");
-    setActiveTab("Chat");
+    setActiveTab("Ideas");
     setComposerMenu(null);
     setRightOpen(true);
     updateToast(`${project} selected`);
@@ -859,30 +914,32 @@ export default function Home() {
 
   function handleChatSelect(chat: string) {
     setActiveChat(chat);
-    setActiveTab(chat === "Decision Log" ? "Decisions" : "Chat");
+    setActiveTab(chat.includes("Decision") ? "Decisions" : "Ideas");
     setComposerMenu(null);
     updateToast(`${chat} opened`);
   }
 
-  function handleCreateArtifact() {
-    const generated: Artifact = {
-      title: `Idea Summary ${artifacts.length + 1}`,
-      type: "DOCX",
-      owner: "PMO Assistant",
-      date: "Just now",
-      status: "Draft",
-      summary: `Draft summary generated from ${selectedIdea.title}, including owner, evidence, impact, effort, and next step.`,
-      href: "/artifacts/generated-idea-summary.docx",
-      preview: [
-        `Idea: ${selectedIdea.title}`,
-        `Owner: ${selectedIdea.owner}; status: ${statusMeta[selectedIdea.status].label}.`,
-        `Recommended next step: ${selectedIdea.nextStep}`,
-      ],
-    };
-    setArtifacts((current) => [generated, ...current]);
-    setSelectedArtifactTitle(generated.title);
-    setActiveTab("Artifacts");
-    updateToast("Artifact created from current idea");
+  function toggleArtifactPin(artifact: Artifact) {
+    setArtifacts((current) =>
+      current.map((item) => {
+        if (item.title !== artifact.title) return item;
+        const isPinned = item.pinnedTo.includes(activeMode);
+        return {
+          ...item,
+          pinnedTo: isPinned
+            ? item.pinnedTo.filter((mode) => mode !== activeMode)
+            : [...item.pinnedTo, activeMode],
+        };
+      }),
+    );
+    updateToast(`${artifact.title} ${artifact.pinnedTo.includes(activeMode) ? "unpinned from" : "pinned to"} ${workspaceTitle}`);
+  }
+
+  function toggleIdeaPin(id: string) {
+    setPinnedIdeaIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+    updateToast("Pinned items updated");
   }
 
   function toggleDecisionStatus(id: string) {
@@ -954,23 +1011,25 @@ export default function Home() {
           </header>
 
           <section className="contextbar">
-            <div className="crumbs" aria-label="Breadcrumb">
-              <span>PMO Team</span>
-              <ChevronRight size={14} />
-              <span>{activeProject}</span>
-              <ChevronRight size={14} />
-              <strong>{activeChat}</strong>
-              <Star size={16} fill="#9aa4b2" strokeWidth={0} />
-            </div>
-            <div className="mode-tabs" aria-label="Chat mode">
-              {["Personal", "Team Chat", "Project", "Team Project"].map((item) => (
+            <div className="mode-tabs" aria-label="Workspace mode">
+              {workspaceModes.map((item) => (
                 <button className={item === activeMode ? "active" : ""} type="button" key={item} onClick={() => {
                   setActiveMode(item);
+                  setRightOpen(true);
                   updateToast(`${item} mode selected`);
                 }}>
-                  {item}
+                  {item === "Project" ? "Personal Project" : item}
                 </button>
               ))}
+            </div>
+            <div className="crumbs" aria-label="Breadcrumb">
+              {breadcrumbs.map((crumb, index) => (
+                <span className={index === breadcrumbs.length - 1 ? "current" : ""} key={`${crumb}-${index}`}>
+                  {index > 0 ? <ChevronRight size={14} /> : null}
+                  {index === breadcrumbs.length - 1 ? <strong>{crumb}</strong> : <span>{crumb}</span>}
+                </span>
+              ))}
+              <Star size={16} fill="#9aa4b2" strokeWidth={0} />
             </div>
             <div className="access-block">
               <ShieldCheck size={18} />
@@ -997,22 +1056,25 @@ export default function Home() {
               chats={projectChats[activeProject] ?? projectChats["Vertex Hub"]}
               onProjectSelect={handleProjectSelect}
               onChatSelect={handleChatSelect}
-              onAdd={() => {
-                setIsAddOpen(true);
-                updateToast("Capture form opened");
-              }}
+              onQuickAccess={(target) => updateToast(`${target} opened`)}
             />
 
             <section className="main-panel" aria-label="Shared chat workspace">
-              <ImprovementStrip
-                ideas={filteredIdeas}
+              <PinnedStrip
+                title={workspaceTitle}
+                pinnedIdeas={pinnedIdeas}
+                pinnedArtifacts={pinnedArtifacts}
                 selectedIdeaId={selectedIdea.id}
                 onSelectIdea={(id) => {
                   setSelectedIdeaId(id);
+                  setActiveTab("Ideas");
                   setRightOpen(true);
                 }}
-                onOpenIdeas={() => setActiveTab("Ideas")}
-                onAddIdea={() => setIsAddOpen(true)}
+                onSelectArtifact={(artifact) => {
+                  setSelectedArtifactTitle(artifact.title);
+                  setActiveTab("Artifacts");
+                }}
+                onOpenPins={() => setActiveTab("Artifacts")}
               />
 
               <div className="section-tabs" role="tablist" aria-label="Workspace tabs">
@@ -1026,17 +1088,14 @@ export default function Home() {
                     onClick={() => setActiveTab(tab)}
                   >
                     {tab === "Ideas" ? <Lightbulb size={16} /> : null}
-                    {tab === "Artifacts" ? <CheckCircle2 size={16} /> : null}
+                    {tab === "Artifacts" ? <Archive size={16} /> : null}
+                    {tab === "Approvals" ? <ShieldCheck size={16} /> : null}
+                    {tab === "Tasks" ? <CheckCircle2 size={16} /> : null}
+                    {tab === "Prompt Templates" ? <Sparkles size={16} /> : null}
                     {tab}
                   </button>
                 ))}
               </div>
-
-              {activeTab === "Chat" ? (
-                <ChatView
-                  messages={currentMessages}
-                />
-              ) : null}
 
               {activeTab === "Ideas" ? (
                 <IdeasView
@@ -1044,12 +1103,15 @@ export default function Home() {
                   selectedIdeaId={selectedIdea.id}
                   searchTerm={searchTerm}
                   statusFilter={statusFilter}
+                  sourceChat={activeChat}
                   onSearch={setSearchTerm}
                   onFilter={setStatusFilter}
                   onSelectIdea={(id) => {
                     setSelectedIdeaId(id);
                     setRightOpen(true);
                   }}
+                  pinnedIdeaIds={pinnedIdeaIds}
+                  onTogglePin={toggleIdeaPin}
                   onAddIdea={() => setIsAddOpen(true)}
                 />
               ) : null}
@@ -1064,13 +1126,16 @@ export default function Home() {
                     updateToast(`${artifact.title} selected`);
                   }}
                   onShare={() => setShareOpen((current) => !current)}
-                  onCreateArtifact={handleCreateArtifact}
+                  activeMode={activeMode}
+                  onTogglePin={toggleArtifactPin}
                   onPreview={setPreviewArtifact}
                 />
               ) : null}
 
               {activeTab === "Decisions" ? <DecisionView decisions={decisions} onToggle={toggleDecisionStatus} /> : null}
-              {activeTab === "Prompts" ? <PromptView onUsePrompt={setChatInput} /> : null}
+              {activeTab === "Approvals" ? <ApprovalView approvals={approvals} onToggle={(id) => setApprovals((current) => current.map((item) => item.id === id ? { ...item, status: item.status === "Approved" ? "Needed" : "Approved", due: item.status === "Approved" ? "Due this week" : "Approved just now" } : item))} /> : null}
+              {activeTab === "Tasks" ? <TaskView tasks={tasks} onToggle={(id) => setTasks((current) => current.map((item) => item.id === id ? { ...item, status: item.status === "Done" ? "Open" : "Done" } : item))} /> : null}
+              {activeTab === "Prompt Templates" ? <PromptView onUsePrompt={setChatInput} /> : null}
 
               <form className="composer" onSubmit={handleSend}>
                 <input
@@ -1107,27 +1172,29 @@ export default function Home() {
             </section>
 
             {rightOpen ? (
-              <aside className="detail-panel" aria-label="Project workspace and idea detail">
+              <aside className="detail-panel" aria-label="Workspace metrics and pinned items">
                 <div className="panel-header">
                   <div>
-                    <span className="eyebrow">Project workspace</span>
-                    <h2>PMO Improvement Queue</h2>
+                    <span className="eyebrow">{activeMode} workspace</span>
+                    <h2>{workspaceTitle}</h2>
                   </div>
                   <button className="icon-button" type="button" onClick={() => setRightOpen(false)} aria-label="Collapse details">
                     <ChevronDown size={18} />
                   </button>
                 </div>
 
-                <div className="score-row">
-                  <MetricCard icon={<Target size={18} />} label="Priority score" value={`${score}`} />
-                  <MetricCard icon={<Rocket size={18} />} label="In flight" value={`${ideas.filter((idea) => idea.status === "Pilot").length}`} />
-                  <MetricCard icon={<Check size={18} />} label="Done" value={`${ideas.filter((idea) => idea.status === "Implemented").length}`} />
+                <div className="workspace-metric-list">
+                  {workspaceMetrics.map((metric) => (
+                    <MetricCard icon={metric.icon} label={metric.label} value={`${metric.value}`} key={metric.label} />
+                  ))}
                 </div>
 
                 <IdeaDetail
                   idea={selectedIdea}
                   onVote={voteSelectedIdea}
                   onStatusChange={changeSelectedStatus}
+                  isPinned={pinnedIdeaIds.includes(selectedIdea.id)}
+                  onTogglePin={() => toggleIdeaPin(selectedIdea.id)}
                   onShare={() => {
                     setShareOpen((current) => !current);
                     updateToast("Share menu opened");
@@ -1136,17 +1203,17 @@ export default function Home() {
 
                 <section className="workspace-card">
                   <div className="card-title-row">
-                    <h3>Final Artifacts</h3>
+                    <h3>Pinned Artifacts</h3>
                     <button type="button" onClick={() => setActiveTab("Artifacts")}>
                       View all
                     </button>
                   </div>
                   <div className="artifact-list compact">
-                    {artifacts.slice(0, 3).map((artifact) => (
+                    {(pinnedArtifacts.length ? pinnedArtifacts : artifacts.slice(0, 2)).map((artifact) => (
                       <ArtifactRow artifact={artifact} selected={artifact.title === selectedArtifact.title} onSelect={() => {
                         setSelectedArtifactTitle(artifact.title);
                         setActiveTab("Artifacts");
-                      }} onPreview={() => setPreviewArtifact(artifact)} key={artifact.title} />
+                      }} onPreview={() => setPreviewArtifact(artifact)} onTogglePin={() => toggleArtifactPin(artifact)} pinned={artifact.pinnedTo.includes(activeMode)} key={artifact.title} />
                     ))}
                   </div>
                 </section>
@@ -1154,7 +1221,9 @@ export default function Home() {
                 <section className="workspace-card artifact-detail-card">
                   <div className="card-title-row">
                     <h3>Selected Artifact</h3>
-                    <button type="button" onClick={handleCreateArtifact}>Generate new</button>
+                    <button type="button" onClick={() => toggleArtifactPin(selectedArtifact)}>
+                      {selectedArtifact.pinnedTo.includes(activeMode) ? "Unpin" : "Pin here"}
+                    </button>
                   </div>
                   <p>{selectedArtifact.summary}</p>
                   <span className="artifact-detail-meta">{selectedArtifact.type} - {selectedArtifact.status} - {selectedArtifact.owner}</span>
@@ -1236,24 +1305,36 @@ function ProjectNav({
   chats,
   onProjectSelect,
   onChatSelect,
-  onAdd,
+  onQuickAccess,
 }: {
   activeProject: string;
   activeChat: string;
   chats: string[];
   onProjectSelect: (project: string) => void;
   onChatSelect: (chat: string) => void;
-  onAdd: () => void;
+  onQuickAccess: (target: string) => void;
 }) {
   const teamProjects = ["Vertex Hub", "LMS Next Gen", "Data Migration", "AI Innovation Lab"];
+  const quickAccess = [
+    ["Global Projects", FolderOpen],
+    ["Team Management", Users],
+    ["Global Artifacts", Archive],
+    ["Prompt Catalog", Sparkles],
+  ] as const;
 
   return (
     <aside className="project-nav" aria-label="Project navigation">
       <div className="nav-section-heading">
-        <span>Projects</span>
-        <button className="nav-add-button" type="button" aria-label="Add project idea" onClick={onAdd}>
-          <Plus size={17} />
-        </button>
+        <span>Quick access</span>
+      </div>
+
+      <div className="nav-group compact-group">
+        {quickAccess.map(([label, Icon]) => (
+          <button className="nav-link" type="button" key={label} onClick={() => onQuickAccess(label)}>
+            <Icon size={15} />
+            <span>{label}</span>
+          </button>
+        ))}
       </div>
 
       <div className="nav-group">
@@ -1299,90 +1380,55 @@ function ProjectNav({
   );
 }
 
-function ChatView({
-  messages,
-}: {
-  messages: ChatMessage[];
-}) {
-  return (
-    <div className="chat-view">
-      <div className="messages">
-        {messages.map((message) => (
-          <article className={`message ${message.role}`} key={message.id}>
-            {message.role === "assistant" ? (
-              <div className="assistant-avatar">V</div>
-            ) : (
-              <img className="message-avatar" src={message.avatar} alt={message.author} />
-            )}
-            <div className="message-body">
-              <div className="message-meta">
-                <strong>{message.author}</strong>
-                {message.role === "assistant" ? <span className="model-chip">GPT 5.5</span> : null}
-                <span>{message.time}</span>
-              </div>
-              <p>{message.text}</p>
-              {message.artifact ? (
-                <button className={`artifact-card ${message.artifact.type}`} type="button">
-                  <span className="artifact-icon">{iconForArtifact(message.artifact.type)}</span>
-                  <span>
-                    <strong>{message.artifact.title}</strong>
-                    <em>{message.artifact.meta}</em>
-                  </span>
-                  <ChevronRight size={17} />
-                </button>
-              ) : null}
-            </div>
-          </article>
-        ))}
-
-        <div className="pin-note">
-          <Sparkles size={17} />
-          <span>Assistant extracted 6 improvement ideas from this chat and linked them to final artifacts.</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ImprovementStrip({
-  ideas,
+function PinnedStrip({
+  title,
+  pinnedIdeas,
+  pinnedArtifacts,
   selectedIdeaId,
   onSelectIdea,
-  onOpenIdeas,
-  onAddIdea,
+  onSelectArtifact,
+  onOpenPins,
 }: {
-  ideas: Idea[];
+  title: string;
+  pinnedIdeas: Idea[];
+  pinnedArtifacts: Artifact[];
   selectedIdeaId: string;
   onSelectIdea: (id: string) => void;
-  onOpenIdeas: () => void;
-  onAddIdea: () => void;
+  onSelectArtifact: (artifact: Artifact) => void;
+  onOpenPins: () => void;
 }) {
   return (
-    <section className="idea-strip" aria-label="Improvement ideas from chat">
+    <section className="idea-strip pinned-strip" aria-label="Pinned workspace items">
       <div className="strip-header">
         <div>
-          <span className="eyebrow">Improvement ideas</span>
-          <h2>Ready for PMO triage</h2>
+          <span className="eyebrow">Pinned items</span>
+          <h2>{title}</h2>
         </div>
         <div className="strip-actions">
-          <button className="secondary-button" type="button" onClick={onOpenIdeas}>
-            <Filter size={16} />
-            Open filters
-          </button>
-          <button className="primary-button" type="button" data-testid="open-add-idea" onClick={onAddIdea}>
-            <Plus size={16} />
-            Add idea
+          <button className="secondary-button" type="button" onClick={onOpenPins}>
+            <Star size={16} />
+            Manage pins
           </button>
         </div>
       </div>
       <div className="idea-strip-grid">
-        {ideas.slice(0, 3).map((idea) => (
+        {pinnedIdeas.slice(0, 2).map((idea) => (
           <IdeaCard
             idea={idea}
             selected={idea.id === selectedIdeaId}
             onSelect={() => onSelectIdea(idea.id)}
             key={idea.id}
           />
+        ))}
+        {pinnedArtifacts.slice(0, 2).map((artifact) => (
+          <button className="pinned-artifact-card" type="button" onClick={() => onSelectArtifact(artifact)} key={artifact.title}>
+            <span className={`file-badge ${artifact.type.toLowerCase()}`}>{iconForArtifact(artifact.type)}</span>
+            <span>
+              <strong>{artifact.title}</strong>
+              <em>{artifact.type} - {artifact.status} - {artifact.owner}</em>
+            </span>
+            <Star size={15} fill="#f2b84b" strokeWidth={0} />
+          </button>
         ))}
       </div>
     </section>
@@ -1394,30 +1440,36 @@ function IdeasView({
   selectedIdeaId,
   searchTerm,
   statusFilter,
+  sourceChat,
   onSearch,
   onFilter,
   onSelectIdea,
+  pinnedIdeaIds,
+  onTogglePin,
   onAddIdea,
 }: {
   ideas: Idea[];
   selectedIdeaId: string;
   searchTerm: string;
   statusFilter: IdeaStatus | "All";
+  sourceChat: string;
   onSearch: (value: string) => void;
   onFilter: (value: IdeaStatus | "All") => void;
   onSelectIdea: (id: string) => void;
+  pinnedIdeaIds: string[];
+  onTogglePin: (id: string) => void;
   onAddIdea: () => void;
 }) {
   return (
     <div className="ideas-view">
       <div className="ideas-toolbar">
         <div>
-          <span className="eyebrow">Shared improvement backlog</span>
-          <h2>{ideas.length} ideas visible</h2>
+          <span className="eyebrow">Generated from chat</span>
+          <h2>{ideas.length} ideas surfaced from {sourceChat}</h2>
         </div>
-        <button className="primary-button" type="button" data-testid="open-add-idea" onClick={onAddIdea}>
+        <button className="secondary-button" type="button" data-testid="open-add-idea" onClick={onAddIdea}>
           <Plus size={16} />
-          Add idea
+          Capture manual idea
         </button>
       </div>
 
@@ -1451,6 +1503,8 @@ function IdeasView({
               idea={idea}
               selected={idea.id === selectedIdeaId}
               onSelect={() => onSelectIdea(idea.id)}
+              pinned={pinnedIdeaIds.includes(idea.id)}
+              onTogglePin={() => onTogglePin(idea.id)}
               key={idea.id}
               wide
             />
@@ -1471,15 +1525,19 @@ function IdeaCard({
   idea,
   selected,
   onSelect,
+  pinned = false,
+  onTogglePin,
   wide = false,
 }: {
   idea: Idea;
   selected: boolean;
   onSelect: () => void;
+  pinned?: boolean;
+  onTogglePin?: () => void;
   wide?: boolean;
 }) {
   return (
-    <button className={`idea-card ${selected ? "selected" : ""} ${wide ? "wide" : ""}`} type="button" onClick={onSelect}>
+    <article className={`idea-card ${selected ? "selected" : ""} ${wide ? "wide" : ""}`}>
       <div className="idea-card-top">
         <StatusChip status={idea.status} />
         <span className="vote-pill">
@@ -1487,8 +1545,10 @@ function IdeaCard({
           {idea.votes}
         </span>
       </div>
-      <h3>{idea.title}</h3>
-      <p>{idea.summary}</p>
+      <button className="idea-card-main" type="button" onClick={onSelect}>
+        <h3>{idea.title}</h3>
+        <p>{idea.summary}</p>
+      </button>
       <div className="idea-card-footer">
         <span className="avatar-label">
           <img src={idea.avatar} alt={idea.owner} />
@@ -1496,11 +1556,17 @@ function IdeaCard({
         </span>
         <span>{idea.category}</span>
       </div>
+      {onTogglePin ? (
+        <button className="pin-button" type="button" onClick={onTogglePin}>
+          <Star size={14} fill={pinned ? "#f2b84b" : "none"} />
+          {pinned ? "Pinned" : "Pin"}
+        </button>
+      ) : null}
       <div className="score-bars" aria-label="Impact and effort score">
         <span style={{ width: `${idea.impact}%` }} />
         <span style={{ width: `${idea.effort}%` }} />
       </div>
-    </button>
+    </article>
   );
 }
 
@@ -1523,11 +1589,15 @@ function IdeaDetail({
   idea,
   onVote,
   onStatusChange,
+  isPinned,
+  onTogglePin,
   onShare,
 }: {
   idea: Idea;
   onVote: () => void;
   onStatusChange: (status: IdeaStatus) => void;
+  isPinned: boolean;
+  onTogglePin: () => void;
   onShare: () => void;
 }) {
   return (
@@ -1537,8 +1607,8 @@ function IdeaDetail({
           <StatusChip status={idea.status} />
           <h3>{idea.title}</h3>
         </div>
-        <button className="icon-button" type="button" aria-label="More options">
-          <MoreHorizontal size={18} />
+        <button className="icon-button" type="button" onClick={onTogglePin} aria-label={isPinned ? "Unpin idea" : "Pin idea"}>
+          <Star size={18} fill={isPinned ? "#f2b84b" : "none"} />
         </button>
       </div>
 
@@ -1577,6 +1647,10 @@ function IdeaDetail({
         <button className="secondary-button" type="button" data-testid="detail-share" onClick={onShare}>
           <Share2 size={16} />
           Share
+        </button>
+        <button className="secondary-button" type="button" onClick={onTogglePin}>
+          <Star size={16} fill={isPinned ? "#f2b84b" : "none"} />
+          {isPinned ? "Unpin" : "Pin"}
         </button>
       </div>
 
@@ -1628,30 +1702,28 @@ function ArtifactView({
   selectedArtifact,
   onSelect,
   onShare,
-  onCreateArtifact,
+  activeMode,
+  onTogglePin,
   onPreview,
 }: {
   artifacts: Artifact[];
   selectedArtifact: Artifact;
   onSelect: (artifact: Artifact) => void;
   onShare: () => void;
-  onCreateArtifact: () => void;
+  activeMode: WorkspaceMode;
+  onTogglePin: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
 }) {
   return (
     <div className="artifact-view">
       <div className="ideas-toolbar">
         <div>
-          <span className="eyebrow">Final artifacts</span>
-          <h2>Steering Committee packet</h2>
+          <span className="eyebrow">Global artifact list</span>
+          <h2>Pin artifacts to {activeMode === "Project" ? "personal project" : activeMode.toLowerCase()} workspace</h2>
         </div>
         <button className="secondary-button" type="button" data-testid="detail-share" onClick={onShare}>
           <Share2 size={16} />
           Share artifact
-        </button>
-        <button className="primary-button" type="button" onClick={onCreateArtifact}>
-          <Plus size={16} />
-          Create artifact
         </button>
       </div>
       <div className="artifact-list">
@@ -1661,6 +1733,8 @@ function ArtifactView({
             selected={artifact.title === selectedArtifact.title}
             onSelect={() => onSelect(artifact)}
             onPreview={() => onPreview(artifact)}
+            onTogglePin={() => onTogglePin(artifact)}
+            pinned={artifact.pinnedTo.includes(activeMode)}
             key={artifact.title}
           />
         ))}
@@ -1675,6 +1749,10 @@ function ArtifactView({
           <span>{selectedArtifact.owner}</span>
         </div>
         <div className="artifact-detail-actions">
+          <button className="secondary-button" type="button" onClick={() => onTogglePin(selectedArtifact)}>
+            <Star size={16} fill={selectedArtifact.pinnedTo.includes(activeMode) ? "#f2b84b" : "none"} />
+            {selectedArtifact.pinnedTo.includes(activeMode) ? "Unpin from workspace" : "Pin to workspace"}
+          </button>
           <button className="secondary-button" type="button" onClick={() => onPreview(selectedArtifact)}>
             <Eye size={16} />
             Preview file
@@ -1694,11 +1772,15 @@ function ArtifactRow({
   selected = false,
   onSelect,
   onPreview,
+  onTogglePin,
+  pinned = false,
 }: {
   artifact: Artifact;
   selected?: boolean;
   onSelect: () => void;
   onPreview: () => void;
+  onTogglePin: () => void;
+  pinned?: boolean;
 }) {
   return (
     <div className={`artifact-row ${selected ? "selected" : ""}`}>
@@ -1714,6 +1796,9 @@ function ArtifactRow({
       <div className="artifact-row-actions">
         <button className="icon-button" type="button" onClick={onPreview} aria-label={`Preview ${artifact.title}`}>
           <Eye size={16} />
+        </button>
+        <button className="icon-button" type="button" onClick={onTogglePin} aria-label={pinned ? `Unpin ${artifact.title}` : `Pin ${artifact.title}`}>
+          <Star size={16} fill={pinned ? "#f2b84b" : "none"} />
         </button>
         <a className="icon-button" href={artifact.href} download aria-label={`Download ${artifact.title}`}>
           <Download size={16} />
@@ -1740,6 +1825,52 @@ function DecisionView({ decisions, onToggle }: { decisions: Decision[]; onToggle
             <em>Owner: {decision.owner}</em>
           </span>
           <span>{decision.status === "Open" ? decision.due : decision.status}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ApprovalView({ approvals, onToggle }: { approvals: Approval[]; onToggle: (id: string) => void }) {
+  return (
+    <div className="approval-view">
+      <div className="ideas-toolbar">
+        <div>
+          <span className="eyebrow">Approvals</span>
+          <h2>{approvals.filter((approval) => approval.status !== "Approved").length} approvals need attention</h2>
+        </div>
+      </div>
+      {approvals.map((approval) => (
+        <button className={`decision-row approval-${approval.status.toLowerCase()}`} type="button" key={approval.id} onClick={() => onToggle(approval.id)}>
+          <ShieldCheck size={18} />
+          <span>
+            <strong>{approval.title}</strong>
+            <em>Approver: {approval.owner}</em>
+          </span>
+          <span>{approval.status === "Approved" ? "Approved" : approval.due}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function TaskView({ tasks, onToggle }: { tasks: Task[]; onToggle: (id: string) => void }) {
+  return (
+    <div className="task-view">
+      <div className="ideas-toolbar">
+        <div>
+          <span className="eyebrow">Tasks surfaced from chats</span>
+          <h2>{tasks.filter((task) => task.status !== "Done").length} open follow-ups</h2>
+        </div>
+      </div>
+      {tasks.map((task) => (
+        <button className={`decision-row task-${task.status.toLowerCase().replace(" ", "-")}`} type="button" key={task.id} onClick={() => onToggle(task.id)}>
+          <CheckCircle2 size={18} />
+          <span>
+            <strong>{task.title}</strong>
+            <em>{task.source} - Owner: {task.owner}</em>
+          </span>
+          <span>{task.status}</span>
         </button>
       ))}
     </div>
