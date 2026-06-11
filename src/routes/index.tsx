@@ -406,7 +406,7 @@ function PMOCommandCenter() {
                 ))}
               </div>
 
-              <section className="scrollbar-thin min-h-0 flex-1 overflow-auto p-4">
+              <section className="scrollbar-thin min-h-0 flex-1 overflow-auto p-4 pb-32">
                 {activeTab === "Chat" ? <ChatView messages={currentMessages} /> : null}
                 {activeTab === "Ideas" ? (
                   <IdeasView
@@ -460,7 +460,10 @@ function PMOCommandCenter() {
                 ) : null}
               </section>
 
-              <form className="grid grid-cols-[minmax(0,1fr)_38px_38px_auto_44px] gap-2 border-t bg-card p-3 max-sm:grid-cols-[minmax(0,1fr)_38px_44px]" onSubmit={handleSendMessage}>
+              <form
+                className="fixed inset-x-3 bottom-3 z-50 grid grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42_/_0.22)] backdrop-blur lg:left-[368px] lg:right-[416px] xl:left-[388px] xl:right-[426px] xl:grid-cols-[minmax(0,1fr)_38px_38px_auto_44px]"
+                onSubmit={handleSendMessage}
+              >
                 <Input
                   aria-label="Ask the PMO assistant"
                   placeholder={`Ask about ${activeProject} / ${activeChat}`}
@@ -473,7 +476,7 @@ function PMOCommandCenter() {
                 <Button type="button" variant="outline" size="icon" aria-label="Add workspace context" onClick={() => updateToast("Workspace context added")}>
                   <Folder />
                 </Button>
-                <Button type="button" variant="outline" className="max-sm:hidden" onClick={() => updateToast(`${model} ready`)}>
+                <Button type="button" variant="outline" className="hidden xl:inline-flex" onClick={() => updateToast(`${model} ready`)}>
                   <Bot />
                   {model}
                   <ChevronDown />
@@ -523,7 +526,7 @@ function PMOCommandCenter() {
           </div>
         </section>
 
-        <div className="absolute right-4 bottom-4 z-40 flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs font-medium shadow-lg">
+        <div className="fixed right-4 bottom-24 z-40 flex items-center gap-2 rounded-md border bg-card px-3 py-2 text-xs font-medium shadow-lg">
           <span className="size-2 rounded-full bg-success" />
           {toast}
         </div>
