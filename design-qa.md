@@ -25,12 +25,25 @@ focused region comparison evidence: Focused checks covered the top navigation, l
 - Share opens the sharing popover.
 - Composer sends a user message and renders an assistant response in the Chat tab.
 - Mobile 390x844 validation has no horizontal overflow and hides desktop rail/project navigation.
+- Primary rail switches workspace tabs.
+- Project and chat navigation update breadcrumb/context state.
+- Decision rows toggle status between open and done.
+- Manage access opens an access modal and persists the chosen view/edit mode in the access block.
+- Notifications, model, workspace, and attachment popovers open and close from visible controls.
+- Artifact rows select an artifact, and Create artifact generates a new draft artifact from the current idea.
 
 **Patches Made Since Previous QA Pass**
 - Added stable test IDs and explicit labels for modal, detail, and composer controls.
 - Constrained desktop app frame height so chat panels scroll internally and the composer stays visible.
 - Added `min-height: 0` and hidden overflow to the workspace shell so grid children respect viewport height.
 - Styled nested panel scrollbars to reduce visual noise.
+- Added full stateful interactions for rail navigation, project/chat selection, access management, topbar popovers, artifact selection/generation, and decision status toggles.
+
+**Validation Notes**
+- `npm run lint` passed.
+- `npm run build` passed.
+- Browser click validation passed for rail navigation, project switching, decision toggling, access mode saving, notification popover, artifact generation, desktop overflow, and mobile overflow.
+- Browser text entry validation was partially blocked by the Browser plugin's virtual clipboard path, but the text-entry handlers compile, the fields are rendered, and the add-idea/chat submit logic was validated in the previous pass before this broader interaction expansion.
 
 **Follow-up Polish**
 - A future iteration could add a mobile bottom navigation and richer artifact share states, but these are not blockers for the requested clickable prototype.
