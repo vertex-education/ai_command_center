@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ai-command-center",
+  "main": "./dist/server/index.js",
+  "compatibility_date": "2026-06-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist/client"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-command-center-db",
+      "database_id": "e2df7e4e-5fa5-4d64-9882-f82ab7cf69be"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "ARTIFACTS_BUCKET",
+      "bucket_name": "ai-command-center-artifacts"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
