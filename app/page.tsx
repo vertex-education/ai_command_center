@@ -15,6 +15,8 @@ import {
   ChevronRight,
   ClipboardList,
   Clock3,
+  Download,
+  Eye,
   FileText,
   Filter,
   Folder,
@@ -88,6 +90,8 @@ type Artifact = {
   date: string;
   status: "Final" | "Draft" | "Pinned";
   summary: string;
+  href: string;
+  preview: string[];
 };
 
 type Decision = {
@@ -593,6 +597,12 @@ const initialArtifacts: Artifact[] = [
     date: "May 10, 2026",
     status: "Final",
     summary: "Executive-ready roadmap narrative with milestones, risks, and PMO improvement pilots.",
+    href: "/artifacts/vertex-hub-roadmap-brief.pptx",
+    preview: [
+      "Roadmap is on track for the June Steering Committee readout.",
+      "Highest-value PMO pilots: RAID Copilot, decision capture, and stakeholder summaries.",
+      "Key risk: fragmented evidence across project chats and artifact folders.",
+    ],
   },
   {
     title: "PMO Improvement Idea Register",
@@ -601,6 +611,12 @@ const initialArtifacts: Artifact[] = [
     date: "Jun 10, 2026",
     status: "Pinned",
     summary: "Prioritized improvement queue with impact, effort, owner, evidence, and recommended next step.",
+    href: "/artifacts/pmo-improvement-idea-register.xlsx",
+    preview: [
+      "Six active ideas scored by impact, effort, confidence, and operating cadence fit.",
+      "Pilot recommendations prioritize RAID automation and decision log hygiene.",
+      "Blocked items need data ownership and intake governance decisions.",
+    ],
   },
   {
     title: "Steering Committee Update",
@@ -609,6 +625,12 @@ const initialArtifacts: Artifact[] = [
     date: "May 9, 2026",
     status: "Final",
     summary: "Committee packet with status summary, decision asks, and risks requiring leadership attention.",
+    href: "/artifacts/steering-committee-update.pptx",
+    preview: [
+      "Status: roadmap delivery remains green with watch items in readiness and adoption.",
+      "Decision ask: approve RAID Copilot pilot scope and stakeholder taxonomy refresh.",
+      "Next milestone: package final artifacts for committee review.",
+    ],
   },
   {
     title: "Launch Readiness Checklist",
@@ -617,6 +639,12 @@ const initialArtifacts: Artifact[] = [
     date: "May 7, 2026",
     status: "Draft",
     summary: "Readiness checklist for owners, dependencies, training, communications, and launch gates.",
+    href: "/artifacts/launch-readiness-checklist.docx",
+    preview: [
+      "Confirms owners, launch gates, training plan, communication draft, and support path.",
+      "Open item: define escalation timing for unresolved UAT risks.",
+      "Recommended next step: assign owners for final go-live criteria.",
+    ],
   },
 ];
 
@@ -691,6 +719,7 @@ export default function Home() {
   const [model, setModel] = useState("GPT 5.5");
   const [artifacts, setArtifacts] = useState<Artifact[]>(initialArtifacts);
   const [selectedArtifactTitle, setSelectedArtifactTitle] = useState(initialArtifacts[1].title);
+  const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [decisions, setDecisions] = useState<Decision[]>(initialDecisions);
 
   const selectedIdea = ideas.find((idea) => idea.id === selectedIdeaId) ?? ideas[0];
@@ -843,6 +872,12 @@ export default function Home() {
       date: "Just now",
       status: "Draft",
       summary: `Draft summary generated from ${selectedIdea.title}, including owner, evidence, impact, effort, and next step.`,
+      href: "/artifacts/generated-idea-summary.docx",
+      preview: [
+        `Idea: ${selectedIdea.title}`,
+        `Owner: ${selectedIdea.owner}; status: ${statusMeta[selectedIdea.status].label}.`,
+        `Recommended next step: ${selectedIdea.nextStep}`,
+      ],
     };
     setArtifacts((current) => [generated, ...current]);
     setSelectedArtifactTitle(generated.title);
@@ -969,6 +1004,17 @@ export default function Home() {
             />
 
             <section className="main-panel" aria-label="Shared chat workspace">
+              <ImprovementStrip
+                ideas={filteredIdeas}
+                selectedIdeaId={selectedIdea.id}
+                onSelectIdea={(id) => {
+                  setSelectedIdeaId(id);
+                  setRightOpen(true);
+                }}
+                onOpenIdeas={() => setActiveTab("Ideas")}
+                onAddIdea={() => setIsAddOpen(true)}
+              />
+
               <div className="section-tabs" role="tablist" aria-label="Workspace tabs">
                 {tabs.map((tab) => (
                   <button
@@ -989,14 +1035,6 @@ export default function Home() {
               {activeTab === "Chat" ? (
                 <ChatView
                   messages={currentMessages}
-                  ideas={filteredIdeas}
-                  selectedIdeaId={selectedIdea.id}
-                  onSelectIdea={(id) => {
-                    setSelectedIdeaId(id);
-                    setRightOpen(true);
-                  }}
-                  onOpenIdeas={() => setActiveTab("Ideas")}
-                  onAddIdea={() => setIsAddOpen(true)}
                 />
               ) : null}
 
@@ -1027,6 +1065,7 @@ export default function Home() {
                   }}
                   onShare={() => setShareOpen((current) => !current)}
                   onCreateArtifact={handleCreateArtifact}
+                  onPreview={setPreviewArtifact}
                 />
               ) : null}
 
@@ -1107,7 +1146,7 @@ export default function Home() {
                       <ArtifactRow artifact={artifact} selected={artifact.title === selectedArtifact.title} onSelect={() => {
                         setSelectedArtifactTitle(artifact.title);
                         setActiveTab("Artifacts");
-                      }} key={artifact.title} />
+                      }} onPreview={() => setPreviewArtifact(artifact)} key={artifact.title} />
                     ))}
                   </div>
                 </section>
@@ -1119,6 +1158,16 @@ export default function Home() {
                   </div>
                   <p>{selectedArtifact.summary}</p>
                   <span className="artifact-detail-meta">{selectedArtifact.type} - {selectedArtifact.status} - {selectedArtifact.owner}</span>
+                  <div className="artifact-detail-actions">
+                    <button className="secondary-button" type="button" onClick={() => setPreviewArtifact(selectedArtifact)}>
+                      <Eye size={16} />
+                      Preview
+                    </button>
+                    <a className="secondary-button" href={selectedArtifact.href} download>
+                      <Download size={16} />
+                      Download
+                    </a>
+                  </div>
                 </section>
 
                 {shareOpen ? <SharePopover onToast={updateToast} /> : null}
@@ -1157,6 +1206,7 @@ export default function Home() {
           }}
         />
       ) : null}
+      {previewArtifact ? <ArtifactPreviewModal artifact={previewArtifact} onClose={() => setPreviewArtifact(null)} /> : null}
     </main>
   );
 }
@@ -1251,18 +1301,8 @@ function ProjectNav({
 
 function ChatView({
   messages,
-  ideas,
-  selectedIdeaId,
-  onSelectIdea,
-  onOpenIdeas,
-  onAddIdea,
 }: {
   messages: ChatMessage[];
-  ideas: Idea[];
-  selectedIdeaId: string;
-  onSelectIdea: (id: string) => void;
-  onOpenIdeas: () => void;
-  onAddIdea: () => void;
 }) {
   return (
     <div className="chat-view">
@@ -1300,36 +1340,52 @@ function ChatView({
           <span>Assistant extracted 6 improvement ideas from this chat and linked them to final artifacts.</span>
         </div>
       </div>
-
-      <section className="idea-strip" aria-label="Improvement ideas from chat">
-        <div className="strip-header">
-          <div>
-            <span className="eyebrow">Improvement ideas</span>
-            <h2>Ready for PMO triage</h2>
-          </div>
-          <div className="strip-actions">
-            <button className="secondary-button" type="button" onClick={onOpenIdeas}>
-              <Filter size={16} />
-              Open filters
-            </button>
-            <button className="primary-button" type="button" data-testid="open-add-idea" onClick={onAddIdea}>
-              <Plus size={16} />
-              Add idea
-            </button>
-          </div>
-        </div>
-        <div className="idea-strip-grid">
-          {ideas.slice(0, 3).map((idea) => (
-            <IdeaCard
-              idea={idea}
-              selected={idea.id === selectedIdeaId}
-              onSelect={() => onSelectIdea(idea.id)}
-              key={idea.id}
-            />
-          ))}
-        </div>
-      </section>
     </div>
+  );
+}
+
+function ImprovementStrip({
+  ideas,
+  selectedIdeaId,
+  onSelectIdea,
+  onOpenIdeas,
+  onAddIdea,
+}: {
+  ideas: Idea[];
+  selectedIdeaId: string;
+  onSelectIdea: (id: string) => void;
+  onOpenIdeas: () => void;
+  onAddIdea: () => void;
+}) {
+  return (
+    <section className="idea-strip" aria-label="Improvement ideas from chat">
+      <div className="strip-header">
+        <div>
+          <span className="eyebrow">Improvement ideas</span>
+          <h2>Ready for PMO triage</h2>
+        </div>
+        <div className="strip-actions">
+          <button className="secondary-button" type="button" onClick={onOpenIdeas}>
+            <Filter size={16} />
+            Open filters
+          </button>
+          <button className="primary-button" type="button" data-testid="open-add-idea" onClick={onAddIdea}>
+            <Plus size={16} />
+            Add idea
+          </button>
+        </div>
+      </div>
+      <div className="idea-strip-grid">
+        {ideas.slice(0, 3).map((idea) => (
+          <IdeaCard
+            idea={idea}
+            selected={idea.id === selectedIdeaId}
+            onSelect={() => onSelectIdea(idea.id)}
+            key={idea.id}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -1573,12 +1629,14 @@ function ArtifactView({
   onSelect,
   onShare,
   onCreateArtifact,
+  onPreview,
 }: {
   artifacts: Artifact[];
   selectedArtifact: Artifact;
   onSelect: (artifact: Artifact) => void;
   onShare: () => void;
   onCreateArtifact: () => void;
+  onPreview: (artifact: Artifact) => void;
 }) {
   return (
     <div className="artifact-view">
@@ -1602,6 +1660,7 @@ function ArtifactView({
             artifact={artifact}
             selected={artifact.title === selectedArtifact.title}
             onSelect={() => onSelect(artifact)}
+            onPreview={() => onPreview(artifact)}
             key={artifact.title}
           />
         ))}
@@ -1615,6 +1674,16 @@ function ArtifactView({
           <span>{selectedArtifact.status}</span>
           <span>{selectedArtifact.owner}</span>
         </div>
+        <div className="artifact-detail-actions">
+          <button className="secondary-button" type="button" onClick={() => onPreview(selectedArtifact)}>
+            <Eye size={16} />
+            Preview file
+          </button>
+          <a className="primary-button" href={selectedArtifact.href} download>
+            <Download size={16} />
+            Download {selectedArtifact.type}
+          </a>
+        </div>
       </section>
     </div>
   );
@@ -1624,22 +1693,33 @@ function ArtifactRow({
   artifact,
   selected = false,
   onSelect,
+  onPreview,
 }: {
   artifact: Artifact;
   selected?: boolean;
   onSelect: () => void;
+  onPreview: () => void;
 }) {
   return (
-    <button className={`artifact-row ${selected ? "selected" : ""}`} type="button" onClick={onSelect}>
-      <span className={`file-badge ${artifact.type.toLowerCase()}`}>{iconForArtifact(artifact.type)}</span>
-      <span>
-        <strong>{artifact.title}</strong>
-        <em>
-          {artifact.type} - {artifact.status} - {artifact.owner} - {artifact.date}
-        </em>
-      </span>
-      <MoreHorizontal size={17} />
-    </button>
+    <div className={`artifact-row ${selected ? "selected" : ""}`}>
+      <button className="artifact-row-main" type="button" onClick={onSelect}>
+        <span className={`file-badge ${artifact.type.toLowerCase()}`}>{iconForArtifact(artifact.type)}</span>
+        <span>
+          <strong>{artifact.title}</strong>
+          <em>
+            {artifact.type} - {artifact.status} - {artifact.owner} - {artifact.date}
+          </em>
+        </span>
+      </button>
+      <div className="artifact-row-actions">
+        <button className="icon-button" type="button" onClick={onPreview} aria-label={`Preview ${artifact.title}`}>
+          <Eye size={16} />
+        </button>
+        <a className="icon-button" href={artifact.href} download aria-label={`Download ${artifact.title}`}>
+          <Download size={16} />
+        </a>
+      </div>
+    </div>
   );
 }
 
@@ -1899,6 +1979,56 @@ function SharePopover({ onToast }: { onToast: (message: string) => void }) {
         <AlertTriangle size={15} />
         Links may grant access outside this project. Share responsibly.
       </div>
+    </div>
+  );
+}
+
+function ArtifactPreviewModal({ artifact, onClose }: { artifact: Artifact; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="modal artifact-modal" aria-label={`Preview ${artifact.title}`}>
+        <div className="modal-header">
+          <div>
+            <span className="eyebrow">Artifact preview</span>
+            <h2>{artifact.title}</h2>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close modal">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="artifact-preview-shell">
+          <div className={`artifact-file-cover ${artifact.type.toLowerCase()}`}>
+            {iconForArtifact(artifact.type)}
+            <strong>{artifact.type}</strong>
+            <span>{artifact.status}</span>
+          </div>
+          <div className="artifact-preview-copy">
+            <p>{artifact.summary}</p>
+            <ul>
+              {artifact.preview.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        <div className="tag-row">
+          <span>{artifact.owner}</span>
+          <span>{artifact.date}</span>
+          <span>{artifact.type}</span>
+        </div>
+
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            Close
+          </button>
+          <a className="primary-button" href={artifact.href} download>
+            <Download size={16} />
+            Download {artifact.type}
+          </a>
+        </div>
+      </section>
     </div>
   );
 }

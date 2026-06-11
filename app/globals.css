@@ -272,6 +272,7 @@ kbd {
 .access-block,
 .strip-actions,
 .detail-actions,
+.artifact-detail-actions,
 .modal-actions {
   display: flex;
   align-items: center;
@@ -322,6 +323,12 @@ kbd {
   border-color: var(--brand);
   background: var(--brand);
   color: #fff;
+}
+
+a.secondary-button,
+a.primary-button,
+a.icon-button {
+  text-decoration: none;
 }
 
 .primary-button:hover,
@@ -709,9 +716,9 @@ kbd {
 }
 
 .idea-strip {
-  margin-top: 22px;
-  border-top: 1px solid var(--line);
-  padding-top: 18px;
+  border-bottom: 1px solid var(--line);
+  padding: 14px 18px 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
 }
 
 .strip-header,
@@ -746,13 +753,13 @@ kbd {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  margin-top: 12px;
+  margin-top: 10px;
 }
 
 .idea-card {
   display: grid;
   gap: 8px;
-  min-height: 182px;
+  min-height: 142px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 12px;
@@ -764,6 +771,14 @@ kbd {
 .idea-card.wide {
   grid-template-columns: minmax(0, 1fr);
   min-height: 170px;
+}
+
+.idea-strip .idea-card p {
+  display: -webkit-box;
+  min-height: 38px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .idea-card:hover,
@@ -1150,6 +1165,42 @@ kbd {
   text-align: left;
 }
 
+.artifact-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 8px;
+}
+
+.artifact-row-main {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  padding: 2px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.artifact-row-main strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.artifact-row-actions .icon-button {
+  width: 34px;
+  height: 34px;
+}
+
 .artifact-row.selected {
   border-color: #8ab7f1;
   background: #fbfdff;
@@ -1178,10 +1229,82 @@ kbd {
   gap: 8px;
 }
 
+.artifact-detail-actions {
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
 .artifact-detail-meta {
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.artifact-modal {
+  width: min(680px, 100%);
+}
+
+.artifact-preview-shell {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+}
+
+.artifact-file-cover {
+  min-height: 184px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fef6f2;
+  color: #a4431e;
+}
+
+.artifact-file-cover.xlsx {
+  background: #f2fbf6;
+  color: #157347;
+}
+
+.artifact-file-cover.docx {
+  background: #f1f7ff;
+  color: #1557a6;
+}
+
+.artifact-file-cover svg {
+  width: 34px;
+  height: 34px;
+}
+
+.artifact-file-cover span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.artifact-preview-copy {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.artifact-preview-copy p {
+  margin: 0;
+  color: #344054;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.artifact-preview-copy ul {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 18px;
+  color: #475467;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .decision-view,
