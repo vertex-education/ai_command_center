@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
-import { useMutation, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useForm } from "@tanstack/react-form";
 import {
@@ -33,6 +33,7 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  Pencil,
   Plus,
   Search,
   Send,
@@ -40,6 +41,7 @@ import {
   ShieldCheck,
   Sparkles,
   Star,
+  Trash2,
   UserRound,
   Users,
   X,
@@ -116,6 +118,8 @@ import {
   workspaceModes,
 } from "@/lib/pmo-data";
 import {
+  deleteScopedChat,
+  deleteScopedProject,
   createScopedProject,
   createScopedChat,
   createScopedInvite,
@@ -125,7 +129,12 @@ import {
   listMyTeams,
   type CreateChatInput,
   type CreateProjectInput,
+  type DeleteChatInput,
+  type DeleteProjectInput,
+  type RenameChatInput,
+  type ScopedChatsResult,
   type TeamSummary,
+  renameScopedChat,
 } from "@/lib/team-workflow";
 
 export const Route = createFileRoute("/")({
@@ -157,6 +166,15 @@ type CreateTeamInput = {
   name: string;
   description: string;
 };
+
+const emptyScopedChatsResult: ScopedChatsResult = {
+  workspaceChats: [],
+  projectChatsByProjectId: {},
+  conversations: {},
+};
+
+const emptyChatImageSrc =
+  "data:image/svg+xml,%3Csvg width='192' height='144' viewBox='0 0 192 144' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='18' y='25' width='156' height='94' rx='20' fill='%23F8FAFC'/%3E%3Crect x='34' y='42' width='87' height='12' rx='6' fill='%23215A96' fill-opacity='.18'/%3E%3Crect x='34' y='64' width='124' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Crect x='34' y='82' width='73' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Ccircle cx='139' cy='51' r='17' fill='%23215A96'/%3E%3Cpath d='M139 41v20M129 51h20' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M61 119l-13 17-3-22' fill='%23F8FAFC'/%3E%3Crect x='18' y='25' width='156' height='94' rx='20' stroke='%23215A96' stroke-opacity='.16' stroke-width='2'/%3E%3C/svg%3E";
 
 type CreateChatDialogState = {
   section: ChatSection;
@@ -288,17 +306,20 @@ function PMOCommandCenter() {
   const [activeTeamId, setActiveTeamId] = useState("");
   const activeWorkspace = workspace.workspaces[activeMode];
   const selectedTeam = teams.find((team) => team.id === activeTeamId) ?? teams[0];
-  const scopedProjectsQuery = useSuspenseQuery({
+  const scopedProjectsQuery = useQuery({
     queryKey: ["scoped-projects", activeMode, selectedTeam?.id ?? ""],
     queryFn: () => listMyScopedProjects({ data: { mode: activeMode, teamId: selectedTeam?.id ?? null } }),
+    placeholderData: [],
   });
-  const scopedChatsQuery = useSuspenseQuery({
+  const scopedChatsQuery = useQuery({
     queryKey: ["scoped-chats", activeMode, selectedTeam?.id ?? ""],
     queryFn: () => listMyScopedChats({ data: { mode: activeMode, teamId: selectedTeam?.id ?? null } }),
+    placeholderData: emptyScopedChatsResult,
   });
-  const scopedProjects: ProjectSummary[] = scopedProjectsQuery.data;
-  const scopedWorkspaceChats = scopedChatsQuery.data.workspaceChats;
-  const scopedConversations = scopedChatsQuery.data.conversations;
+  const scopedProjects: ProjectSummary[] = scopedProjectsQuery.data ?? [];
+  const scopedChatsData = scopedChatsQuery.data ?? emptyScopedChatsResult;
+  const scopedWorkspaceChats = scopedChatsData.workspaceChats;
+  const scopedConversations = scopedChatsData.conversations;
   const visibleWorkspace = useMemo(() => {
     if (activeMode === "Personal") {
       return {
@@ -343,6 +364,7 @@ function PMOCommandCenter() {
   const [statusFilter, setStatusFilter] = useState<IdeaStatus | "All">("All");
   const [searchTerm, setSearchTerm] = useState("");
   const [chatInput, setChatInput] = useState("");
+  const [transientChats, setTransientChats] = useState<Record<string, ChatSummary>>({});
   const [optimisticMessages, setOptimisticMessages] = useState<Record<string, ChatMessage[]>>({});
   const chatFormRef = useRef<HTMLFormElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -381,6 +403,8 @@ function PMOCommandCenter() {
       }
       await invalidateWorkspace();
       await invalidateChats();
+      await invalidateProjects();
+      focusChatComposer();
     },
   });
   const updateStatusMutation = useMutation({
@@ -419,8 +443,29 @@ function PMOCommandCenter() {
     mutationFn: (input: CreateProjectInput) => createScopedProject({ data: input }),
     onSuccess: invalidateProjects,
   });
+  const deleteProjectMutation = useMutation({
+    mutationFn: (input: DeleteProjectInput) => deleteScopedProject({ data: input }),
+    onSuccess: async () => {
+      await invalidateProjects();
+      await invalidateChats();
+    },
+  });
   const createChatMutation = useMutation({
     mutationFn: (input: CreateChatInput) => createScopedChat({ data: input }),
+    onSuccess: () => {
+      void invalidateChats();
+      void invalidateProjects();
+    },
+  });
+  const deleteChatMutation = useMutation({
+    mutationFn: (input: DeleteChatInput) => deleteScopedChat({ data: input }),
+    onSuccess: async () => {
+      await invalidateChats();
+      await invalidateProjects();
+    },
+  });
+  const renameChatMutation = useMutation({
+    mutationFn: (input: RenameChatInput) => renameScopedChat({ data: input }),
     onSuccess: async () => {
       await invalidateChats();
       await invalidateProjects();
@@ -434,8 +479,8 @@ function PMOCommandCenter() {
   const projectChats = activeProject?.projectChats ?? [];
   const activeChat =
     activeChatSection === "project"
-      ? projectChats.find((chat) => chat.id === activeChatId) ?? projectChats[0]
-      : visibleWorkspace.workspaceChats.find((chat) => chat.id === activeChatId) ?? visibleWorkspace.workspaceChats[0];
+      ? projectChats.find((chat) => chat.id === activeChatId) ?? transientChats[activeChatId] ?? projectChats[0]
+      : visibleWorkspace.workspaceChats.find((chat) => chat.id === activeChatId) ?? transientChats[activeChatId] ?? visibleWorkspace.workspaceChats[0];
   const scopedProjectId = activeChatSection === "project" ? activeProject?.id ?? null : null;
   const conversationKey = activeChat ? getConversationKey(activeMode, scopedProjectId, activeChat.id) : "";
   const workspaceTitle = `${workspaceModeLabel(activeMode)} workspace`;
@@ -452,15 +497,7 @@ function PMOCommandCenter() {
   const currentMessages = activeChat
     ? persistedMessages.length > 0 || pendingMessages.length > 0
       ? [...persistedMessages, ...pendingMessages]
-      : [
-          {
-            id: `${conversationKey}-empty`,
-            author: "Vertex AI Command Center",
-            role: "system" as const,
-            time: "Now",
-            text: "No messages in this scoped workspace yet. Ask the assistant to summarize decisions, risks, or artifacts.",
-          },
-        ]
+      : []
     : [];
 
   const selectedIdea = scopedIdeas.find((idea) => idea.id === selectedIdeaId) ?? scopedIdeas[0];
@@ -515,14 +552,47 @@ function PMOCommandCenter() {
   }, [scopedProjectId, scopedIdeas, scopedArtifacts]);
 
   useEffect(() => {
-    const nextProject = visibleWorkspace.projects[0];
-    const nextChat = visibleWorkspace.workspaceChats[0];
-    setActiveProjectId(nextProject?.id ?? "");
-    setActiveChatSection("workspace");
-    setActiveChatId(nextChat?.id ?? "");
-    setSelectedIdeaId(visibleWorkspace.ideas[0]?.id ?? "");
-    setSelectedArtifactTitle(visibleWorkspace.artifacts.find((artifact) => artifact.projectId === null)?.title ?? "");
-  }, [visibleWorkspace]);
+    const activeProjectExists = visibleWorkspace.projects.some((project) => project.id === activeProjectId);
+    if (!activeProjectExists) {
+      setActiveProjectId(visibleWorkspace.projects[0]?.id ?? "");
+    }
+
+    const workspaceChatExists = visibleWorkspace.workspaceChats.some((chat) => chat.id === activeChatId);
+    const projectWithActiveChat = visibleWorkspace.projects.find((project) =>
+      project.projectChats.some((chat) => chat.id === activeChatId),
+    );
+    const activeChatExists =
+      (activeChatSection === "workspace" && workspaceChatExists) ||
+      (activeChatSection === "project" && Boolean(projectWithActiveChat));
+
+    if (!activeChatExists) {
+      const nextWorkspaceChat = visibleWorkspace.workspaceChats[0];
+      if (nextWorkspaceChat) {
+        setActiveChatSection("workspace");
+        setActiveChatId(nextWorkspaceChat.id);
+      } else {
+        const nextProjectWithChat = visibleWorkspace.projects.find((project) => project.projectChats.length > 0);
+        if (nextProjectWithChat) {
+          setActiveProjectId(nextProjectWithChat.id);
+          setActiveChatSection("project");
+          setActiveChatId(nextProjectWithChat.projectChats[0]?.id ?? "");
+        } else {
+          setActiveChatId("");
+        }
+      }
+    }
+
+    if (activeChatSection === "project" && projectWithActiveChat && projectWithActiveChat.id !== activeProjectId) {
+      setActiveProjectId(projectWithActiveChat.id);
+    }
+
+    if (!selectedIdeaId && visibleWorkspace.ideas[0]) {
+      setSelectedIdeaId(visibleWorkspace.ideas[0].id);
+    }
+    if (!selectedArtifactTitle) {
+      setSelectedArtifactTitle(visibleWorkspace.artifacts.find((artifact) => artifact.projectId === null)?.title ?? "");
+    }
+  }, [activeChatId, activeChatSection, activeProjectId, selectedArtifactTitle, selectedIdeaId, visibleWorkspace]);
 
   useEffect(() => {
     if (activeMode === "Team" && teams.length > 0 && !teams.some((team) => team.id === activeTeamId)) {
@@ -533,6 +603,12 @@ function PMOCommandCenter() {
   useEffect(() => {
     window.localStorage.setItem("vertex-show-token-usage", showTokenUsage ? "1" : "0");
   }, [showTokenUsage]);
+
+  useEffect(() => {
+    if (canEdit && activeTab === "Chat" && activeChatId) {
+      focusChatComposer();
+    }
+  }, [activeChatId, activeTab, canEdit]);
 
   function updateToast(message: string, link?: ToastLink) {
     setToast(message);
@@ -572,6 +648,14 @@ function PMOCommandCenter() {
   }
 
   function handleChatSelect(section: ChatSection, chatId: string) {
+    if (section === "workspace") {
+      setActiveChatSection(section);
+      setActiveChatId(chatId);
+      setActiveTab("Chat");
+      return;
+    }
+    const project = visibleWorkspace.projects.find((item) => item.projectChats.some((chat) => chat.id === chatId));
+    if (project) setActiveProjectId(project.id);
     setActiveChatSection(section);
     setActiveChatId(chatId);
     setActiveTab("Chat");
@@ -666,8 +750,7 @@ function PMOCommandCenter() {
       title: `${contextLabel} AI Chat`,
       description: `AI chatbot scoped to ${contextLabel}.`,
     });
-    await invalidateChats();
-    await invalidateProjects();
+    setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
     setActiveChatSection(section);
     setActiveChatId(chat.id);
     setActiveTab("Chat");
@@ -687,22 +770,14 @@ function PMOCommandCenter() {
       updateToast("Create or select a team before adding a team chat.");
       return;
     }
-    if (activeTab === "Chat") {
-      await createFreshChat({
-        contextLabel: workspaceModeLabel(activeMode),
-        projectId: null,
-        section: "workspace",
-      });
-      return;
-    }
-    setActiveChatSection("workspace");
-    setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
-    setActiveTab("Chat");
-    setRightOpen(true);
-    focusChatComposer();
+    await createFreshChat({
+      contextLabel: workspaceModeLabel(activeMode),
+      projectId: null,
+      section: "workspace",
+    });
   }
 
-  async function handleOpenProjectChat(project: ProjectSummary) {
+  async function handleAddProjectChat(project: ProjectSummary) {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
       return;
@@ -711,19 +786,112 @@ function PMOCommandCenter() {
       updateToast("Create or select a team before adding a team project chat.");
       return;
     }
-    if (activeTab === "Chat") {
-      await createFreshChat({
-        contextLabel: project.name,
-        projectId: project.id,
-        section: "project",
-      });
+    setActiveProjectId(project.id);
+    await createFreshChat({
+      contextLabel: project.name,
+      projectId: project.id,
+      section: "project",
+    });
+  }
+
+  async function handleDeleteProject(project: ProjectSummary) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
       return;
     }
-    setActiveProjectId(project.id);
-    setActiveChatSection("project");
-    setActiveChatId(project.projectChats[0]?.id ?? "");
+    if (activeMode === "Team" && !selectedTeam) {
+      updateToast("Select a team before deleting a team project.");
+      return;
+    }
+    if (!window.confirm(`Delete ${project.name}? This removes its project chats and messages.`)) return;
+    await deleteProjectMutation.mutateAsync({
+      mode: activeMode,
+      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+      projectId: project.id,
+    });
+    if (project.id === activeProjectId) {
+      setActiveProjectId("");
+      setActiveChatSection("workspace");
+      setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
+    }
     setActiveTab("Chat");
-    setRightOpen(true);
+    updateToast(`${project.name} deleted`);
+  }
+
+  async function handleDeleteChat({
+    chat,
+    project,
+    section,
+  }: {
+    chat: ChatSummary;
+    project?: ProjectSummary;
+    section: ChatSection;
+  }) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
+      return;
+    }
+    if (activeMode === "Team" && !selectedTeam) {
+      updateToast("Select a team before deleting a team chat.");
+      return;
+    }
+    if (!window.confirm(`Delete ${chat.title}? This removes its messages.`)) return;
+    await deleteChatMutation.mutateAsync({
+      mode: activeMode,
+      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+      projectId: section === "project" ? project?.id ?? null : null,
+      section,
+      chatId: chat.id,
+    });
+    if (chat.id === activeChatId && section === activeChatSection) {
+      if (section === "project" && project) {
+        const nextChat = project.projectChats.find((item) => item.id !== chat.id);
+        setActiveProjectId(project.id);
+        if (nextChat) {
+          setActiveChatSection("project");
+          setActiveChatId(nextChat.id);
+        } else {
+          setActiveChatSection("workspace");
+          setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
+        }
+      } else {
+        const nextChat = visibleWorkspace.workspaceChats.find((item) => item.id !== chat.id);
+        setActiveChatSection("workspace");
+        setActiveChatId(nextChat?.id ?? "");
+      }
+    }
+    setActiveTab("Chat");
+    updateToast(`${chat.title} deleted`);
+  }
+
+  async function handleRenameChat({
+    chat,
+    project,
+    section,
+  }: {
+    chat: ChatSummary;
+    project?: ProjectSummary;
+    section: ChatSection;
+  }) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
+      return;
+    }
+    if (activeMode === "Team" && !selectedTeam) {
+      updateToast("Select a team before renaming a team chat.");
+      return;
+    }
+    const title = window.prompt("Rename chat", chat.title)?.trim();
+    if (!title || title === chat.title) return;
+    const renamed = await renameChatMutation.mutateAsync({
+      mode: activeMode,
+      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+      projectId: section === "project" ? project?.id ?? null : null,
+      section,
+      chatId: chat.id,
+      title,
+    });
+    updateToast(`${renamed.title} renamed`);
     focusChatComposer();
   }
 
@@ -736,10 +904,12 @@ function PMOCommandCenter() {
       projectId: createChatState.projectId,
       section: createChatState.section,
     });
+    setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
     setActiveChatSection(createChatState.section);
     setActiveChatId(chat.id);
     setCreateChatState(null);
     setActiveTab("Chat");
+    focusChatComposer();
     updateToast(`${chat.title} chat created`);
   }
 
@@ -853,8 +1023,8 @@ function PMOCommandCenter() {
   }
 
   return (
-    <main className="min-h-svh bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
-      <div className="workspace-shadow relative grid min-h-svh overflow-hidden border bg-card lg:min-h-[calc(100vh-40px)] lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
+    <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
+      <div className="workspace-shadow relative grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
         <PrimaryRail
           activeRail={activeRail}
           canAdmin={session.user.role === "admin"}
@@ -866,7 +1036,7 @@ function PMOCommandCenter() {
           onSignOut={handleSignOut}
         />
 
-        <section className="flex min-w-0 flex-col overflow-hidden bg-background">
+        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
           <Topbar
             canAdmin={session.user.role === "admin"}
             searchTerm={searchTerm}
@@ -909,15 +1079,18 @@ function PMOCommandCenter() {
                   activeProjectId={activeProject?.id ?? ""}
                   canEdit={canEdit}
                   workspace={visibleWorkspace}
+                  onAddProjectChat={handleAddProjectChat}
                   onChatSelect={handleChatSelect}
                   onCreateProject={handleCreateProject}
-                  onOpenProjectChat={handleOpenProjectChat}
+                  onDeleteChat={handleDeleteChat}
+                  onDeleteProject={handleDeleteProject}
                   onOpenWorkspaceChat={handleOpenWorkspaceChat}
                   onInviteProject={handleInviteProject}
                   onProjectSelect={handleProjectSelect}
+                  onRenameChat={handleRenameChat}
                 />
 
-                <section className="flex min-w-0 flex-col border-r">
+                <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r">
                   <PinnedStrip
                     activeMode={activeMode}
                     artifacts={pinnedArtifacts}
@@ -951,7 +1124,14 @@ function PMOCommandCenter() {
                     ))}
                   </div>
 
-                  <section className="scrollbar-thin min-h-0 flex-1 overflow-auto p-4 pb-32">
+                  <section
+                    className={cn(
+                      "min-h-0 flex-1",
+                      activeTab === "Chat"
+                        ? "flex flex-col overflow-hidden"
+                        : "scrollbar-thin overflow-auto p-4 pb-32",
+                    )}
+                  >
                     {activeTab === "Chat" ? <ChatView isTyping={sendMessageMutation.isPending} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
                     {activeTab === "Ideas" ? (
                       <IdeasView
@@ -1432,7 +1612,7 @@ function PrimaryRail({
   ];
 
   return (
-    <aside className="hidden flex-col items-center gap-2 bg-sidebar px-2 py-5 text-sidebar-foreground lg:flex">
+    <aside className="hidden min-h-0 flex-col items-center gap-2 bg-sidebar px-2 py-5 text-sidebar-foreground lg:flex">
       <div className="mb-4 grid size-10 place-items-center rounded-md bg-white">
         <img alt="Vertex" className="size-7" src="/vertex-mountain-blue.svg" />
       </div>
@@ -1491,7 +1671,7 @@ function Topbar({
   onSignOut: () => void;
 }) {
   return (
-    <header className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(220px,1fr)_minmax(260px,360px)_auto] lg:px-5">
+    <header className="grid min-h-16 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(220px,1fr)_minmax(260px,360px)_auto] lg:px-5">
       <div className="flex min-w-0 items-center gap-3">
         <Button className="lg:hidden" type="button" variant="outline" size="icon" aria-label="Open menu" onClick={onMobileMenu}>
           <Menu />
@@ -1690,27 +1870,29 @@ function Contextbar({
   const selectedTeam = teams.find((team) => team.id === activeTeamId);
 
   return (
-    <section className="border-b bg-card px-3 py-3 lg:px-5">
-      <div className="min-w-0 space-y-2">
-        {showScopeTabs ? (
-          <div className="flex w-full overflow-hidden rounded-md border md:w-fit">
-            {workspaceModes.map((mode) => (
-              <button
-                className={cn(
-                  "h-9 min-w-0 flex-1 px-3 text-xs font-medium text-muted-foreground transition-colors md:min-w-28",
-                  activeMode === mode && "bg-primary text-primary-foreground",
-                )}
-                key={mode}
-                type="button"
-                onClick={() => onModeChange(mode)}
-              >
-                {workspaceModeLabel(mode)}
-              </button>
-            ))}
-          </div>
-        ) : null}
+    <section className="shrink-0 border-b bg-card px-3 py-3 lg:px-5">
+      <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
+        <div className="min-w-0">
+          {showScopeTabs ? (
+            <div className="flex w-full overflow-hidden rounded-md border md:w-fit">
+              {workspaceModes.map((mode) => (
+                <button
+                  className={cn(
+                    "h-9 min-w-0 flex-1 px-3 text-xs font-medium text-muted-foreground transition-colors md:min-w-28",
+                    activeMode === mode && "bg-primary text-primary-foreground",
+                  )}
+                  key={mode}
+                  type="button"
+                  onClick={() => onModeChange(mode)}
+                >
+                  {workspaceModeLabel(mode)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
         {activeMode === "Team" ? (
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 md:justify-end">
             <Label className="text-xs font-semibold uppercase text-muted-foreground" htmlFor="team-select">
               Team
             </Label>
@@ -1761,12 +1943,15 @@ function ProjectNav({
   activeProjectId,
   canEdit,
   workspace,
+  onAddProjectChat,
   onChatSelect,
   onCreateProject,
+  onDeleteChat,
+  onDeleteProject,
   onInviteProject,
-  onOpenProjectChat,
   onOpenWorkspaceChat,
   onProjectSelect,
+  onRenameChat,
 }: {
   activeChatId: string;
   activeChatSection: ChatSection;
@@ -1774,16 +1959,17 @@ function ProjectNav({
   activeProjectId: string;
   canEdit: boolean;
   workspace: ScopedWorkspaceState;
+  onAddProjectChat: (project: ProjectSummary) => void;
   onChatSelect: (section: ChatSection, chatId: string) => void;
   onCreateProject: () => void;
+  onDeleteChat: (input: { chat: ChatSummary; project?: ProjectSummary; section: ChatSection }) => void;
+  onDeleteProject: (project: ProjectSummary) => void;
   onInviteProject: (project: ProjectSummary) => void;
-  onOpenProjectChat: (project: ProjectSummary) => void;
   onOpenWorkspaceChat: () => void;
   onProjectSelect: (project: ProjectSummary) => void;
+  onRenameChat: (input: { chat: ChatSummary; project?: ProjectSummary; section: ChatSection }) => void;
 }) {
-  const activeProject = workspace.projects.find((project) => project.id === activeProjectId) ?? workspace.projects[0];
-  const projectChats = activeProject?.projectChats ?? [];
-  const showProjectOptions = canEdit && (activeMode === "Team" || activeMode === "Org");
+  const showProjectInvite = activeMode === "Team" || activeMode === "Org";
 
   return (
     <aside className="scrollbar-thin hidden min-h-0 overflow-auto border-r bg-muted/40 p-3 lg:block">
@@ -1801,39 +1987,104 @@ function ProjectNav({
         ) : null}
       </div>
       {workspace.projects.map((project) => (
-        <div className="relative mb-1 flex items-center gap-1" key={project.id}>
-          <button
-            className={cn(
-              "flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              project.id === activeProjectId && "bg-accent text-accent-foreground font-medium",
-            )}
-            type="button"
-            onClick={() => onProjectSelect(project)}
-          >
-            <Folder className="size-4" />
-            <span className="min-w-0 flex-1 truncate">{project.name}</span>
-          </button>
-          {showProjectOptions ? (
-            <details className="group relative">
-              <summary className="grid size-8 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
-                <MoreHorizontal className="size-4" />
-              </summary>
-              <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
-                <div className="flex items-center gap-2 px-2 py-1.5 text-xs font-semibold uppercase text-muted-foreground">
-                  <ShieldCheck className="size-3.5" />
-                  Settings
+        <div className="mb-2" key={project.id}>
+          <div className="group/project-row relative flex items-center gap-1">
+            <button
+              className={cn(
+                "flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                project.id === activeProjectId && "bg-accent text-accent-foreground font-medium",
+              )}
+              type="button"
+              onClick={() => onProjectSelect(project)}
+            >
+              {project.id === activeProjectId ? <FolderOpen className="size-4" /> : <Folder className="size-4" />}
+              <span className="min-w-0 flex-1 truncate">{project.name}</span>
+            </button>
+            {canEdit ? (
+              <details className="group relative opacity-0 transition-opacity focus-within:opacity-100 group-hover/project-row:opacity-100">
+                <summary className="grid size-8 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+                  <MoreHorizontal className="size-4" />
+                </summary>
+                <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs font-semibold uppercase text-muted-foreground">
+                    <ShieldCheck className="size-3.5" />
+                    Project
+                  </div>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    type="button"
+                    onClick={() => onAddProjectChat(project)}
+                  >
+                    <MessageCircle className="size-4" />
+                    New chat
+                  </button>
+                  {showProjectInvite ? (
+                    <button
+                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                      type="button"
+                      onClick={() => onInviteProject(project)}
+                    >
+                      <Users className="size-4" />
+                      Invite user
+                    </button>
+                  ) : null}
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
+                    type="button"
+                    onClick={() => onDeleteProject(project)}
+                  >
+                    <Trash2 className="size-4" />
+                    Delete project
+                  </button>
                 </div>
+              </details>
+            ) : null}
+          </div>
+          <div className="mt-1 ml-4 space-y-1 border-l pl-3">
+            {project.projectChats.map((chat) => (
+              <div className="group/chat-row relative flex items-center gap-1" key={chat.id}>
                 <button
-                  className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                  className={cn(
+                    "flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    activeChatSection === "project" && chat.id === activeChatId && "bg-card text-primary shadow-xs",
+                  )}
                   type="button"
-                  onClick={() => onInviteProject(project)}
+                  onClick={() => onChatSelect("project", chat.id)}
                 >
-                  <Users className="size-4" />
-                  Invite user
+                  <MessageCircle className="size-4" />
+                  <span className="min-w-0 flex-1 truncate" title={chat.title}>{chat.title}</span>
                 </button>
+                {canEdit ? (
+                  <details className="group relative opacity-0 transition-opacity focus-within:opacity-100 group-hover/chat-row:opacity-100">
+                    <summary className="grid size-7 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+                      <MoreHorizontal className="size-4" />
+                    </summary>
+                    <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
+                      <button
+                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                        type="button"
+                        onClick={() => onRenameChat({ chat, project, section: "project" })}
+                      >
+                        <Pencil className="size-4" />
+                        Rename chat
+                      </button>
+                      <button
+                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
+                        type="button"
+                        onClick={() => onDeleteChat({ chat, project, section: "project" })}
+                      >
+                        <Trash2 className="size-4" />
+                        Delete chat
+                      </button>
+                    </div>
+                  </details>
+                ) : null}
               </div>
-            </details>
-          ) : null}
+            ))}
+            {project.projectChats.length === 0 ? (
+              <div className="px-2 py-1 text-xs text-muted-foreground">No project chats yet.</div>
+            ) : null}
+          </div>
         </div>
       ))}
       {workspace.projects.length === 0 ? (
@@ -1841,46 +2092,6 @@ function ProjectNav({
           No assigned projects yet.
         </div>
       ) : null}
-
-      <div className="mt-5 px-2">
-        <div className="flex items-center justify-between text-xs font-semibold uppercase text-muted-foreground">
-          <span>{workspace.projectChatsHeading}</span>
-          {canEdit && activeProject ? (
-            <button
-              aria-label={`Open chat composer for ${activeProject.name}`}
-              className="grid size-7 place-items-center rounded-md hover:bg-accent hover:text-accent-foreground"
-              type="button"
-              onClick={() => onOpenProjectChat(activeProject)}
-            >
-              <Plus className="size-4" />
-            </button>
-          ) : null}
-        </div>
-        {activeProject ? (
-          <div className="mt-1 truncate text-xs font-medium text-foreground">{activeProject.name}</div>
-        ) : null}
-      </div>
-      <div className="mt-2 space-y-1">
-        {projectChats.map((chat) => (
-          <button
-            className={cn(
-              "flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              activeChatSection === "project" && chat.id === activeChatId && "bg-card text-primary shadow-xs",
-            )}
-            key={chat.id}
-            type="button"
-            onClick={() => onChatSelect("project", chat.id)}
-          >
-            <MessageCircle className="size-4" />
-            <span className="min-w-0 flex-1 truncate">{chat.title}</span>
-          </button>
-        ))}
-        {activeProject && projectChats.length === 0 ? (
-          <div className="rounded-md border border-dashed bg-card px-3 py-3 text-sm text-muted-foreground">
-            No project chats yet.
-          </div>
-        ) : null}
-      </div>
 
       <div className="mt-5 flex items-center justify-between px-2 text-xs font-semibold uppercase text-muted-foreground">
         <span>{workspace.workspaceChatsHeading}</span>
@@ -1897,18 +2108,44 @@ function ProjectNav({
       </div>
       <div className="mt-2 space-y-1">
         {workspace.workspaceChats.map((chat) => (
-          <button
-            className={cn(
-              "flex h-9 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-              activeChatSection === "workspace" && chat.id === activeChatId && "bg-card text-primary shadow-xs",
-            )}
-            key={chat.id}
-            type="button"
-            onClick={() => onChatSelect("workspace", chat.id)}
-          >
-            <MessageCircle className="size-4" />
-            <span className="min-w-0 flex-1 truncate">{chat.title}</span>
-          </button>
+          <div className="group/chat-row relative flex items-center gap-1" key={chat.id}>
+            <button
+              className={cn(
+                "flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                activeChatSection === "workspace" && chat.id === activeChatId && "bg-card text-primary shadow-xs",
+              )}
+              type="button"
+              onClick={() => onChatSelect("workspace", chat.id)}
+            >
+              <MessageCircle className="size-4" />
+              <span className="min-w-0 flex-1 truncate" title={chat.title}>{chat.title}</span>
+            </button>
+            {canEdit ? (
+              <details className="group relative opacity-0 transition-opacity focus-within:opacity-100 group-hover/chat-row:opacity-100">
+                <summary className="grid size-8 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
+                  <MoreHorizontal className="size-4" />
+                </summary>
+                <div className="absolute right-0 z-20 mt-1 w-40 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    type="button"
+                    onClick={() => onRenameChat({ chat, section: "workspace" })}
+                  >
+                    <Pencil className="size-4" />
+                    Rename chat
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm text-destructive hover:bg-destructive/10"
+                    type="button"
+                    onClick={() => onDeleteChat({ chat, section: "workspace" })}
+                  >
+                    <Trash2 className="size-4" />
+                    Delete chat
+                  </button>
+                </div>
+              </details>
+            ) : null}
+          </div>
         ))}
         {workspace.workspaceChats.length === 0 ? (
           <div className="rounded-md border border-dashed bg-card px-3 py-3 text-sm text-muted-foreground">
@@ -1994,8 +2231,32 @@ function ChatView({
   messages: ChatMessage[];
   showTokenUsage: boolean;
 }) {
+  const messageEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messageEndRef.current?.scrollIntoView({ block: "end" });
+  }, [messages, isTyping]);
+
+  const showEmptyChatPlaceholder = messages.length === 0 && !isTyping;
+
   return (
-    <div className="space-y-4">
+    <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+      {showEmptyChatPlaceholder ? (
+        <div className="flex min-h-full items-center justify-center px-4 py-12">
+          <div className="flex max-w-sm flex-col items-center text-center">
+            <img
+              alt=""
+              aria-hidden="true"
+              className="mb-5 h-32 w-44 object-contain"
+              src={emptyChatImageSrc}
+            />
+            <h2 className="text-lg font-semibold text-foreground">Start a new chat</h2>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              Send a message to begin. The chat name will update after the first response is complete.
+            </p>
+          </div>
+        </div>
+      ) : null}
       {messages.map((message, index) => {
         const isUser = message.role === "user";
         const previousUserMessage = [...messages.slice(0, index)].reverse().find((item) => item.role === "user");
@@ -2048,6 +2309,7 @@ function ChatView({
           </div>
         </div>
       ) : null}
+      <div className="h-32 shrink-0" ref={messageEndRef} />
     </div>
   );
 }

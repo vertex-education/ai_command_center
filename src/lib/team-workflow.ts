@@ -30,6 +30,12 @@ export type CreateProjectInput = {
   status: ProjectSummary["status"];
 };
 
+export type DeleteProjectInput = {
+  mode: WorkspaceMode;
+  teamId?: string | null;
+  projectId: string;
+};
+
 export type ScopedChatsResult = {
   workspaceChats: ChatSummary[];
   projectChatsByProjectId: Record<string, ChatSummary[]>;
@@ -43,6 +49,18 @@ export type CreateChatInput = {
   section: ChatSection;
   title: string;
   description: string;
+};
+
+export type DeleteChatInput = {
+  mode: WorkspaceMode;
+  teamId?: string | null;
+  projectId?: string | null;
+  section: ChatSection;
+  chatId: string;
+};
+
+export type RenameChatInput = DeleteChatInput & {
+  title: string;
 };
 
 function getDb() {
@@ -83,6 +101,11 @@ function projectId(name: string) {
 
 function chatId(title: string) {
   return `chat-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 44) || "untitled"}-${crypto.randomUUID()}`;
+}
+
+function normalizeChatTitle(title: string) {
+  const trimmed = title.trim().replace(/\s+/g, " ").slice(0, 60);
+  return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
 }
 
 async function getWorkspaceId(mode: WorkspaceMode) {
@@ -221,6 +244,64 @@ export const createScopedProject = createServerFn({ method: "POST" })
       status: data.status,
       projectChats: [],
     } satisfies ProjectSummary;
+  });
+
+export const deleteScopedProject = createServerFn({ method: "POST" })
+  .validator((data: DeleteProjectInput) => data)
+  .handler(async ({ data }) => {
+    const user = await requireManager();
+    if (!data.projectId) throw new Error("Project is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before deleting a team project.");
+    await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+
+    const project = await getDb()
+      .prepare(
+        `SELECT p.id
+         FROM projects p
+         INNER JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.id = ?
+           AND w.scope = ?
+         LIMIT 1`,
+      )
+      .bind(data.projectId, scopeForMode(data.mode))
+      .first<{ id: string }>();
+    if (!project) throw new Error("Project was not found.");
+
+    const projectChats = await getDb()
+      .prepare("SELECT id FROM chats WHERE project_id = ?")
+      .bind(data.projectId)
+      .all<{ id: string }>();
+    const chatIds = (projectChats.results ?? []).map((chat) => chat.id);
+    if (chatIds.length > 0) {
+      const placeholders = chatIds.map(() => "?").join(", ");
+      await getDb()
+        .prepare(`DELETE FROM chat_members WHERE chat_id IN (${placeholders})`)
+        .bind(...chatIds)
+        .run();
+      await getDb()
+        .prepare(`DELETE FROM chat_messages WHERE chat_id IN (${placeholders})`)
+        .bind(...chatIds)
+        .run();
+      await getDb()
+        .prepare(`DELETE FROM chats WHERE id IN (${placeholders})`)
+        .bind(...chatIds)
+        .run();
+    }
+
+    await getDb()
+      .prepare("DELETE FROM scoped_invites WHERE scope = 'project' AND target_id = ?")
+      .bind(data.projectId)
+      .run();
+    await getDb()
+      .prepare("DELETE FROM project_members WHERE project_id = ?")
+      .bind(data.projectId)
+      .run();
+    await getDb()
+      .prepare("DELETE FROM projects WHERE id = ?")
+      .bind(data.projectId)
+      .run();
+
+    return { id: data.projectId };
   });
 
 async function listProjectChatsForUser(userId: string, mode: WorkspaceMode, teamId?: string | null) {
@@ -395,6 +476,123 @@ export const createScopedChat = createServerFn({ method: "POST" })
     }
 
     return { id, title, description } satisfies ChatSummary;
+  });
+
+export const deleteScopedChat = createServerFn({ method: "POST" })
+  .validator((data: DeleteChatInput) => data)
+  .handler(async ({ data }) => {
+    const user = await requireManager();
+    if (!data.chatId) throw new Error("Chat is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before deleting a team chat.");
+
+    const workspaceId = await getWorkspaceId(data.mode);
+    if (data.section === "project") {
+      if (!data.projectId) throw new Error("Project is required.");
+      await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+      const chat = await getDb()
+        .prepare("SELECT id FROM chats WHERE id = ? AND workspace_id = ? AND section = 'project' AND project_id = ? LIMIT 1")
+        .bind(data.chatId, workspaceId, data.projectId)
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    } else if (data.mode === "Team") {
+      await requireTeamMember(user.id, data.teamId ?? "");
+      const chat = await getDb()
+        .prepare(
+          `SELECT c.id
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.team_id = ?
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, data.teamId ?? "")
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    } else {
+      const chat = await getDb()
+        .prepare(
+          `SELECT c.id
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.user_id = ?
+             AND cm.team_id IS NULL
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, user.id)
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    }
+
+    await getDb().prepare("DELETE FROM chat_members WHERE chat_id = ?").bind(data.chatId).run();
+    await getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").bind(data.chatId).run();
+    await getDb().prepare("DELETE FROM chats WHERE id = ?").bind(data.chatId).run();
+
+    return { id: data.chatId };
+  });
+
+export const renameScopedChat = createServerFn({ method: "POST" })
+  .validator((data: RenameChatInput) => data)
+  .handler(async ({ data }) => {
+    const user = await requireManager();
+    const title = normalizeChatTitle(data.title);
+    if (!title) throw new Error("Chat name is required.");
+    if (!data.chatId) throw new Error("Chat is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before renaming a team chat.");
+
+    const workspaceId = await getWorkspaceId(data.mode);
+    if (data.section === "project") {
+      if (!data.projectId) throw new Error("Project is required.");
+      await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+      const chat = await getDb()
+        .prepare("SELECT id FROM chats WHERE id = ? AND workspace_id = ? AND section = 'project' AND project_id = ? LIMIT 1")
+        .bind(data.chatId, workspaceId, data.projectId)
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    } else if (data.mode === "Team") {
+      await requireTeamMember(user.id, data.teamId ?? "");
+      const chat = await getDb()
+        .prepare(
+          `SELECT c.id
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.team_id = ?
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, data.teamId ?? "")
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    } else {
+      const chat = await getDb()
+        .prepare(
+          `SELECT c.id
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.user_id = ?
+             AND cm.team_id IS NULL
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, user.id)
+        .first<{ id: string }>();
+      if (!chat) throw new Error("Chat was not found.");
+    }
+
+    await getDb().prepare("UPDATE chats SET title = ? WHERE id = ?").bind(title, data.chatId).run();
+    return { id: data.chatId, title };
   });
 
 export const createScopedInvite = createServerFn({ method: "POST" })

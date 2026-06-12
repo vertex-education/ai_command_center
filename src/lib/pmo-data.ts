@@ -181,6 +181,52 @@ type SendChatMessageResult = {
   llmTrace: LlmDevTrace | null;
 };
 
+const chatTitleStopWords = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "for",
+  "from",
+  "i",
+  "in",
+  "is",
+  "it",
+  "me",
+  "my",
+  "of",
+  "on",
+  "or",
+  "please",
+  "the",
+  "this",
+  "to",
+  "with",
+  "you",
+]);
+
+function conciseChatTitleFromRequest(text: string) {
+  const cleaned = text
+    .replace(/[`*_#>\[\](){}]/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\b(can|could|would|will)\s+you\b/gi, " ")
+    .replace(/\b(i\s+want|i\s+need|i\s+would\s+like|please|help\s+me)\b/gi, " ")
+    .replace(/\b(create|make|build|write|generate|give|tell|show)\s+(me\s+)?\b/gi, " ")
+    .replace(/[^a-z0-9\s&/+-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = cleaned
+    .split(" ")
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .filter((word, index) => index < 2 || !chatTitleStopWords.has(word.toLowerCase()))
+    .slice(0, 6);
+  const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
+  const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
+  return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
+}
+
 export type AddIdeaInput = {
   title: string;
   category: string;
@@ -1060,6 +1106,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
     const text = data.text.trim();
     if (!text) return { workspace: clone(getMutableRoot()), llmTrace: null };
     const existingMessages = await listPersistedChatMessages(data.chatId);
+    const chatTitle = existingMessages.length === 0 ? conciseChatTitleFromRequest(text) : data.chatTitle;
 
     const userMessage: ChatMessage = {
       id: createId("msg-user"),
@@ -1071,7 +1118,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
     };
     const aiResult = await runGemmaChat({
       context,
-      data: { ...data, text },
+      data: { ...data, chatTitle, text },
       existingMessages,
       workspace,
     });
@@ -1084,10 +1131,16 @@ export const sendChatMessage = createServerFn({ method: "POST" })
     };
 
     const workspaceId = await getChatWorkspaceId(data.chatId);
+    if (chatTitle !== data.chatTitle) {
+      await getDb()
+        .prepare("UPDATE chats SET title = ? WHERE id = ?")
+        .bind(chatTitle, data.chatId)
+        .run();
+    }
     await persistChatMessage(data.chatId, workspaceId, userMessage);
     await persistChatMessage(data.chatId, workspaceId, response);
     workspace.conversations[conversationKey] = [...existingMessages, userMessage, response];
-    recordActivity(workspace, "Chat response generated", `${data.chatTitle} updated in ${workspaceModeLabel(data.mode)}.`);
+    recordActivity(workspace, "Chat response generated", `${chatTitle} updated in ${workspaceModeLabel(data.mode)}.`);
     return { workspace: clone(getMutableRoot()), llmTrace: aiResult.trace };
   });
 
