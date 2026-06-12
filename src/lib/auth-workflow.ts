@@ -45,7 +45,6 @@ export type InviteRecord = {
   createdAt: number;
 };
 
-const bootstrapAdminEmail = "roger.cormier@vertexeducation.com";
 const testInviteEmail = "rogerleecormier@gmail.com";
 const allowedDomain = "vertexeducation.com";
 const inviteTtlMs = 7 * 24 * 60 * 60 * 1000;
@@ -103,14 +102,6 @@ async function requireAdmin() {
   if (!session) throw new Error("Sign in is required.");
   if (session.user.role !== "admin") throw new Error("Admin privileges are required.");
   return session;
-}
-
-async function hasAdminUser() {
-  const row = await getDb()
-    .prepare('SELECT id FROM "user" WHERE role = ? LIMIT 1')
-    .bind("admin")
-    .first<{ id: string }>();
-  return Boolean(row);
 }
 
 async function getValidInvite(token: string) {
@@ -261,19 +252,6 @@ export const createUserInvite = createServerFn({ method: "POST" })
       invitedByUserId: session.user.id,
     });
   });
-
-export const createBootstrapAdminInvite = createServerFn({ method: "POST" }).handler(async () => {
-  if (await hasAdminUser()) {
-    throw new Error("A bootstrap admin already exists. Sign in with the admin account to create more users.");
-  }
-
-  return createInviteRecord({
-    email: bootstrapAdminEmail,
-    name: "Roger Cormier",
-    role: "admin",
-    invitedByUserId: null,
-  });
-});
 
 export const listUserInvites = createServerFn({ method: "GET" }).handler(async () => {
   await requireAdmin();

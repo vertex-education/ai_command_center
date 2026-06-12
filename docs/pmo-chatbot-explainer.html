@@ -1,0 +1,1430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vertex AI Command Center Explainer</title>
+  <style>
+    :root {
+      --blue: #003865;
+      --blue-2: #0c5c91;
+      --gold: #b78b20;
+      --green: #2f6f5e;
+      --ink: #17202a;
+      --muted: #5d6b7a;
+      --line: #d8e0e8;
+      --soft: #f5f8fb;
+      --white: #ffffff;
+      --peach: #f7eee7;
+      --mint: #eef7f3;
+      --shadow: 0 18px 50px rgba(20, 34, 50, 0.12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: #f7f9fb;
+      font-family: "DM Sans", "Segoe UI", Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    .shell {
+      min-height: 100vh;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 12px 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 210px;
+      font-weight: 800;
+      color: var(--blue);
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 7px;
+      color: white;
+      background: var(--blue);
+      font-weight: 900;
+    }
+
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    nav a,
+    .mode-button,
+    .chip-button,
+    .flow-button {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--white);
+      color: var(--ink);
+      cursor: pointer;
+      text-decoration: none;
+      transition: 0.16s ease;
+    }
+
+    nav a {
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+
+    nav a:hover,
+    .mode-button:hover,
+    .chip-button:hover,
+    .flow-button:hover {
+      border-color: var(--blue-2);
+      color: var(--blue);
+      transform: translateY(-1px);
+    }
+
+    .hero {
+      color: var(--white);
+      background:
+        linear-gradient(105deg, rgba(0, 56, 101, 0.96), rgba(12, 92, 145, 0.82)),
+        url("../public/screenshot.jpeg") center / cover;
+    }
+
+    .hero-inner {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
+      align-items: center;
+      gap: 28px;
+      width: min(1180px, calc(100% - 32px));
+      min-height: 520px;
+      margin: 0 auto;
+      padding: 54px 0 40px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.08;
+      font-family: "Red Hat Display", "Segoe UI", Arial, sans-serif;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 780px;
+      font-size: clamp(40px, 6vw, 78px);
+    }
+
+    h2 {
+      font-size: clamp(26px, 3vw, 38px);
+    }
+
+    h3 {
+      font-size: 18px;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .hero-copy {
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero-copy p {
+      max-width: 740px;
+      color: rgba(255, 255, 255, 0.88);
+      font-size: 18px;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 6px;
+    }
+
+    .hero-actions a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 10px 14px;
+      border-radius: 7px;
+      color: var(--ink);
+      background: var(--white);
+      text-decoration: none;
+      font-weight: 700;
+    }
+
+    .hero-actions a.secondary {
+      color: white;
+      border: 1px solid rgba(255, 255, 255, 0.42);
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    .app-mini {
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.34);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.96);
+      color: var(--ink);
+      box-shadow: var(--shadow);
+    }
+
+    .mini-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      background: var(--soft);
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: 130px minmax(0, 1fr);
+      min-height: 330px;
+    }
+
+    .mini-sidebar {
+      border-right: 1px solid var(--line);
+      padding: 12px;
+      background: #fbfcfe;
+    }
+
+    .mini-main {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      padding: 14px;
+      gap: 12px;
+    }
+
+    .mini-pill,
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 28px;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--blue);
+      background: #e6f0f7;
+    }
+
+    .mini-nav-item {
+      padding: 8px;
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .mini-nav-item.active {
+      color: var(--blue);
+      background: #e6f0f7;
+      font-weight: 800;
+    }
+
+    .chat-bubble {
+      max-width: 92%;
+      margin: 8px 0;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--soft);
+      font-size: 14px;
+    }
+
+    .chat-bubble.ai {
+      margin-left: auto;
+      color: white;
+      background: var(--blue);
+    }
+
+    .composer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      color: var(--muted);
+      background: white;
+      font-size: 13px;
+    }
+
+    .section {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 56px 0;
+    }
+
+    .section-heading {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .section-heading p {
+      max-width: 700px;
+      color: var(--muted);
+    }
+
+    .mode-toggle {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .mode-button {
+      min-height: 38px;
+      padding: 8px 12px;
+      font-weight: 800;
+    }
+
+    .mode-button.active {
+      border-color: var(--blue);
+      color: white;
+      background: var(--blue);
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      align-items: stretch;
+    }
+
+    .explain-card,
+    .info-card,
+    .flow-panel,
+    .diagram-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--white);
+      box-shadow: 0 10px 30px rgba(20, 34, 50, 0.06);
+    }
+
+    .explain-card {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 310px;
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding: 16px;
+    }
+
+    .card-body {
+      display: grid;
+      gap: 14px;
+      padding: 16px;
+    }
+
+    .technical .card-head {
+      border-top: 4px solid var(--blue);
+    }
+
+    .plain .card-head {
+      border-top: 4px solid var(--green);
+    }
+
+    .caption {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .bullet-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .bullet-list li {
+      display: grid;
+      grid-template-columns: 22px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .dot {
+      display: grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      color: white;
+      background: var(--blue);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .plain .dot {
+      background: var(--green);
+    }
+
+    .concept-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .info-card {
+      padding: 16px;
+    }
+
+    .info-card strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--blue);
+    }
+
+    .info-card p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .flow-layout {
+      display: grid;
+      grid-template-columns: minmax(220px, 310px) minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .flow-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .flow-button {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+      width: 100%;
+      min-height: 54px;
+      padding: 8px;
+      text-align: left;
+      background: white;
+    }
+
+    .flow-button.active {
+      border-color: var(--gold);
+      background: #fff9ec;
+    }
+
+    .step-num {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 7px;
+      color: white;
+      background: var(--gold);
+      font-weight: 900;
+    }
+
+    .flow-panel {
+      overflow: hidden;
+      min-height: 380px;
+    }
+
+    .flow-visual {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(250px, 0.85fr);
+      gap: 18px;
+      padding: 18px;
+    }
+
+    .screen-frame {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .screen-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      font-weight: 800;
+    }
+
+    .screen-body {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+    }
+
+    .fake-row,
+    .fake-field {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 7px 9px;
+      background: white;
+      font-size: 13px;
+    }
+
+    .fake-row.selected {
+      border-color: var(--blue-2);
+      background: #eef7ff;
+    }
+
+    .callout {
+      border-left: 4px solid var(--gold);
+      border-radius: 7px;
+      padding: 12px;
+      background: #fff9ec;
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .callout p {
+      color: #584317;
+      font-size: 14px;
+    }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .arch-node {
+      display: grid;
+      gap: 8px;
+      min-height: 150px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: white;
+    }
+
+    .arch-node span {
+      width: fit-content;
+      border-radius: 999px;
+      padding: 4px 8px;
+      color: white;
+      background: var(--blue);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .arch-node:nth-child(2) span,
+    .arch-node:nth-child(4) span {
+      background: var(--green);
+    }
+
+    .arch-node:nth-child(3) span,
+    .arch-node:nth-child(5) span {
+      background: var(--gold);
+    }
+
+    .arch-node p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .details-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .detail-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+    }
+
+    .detail-card summary {
+      cursor: pointer;
+      padding: 15px;
+      color: var(--blue);
+      font-weight: 900;
+    }
+
+    .detail-card div {
+      display: grid;
+      gap: 10px;
+      padding: 0 15px 15px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    code {
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      padding: 1px 5px;
+      color: #24384c;
+      background: var(--soft);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 0.95em;
+    }
+
+    .comparison-table {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: white;
+    }
+
+    .comparison-table table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--blue);
+      background: var(--soft);
+      font-size: 14px;
+    }
+
+    td {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      border-left: 4px solid var(--blue);
+      padding: 12px 0 12px 14px;
+    }
+
+    .timeline-item:nth-child(2) {
+      border-left-color: var(--green);
+    }
+
+    .timeline-item:nth-child(3) {
+      border-left-color: var(--gold);
+    }
+
+    .timeline-item:nth-child(4) {
+      border-left-color: #865f8f;
+    }
+
+    .timeline-item strong {
+      color: var(--blue);
+    }
+
+    .toolbox {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .chip-button {
+      min-height: 34px;
+      padding: 7px 10px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .glossary-result {
+      min-height: 120px;
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--mint);
+    }
+
+    .footer {
+      border-top: 1px solid var(--line);
+      background: white;
+    }
+
+    .footer .section {
+      padding: 28px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 980px) {
+      .hero-inner,
+      .flow-layout,
+      .flow-visual {
+        grid-template-columns: 1fr;
+      }
+
+      .compare-grid,
+      .details-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .concept-grid,
+      .architecture {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 680px) {
+      .topbar-inner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      nav {
+        justify-content: flex-start;
+      }
+
+      .hero-inner {
+        min-height: auto;
+        padding: 36px 0;
+      }
+
+      .mini-grid,
+      .concept-grid,
+      .architecture,
+      .timeline-item {
+        grid-template-columns: 1fr;
+      }
+
+      .section-heading {
+        align-items: start;
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <div class="brand-mark">V</div>
+          <span>AI Command Center Explainer</span>
+        </div>
+        <nav aria-label="Page sections">
+          <a href="#compare">Compare</a>
+          <a href="#flow">User Flow</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#limits">Limits</a>
+          <a href="#real-tool">Real Tool</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-inner">
+          <div class="hero-copy">
+            <span class="mini-pill">Prototype review - beginner friendly</span>
+            <h1>How the PMO Chatbot prototype works</h1>
+            <p>
+              This interactive explainer translates the app two ways: plain English for learning the concept,
+              and technical notes for understanding the actual code, server functions, database, storage, auth,
+              and deployment path.
+            </p>
+            <div class="hero-actions">
+              <a href="#compare">Start with side-by-side explanations</a>
+              <a class="secondary" href="#flow">Click through the workflow</a>
+            </div>
+          </div>
+
+          <div class="app-mini" aria-label="Simplified app preview">
+            <div class="mini-header">
+              <strong>Vertex AI Command Center</strong>
+              <span class="status-pill">Signed in</span>
+            </div>
+            <div class="mini-grid">
+              <aside class="mini-sidebar">
+                <div class="mini-nav-item active">Workspaces</div>
+                <div class="mini-nav-item">Chats</div>
+                <div class="mini-nav-item">Ideas</div>
+                <div class="mini-nav-item">Artifacts</div>
+                <div class="mini-nav-item">Tasks</div>
+              </aside>
+              <div class="mini-main">
+                <div>
+                  <span class="mini-pill">Team / Vertex Hub</span>
+                  <h3 style="margin-top: 8px;">Project AI Chat</h3>
+                </div>
+                <div>
+                  <div class="chat-bubble">Summarize the current project risks.</div>
+                  <div class="chat-bubble ai">I reviewed only this team's project chat, artifacts, decisions, and tasks.</div>
+                  <div class="fake-row selected">Pinned artifact: Vertex Hub Roadmap Brief</div>
+                  <div class="fake-row">Decision: confirm launch owner</div>
+                </div>
+                <div class="composer">Message VertexAI about this scoped project <strong>Send</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="compare">
+        <div class="section-heading">
+          <div>
+            <h2>Two Ways To Understand The Same App</h2>
+            <p>Use the buttons to switch topics. Each topic shows a non-technical explanation next to the more technical version.</p>
+          </div>
+          <div class="mode-toggle" aria-label="Explainer topics">
+            <button class="mode-button active" data-topic="does">What it does</button>
+            <button class="mode-button" data-topic="front">Frontend</button>
+            <button class="mode-button" data-topic="server">Server</button>
+            <button class="mode-button" data-topic="data">Data</button>
+            <button class="mode-button" data-topic="auth">Access</button>
+            <button class="mode-button" data-topic="deploy">Deployment</button>
+          </div>
+        </div>
+
+        <div class="compare-grid">
+          <article class="explain-card plain">
+            <div class="card-head">
+              <div>
+                <h3>Beginner Friendly</h3>
+                <p class="caption">What this means without app-dev jargon.</p>
+              </div>
+              <span class="status-pill">Plain English</span>
+            </div>
+            <div class="card-body" id="plain-panel"></div>
+          </article>
+
+          <article class="explain-card technical">
+            <div class="card-head">
+              <div>
+                <h3>Technical Explanation</h3>
+                <p class="caption">How the prototype is actually implemented.</p>
+              </div>
+              <span class="status-pill">Code view</span>
+            </div>
+            <div class="card-body" id="tech-panel"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <div>
+            <h2>Core Product Concepts</h2>
+            <p>The prototype is organized like a project room. The chatbot is only one part of the workspace.</p>
+          </div>
+        </div>
+        <div class="concept-grid">
+          <div class="info-card">
+            <strong>Scopes</strong>
+            <p>Personal, Team, and Org views separate work so users see the right level of information.</p>
+          </div>
+          <div class="info-card">
+            <strong>Projects</strong>
+            <p>Each scope can contain projects, and a project can have its own chat threads and records.</p>
+          </div>
+          <div class="info-card">
+            <strong>Chat</strong>
+            <p>Users ask VertexAI questions in a workspace chat or project chat.</p>
+          </div>
+          <div class="info-card">
+            <strong>Artifacts</strong>
+            <p>Generated or uploaded files can be shown, pinned, previewed, downloaded, and shared.</p>
+          </div>
+          <div class="info-card">
+            <strong>Ideas</strong>
+            <p>Improvement ideas can be captured, voted on, pinned, filtered, and moved through statuses.</p>
+          </div>
+          <div class="info-card">
+            <strong>Decisions</strong>
+            <p>The app tracks decision records and lets editors cycle their status.</p>
+          </div>
+          <div class="info-card">
+            <strong>Approvals</strong>
+            <p>Approval items show who owns a decision and whether it is needed, requested, or approved.</p>
+          </div>
+          <div class="info-card">
+            <strong>Tasks</strong>
+            <p>Follow-up tasks can move from open to in progress to done.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="flow">
+        <div class="section-heading">
+          <div>
+            <h2>Clickable User Flow</h2>
+            <p>Click each step to see what the user is doing and what the app is doing behind the scenes.</p>
+          </div>
+        </div>
+
+        <div class="flow-layout">
+          <div class="flow-list" aria-label="User flow steps">
+            <button class="flow-button active" data-step="signin"><span class="step-num">1</span><strong>Sign in</strong></button>
+            <button class="flow-button" data-step="scope"><span class="step-num">2</span><strong>Choose scope</strong></button>
+            <button class="flow-button" data-step="project"><span class="step-num">3</span><strong>Select project or chat</strong></button>
+            <button class="flow-button" data-step="ask"><span class="step-num">4</span><strong>Ask VertexAI</strong></button>
+            <button class="flow-button" data-step="act"><span class="step-num">5</span><strong>Take action</strong></button>
+            <button class="flow-button" data-step="share"><span class="step-num">6</span><strong>Share or download</strong></button>
+          </div>
+
+          <div class="flow-panel">
+            <div class="flow-visual">
+              <div class="screen-frame">
+                <div class="screen-title">
+                  <span id="flow-screen-title">Sign in</span>
+                  <span class="status-pill" id="flow-status">Auth</span>
+                </div>
+                <div class="screen-body" id="flow-screen"></div>
+              </div>
+              <aside class="callout">
+                <strong id="flow-callout-title">What is happening?</strong>
+                <p id="flow-callout"></p>
+              </aside>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="architecture">
+        <div class="section-heading">
+          <div>
+            <h2>Architecture Map</h2>
+            <p>This is the shortest version of how a click in the browser turns into saved data and an AI response.</p>
+          </div>
+        </div>
+
+        <div class="architecture" aria-label="Architecture sequence">
+          <div class="arch-node">
+            <span>1. Browser</span>
+            <h3>React screens</h3>
+            <p>The user clicks tabs, sends messages, previews artifacts, and creates projects or chats.</p>
+          </div>
+          <div class="arch-node">
+            <span>2. Router</span>
+            <h3>TanStack Start</h3>
+            <p>Routes load the signed-in session and fetch the workspace data before showing the app.</p>
+          </div>
+          <div class="arch-node">
+            <span>3. Server functions</span>
+            <h3>Actions</h3>
+            <p>Functions such as <code>sendChatMessage</code> and <code>createScopedChat</code> validate the request.</p>
+          </div>
+          <div class="arch-node">
+            <span>4. Cloudflare</span>
+            <h3>D1, R2, AI, Email</h3>
+            <p>D1 stores records, R2 stores file bytes, Workers AI writes chatbot replies, and Email handles invites.</p>
+          </div>
+          <div class="arch-node">
+            <span>5. UI refresh</span>
+            <h3>React Query</h3>
+            <p>The frontend invalidates stale queries so the page shows the new message, task, idea, or project.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <div>
+            <h2>Detailed Build Notes</h2>
+            <p>Open each section for the more specific implementation details behind the required documentation topics.</p>
+          </div>
+        </div>
+
+        <div class="details-grid">
+          <details class="detail-card" open>
+            <summary>What the app does</summary>
+            <div>
+              <p>It is a PMO workspace for AI-assisted project operations. Users can chat with VertexAI, capture ideas, inspect artifacts, track decisions, manage approvals, and update tasks.</p>
+              <p>It is structured around Personal, Team, and Org scopes, with separate project and workspace chats.</p>
+            </div>
+          </details>
+          <details class="detail-card" open>
+            <summary>Frontend</summary>
+            <div>
+              <p>The frontend is React 19 with TanStack Router, Query, Form, and Table. The main screen is in <code>src/routes/index.tsx</code>.</p>
+              <p>The UI uses componentized cards, dialogs, tables, filters, side rails, chat composer state, and optimistic pending chat messages.</p>
+            </div>
+          </details>
+          <details class="detail-card" open>
+            <summary>Backend or server logic</summary>
+            <div>
+              <p>Server logic uses TanStack Start server functions in <code>src/lib/pmo-data.ts</code>, <code>src/lib/team-workflow.ts</code>, and <code>src/lib/auth-workflow.ts</code>.</p>
+              <p>The Cloudflare Worker entry point passes the runtime environment into TanStack Start from <code>src/worker.ts</code>.</p>
+            </div>
+          </details>
+          <details class="detail-card">
+            <summary>Data and storage</summary>
+            <div>
+              <p>D1 stores structured records: users, sessions, teams, projects, chats, chat messages, ideas, artifacts metadata, actions, and invites.</p>
+              <p>R2 is configured for artifact files. D1 stores each artifact's title, metadata, href, and R2 object key.</p>
+            </div>
+          </details>
+          <details class="detail-card">
+            <summary>Deployment</summary>
+            <div>
+              <p>The app can build with <code>npm run build</code>. It is configured for Codex Sites through <code>.openai/hosting.json</code> and for Cloudflare Workers through <code>wrangler.jsonc</code>.</p>
+              <p>Cloudflare bindings include <code>DB</code>, <code>ARTIFACTS_BUCKET</code>, <code>AI</code>, and <code>EMAIL</code>.</p>
+            </div>
+          </details>
+          <details class="detail-card">
+            <summary>Access and authentication</summary>
+            <div>
+              <p>Better Auth handles email/password sign-in, email verification, sessions, and admin roles.</p>
+              <p>New accounts are invite-gated. Admins can create invites, roles can be admin, user, or viewer, and edit actions check role before writing.</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="section" id="limits">
+        <div class="section-heading">
+          <div>
+            <h2>Current Limitations</h2>
+            <p>These are the practical gaps between the prototype and a hardened production product.</p>
+          </div>
+        </div>
+
+        <div class="comparison-table">
+          <table>
+            <thead>
+              <tr>
+                <th>Area</th>
+                <th>Current prototype behavior</th>
+                <th>Why it matters</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Seeded and mixed data</td>
+                <td>Some workspace data is built from in-memory seed objects while team, project, chat, auth, and message records use D1.</td>
+                <td>Production should use one authoritative persistence model so records do not reset or diverge.</td>
+              </tr>
+              <tr>
+                <td>Artifacts</td>
+                <td>Artifact metadata and file links exist, with R2 configured, but generated-file lifecycle is still mostly demo-shaped.</td>
+                <td>A real tool needs upload, versioning, permissions, scanning, retention, and durable generated outputs.</td>
+              </tr>
+              <tr>
+                <td>Sharing</td>
+                <td>The UI exposes share actions and scoped invites, but magic-link governance is not yet a full product-grade sharing system.</td>
+                <td>Real sharing needs expiration, revocation, audit logs, per-file permissions, and access warnings.</td>
+              </tr>
+              <tr>
+                <td>AI grounding</td>
+                <td>Workers AI receives selected scope metadata and recent chat messages.</td>
+                <td>Production should add retrieval from real project documents, citations, and stronger controls against data leakage.</td>
+              </tr>
+              <tr>
+                <td>Authorization depth</td>
+                <td>Chat and team/project membership checks exist for key write paths.</td>
+                <td>Every read and write path should enforce ownership and scope consistently on the server.</td>
+              </tr>
+              <tr>
+                <td>Operational readiness</td>
+                <td>The repo has build, seed, deploy, and type-check scripts.</td>
+                <td>Production still needs monitoring, backups, migrations discipline, secrets management, rate limits, and incident procedures.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="real-tool">
+        <div class="section-heading">
+          <div>
+            <h2>What Must Change For A Real Multi-User Tool</h2>
+            <p>The short version: make the server the source of truth, make permissions strict, and make AI output traceable.</p>
+          </div>
+        </div>
+
+        <div class="timeline">
+          <div class="timeline-item">
+            <strong>Data model</strong>
+            <p>Move all ideas, artifacts, decisions, approvals, tasks, activity, and scope settings into D1 tables with migrations, indexes, ownership fields, and audit history.</p>
+          </div>
+          <div class="timeline-item">
+            <strong>Permissions</strong>
+            <p>Apply server-side authorization to every read and write. Separate admin, editor, viewer, team owner, project member, and external shared viewer permissions.</p>
+          </div>
+          <div class="timeline-item">
+            <strong>Artifact system</strong>
+            <p>Use R2 for files, D1 for metadata, and add versioning, generated-output tracking, virus scanning or file validation, preview conversion, and retention rules.</p>
+          </div>
+          <div class="timeline-item">
+            <strong>AI grounding</strong>
+            <p>Connect chat to approved project sources, retrieve only allowed documents, cite sources, log prompts and responses, and add review controls for risky outputs.</p>
+          </div>
+          <div class="timeline-item">
+            <strong>Collaboration</strong>
+            <p>Add comments, mentions, notifications, simultaneous editing expectations, activity feeds, and conflict handling when multiple users update the same project.</p>
+          </div>
+          <div class="timeline-item">
+            <strong>Operations</strong>
+            <p>Add environment-specific secrets, automated tests, CI, database backups, alerting, rate limiting, billing or usage controls, and clear admin runbooks.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <div>
+            <h2>Beginner Glossary</h2>
+            <p>Click a term to translate common app-development words into plain English.</p>
+          </div>
+        </div>
+
+        <div class="toolbox" aria-label="Glossary terms">
+          <button class="chip-button" data-term="frontend">Frontend</button>
+          <button class="chip-button" data-term="backend">Backend</button>
+          <button class="chip-button" data-term="database">Database</button>
+          <button class="chip-button" data-term="storage">Object storage</button>
+          <button class="chip-button" data-term="auth">Authentication</button>
+          <button class="chip-button" data-term="deployment">Deployment</button>
+          <button class="chip-button" data-term="serverfn">Server function</button>
+          <button class="chip-button" data-term="query">Query cache</button>
+        </div>
+        <div class="glossary-result" id="glossary-result">
+          <h3>Frontend</h3>
+          <p>The part of the app you see and click in your browser: screens, buttons, tables, menus, dialogs, and chat boxes.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="section">
+        <p>Created from the local PMO Chatbot prototype in this workspace. Main source files reviewed: <code>src/routes/index.tsx</code>, <code>src/lib/pmo-data.ts</code>, <code>src/lib/team-workflow.ts</code>, <code>src/lib/auth.ts</code>, <code>src/lib/auth-workflow.ts</code>, <code>db/schema.ts</code>, <code>wrangler.jsonc</code>, and <code>README.md</code>.</p>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const topics = {
+      does: {
+        plain: {
+          title: "What the app does",
+          bullets: [
+            "It is a project workspace with an AI assistant built in.",
+            "You can switch between Personal, Team, and Org work areas.",
+            "Inside a work area, you can chat, collect ideas, review files, track decisions, approvals, and tasks.",
+            "The main design idea is a project room, not just a chatbot window."
+          ]
+        },
+        tech: {
+          title: "What the app does",
+          bullets: [
+            "The main route is an authenticated TanStack Start route at /.",
+            "The UI combines workspace scope, project selection, chat threads, data tables, dialogs, and artifact cards.",
+            "React Query loads workspace state, team membership, scoped projects, and scoped chats.",
+            "Mutations call server functions to create records, send messages, and update statuses."
+          ]
+        }
+      },
+      front: {
+        plain: {
+          title: "Frontend",
+          bullets: [
+            "The frontend is the visible part: menus, tabs, cards, chat bubbles, buttons, forms, and tables.",
+            "It remembers what you are looking at, such as the selected workspace, project, tab, and chat.",
+            "When you click something, the screen updates or asks the server to save a change."
+          ]
+        },
+        tech: {
+          title: "Frontend",
+          bullets: [
+            "React 19 renders the screen in src/routes/index.tsx.",
+            "TanStack Router controls routes, loaders, redirects, and page metadata.",
+            "TanStack Query manages fetched server state and refreshes after mutations.",
+            "TanStack Form and Table support forms and sortable data tables."
+          ]
+        }
+      },
+      server: {
+        plain: {
+          title: "Backend or server logic",
+          bullets: [
+            "The server is the app's decision-making layer.",
+            "It checks whether you are signed in and allowed to do something.",
+            "It saves messages and asks Workers AI for a chatbot response.",
+            "It talks to the database and file storage so the browser does not do that directly."
+          ]
+        },
+        tech: {
+          title: "Backend or server logic",
+          bullets: [
+            "Server functions are created with createServerFn in pmo-data.ts, team-workflow.ts, and auth-workflow.ts.",
+            "sendChatMessage checks editor role, verifies chat membership, persists user and assistant messages, and calls Workers AI.",
+            "team-workflow.ts handles D1-backed teams, project membership, scoped chats, and scoped invites.",
+            "src/worker.ts passes Cloudflare env bindings into the TanStack Start server entry."
+          ]
+        }
+      },
+      data: {
+        plain: {
+          title: "Data and storage",
+          bullets: [
+            "The database is where the app remembers structured information, like users, projects, chats, and messages.",
+            "File storage is where larger documents, spreadsheets, and decks would live.",
+            "This prototype has both real database wiring and some seeded demo data."
+          ]
+        },
+        tech: {
+          title: "Data and storage",
+          bullets: [
+            "Cloudflare D1 binding DB stores auth tables, teams, members, projects, chats, messages, artifact metadata, actions, and invites.",
+            "Cloudflare R2 binding ARTIFACTS_BUCKET is configured for artifact file bytes.",
+            "db/schema.ts defines the Drizzle schema and drizzle/ contains migrations.",
+            "pmo-data.ts still contains in-memory seed state for parts of the PMO workspace, so production would need deeper persistence."
+          ]
+        }
+      },
+      auth: {
+        plain: {
+          title: "Access and authentication",
+          bullets: [
+            "Users must be invited before they can create an account.",
+            "After accepting an invite, they verify email and sign in with a password.",
+            "Different roles control what people can change: admin, user, or viewer.",
+            "Team and project membership decide which shared chats and projects appear."
+          ]
+        },
+        tech: {
+          title: "Access and authentication",
+          bullets: [
+            "better-auth provides email/password auth, email verification, sessions, and admin role support.",
+            "auth-workflow.ts creates invite tokens, hashes tokens, records invites in D1, and sends invite emails.",
+            "Sign-up is blocked unless the internal invite header is present.",
+            "Write server functions call requireWorkspaceEditor, requireManager, requireTeamMember, or requireProjectMember."
+          ]
+        }
+      },
+      deploy: {
+        plain: {
+          title: "Deployment",
+          bullets: [
+            "Deployment means putting the app somewhere other people can open it in a browser.",
+            "This project is set up to run on Cloudflare-style hosting.",
+            "It needs the app files, a database, file storage, AI access, and email sending to be connected in the hosting environment."
+          ]
+        },
+        tech: {
+          title: "Deployment",
+          bullets: [
+            "npm run build runs vite build and TypeScript checking.",
+            ".openai/hosting.json declares Sites logical bindings DB and ARTIFACTS_BUCKET.",
+            "wrangler.jsonc targets a Cloudflare Worker with assets, D1, R2, Workers AI, Send Email, nodejs_compat, and observability.",
+            "The deploy script builds then runs wrangler deploy through scripts/run-wrangler.mjs."
+          ]
+        }
+      }
+    };
+
+    const flow = {
+      signin: {
+        title: "Sign in",
+        status: "Auth",
+        screen: [
+          ["fake-field", "Email: invited.user@vertexeducation.com"],
+          ["fake-field", "Password: ********"],
+          ["fake-row selected", "Button: Sign in"],
+          ["fake-row", "If verified, open the workspace"]
+        ],
+        calloutTitle: "The door to the app",
+        callout: "The app checks your session before showing the main screen. If you are not signed in, it redirects you to the sign-in page."
+      },
+      scope: {
+        title: "Choose scope",
+        status: "Workspace",
+        screen: [
+          ["fake-row selected", "Personal"],
+          ["fake-row", "Team"],
+          ["fake-row", "Org"],
+          ["fake-row", "Each scope has its own projects, chats, ideas, and files"]
+        ],
+        calloutTitle: "The workspace boundary",
+        callout: "Scope is the app's main context switch. It helps keep personal, team, and organization-level records separated."
+      },
+      project: {
+        title: "Select project or chat",
+        status: "Context",
+        screen: [
+          ["fake-row selected", "Project: Vertex Hub"],
+          ["fake-row", "Chat: Shared Project Chat"],
+          ["fake-row", "Chat: Decision Log"],
+          ["fake-row", "Context label updates before you ask VertexAI"]
+        ],
+        calloutTitle: "The room you are working in",
+        callout: "A project chat narrows the assistant's context to a project. A workspace chat is broader and belongs to the selected Personal, Team, or Org scope."
+      },
+      ask: {
+        title: "Ask VertexAI",
+        status: "AI",
+        screen: [
+          ["fake-field", "Message: Create a RAID summary"],
+          ["fake-row selected", "Server checks membership"],
+          ["fake-row", "Workers AI receives prompt plus scoped context"],
+          ["fake-row", "User and assistant messages are saved"]
+        ],
+        calloutTitle: "The chatbot response path",
+        callout: "The browser sends your message to a server function. The server verifies access, asks Workers AI for a response, saves both messages, then refreshes the chat."
+      },
+      act: {
+        title: "Take action",
+        status: "Records",
+        screen: [
+          ["fake-row selected", "Pin an artifact"],
+          ["fake-row", "Move a decision to Done"],
+          ["fake-row", "Approve an approval"],
+          ["fake-row", "Mark a task In progress"]
+        ],
+        calloutTitle: "Turning chat into work",
+        callout: "The prototype is designed so the AI conversation sits next to operational records. A user can move from discussion to tracked action."
+      },
+      share: {
+        title: "Share or download",
+        status: "Artifacts",
+        screen: [
+          ["fake-row selected", "Preview artifact"],
+          ["fake-row", "Download DOCX, XLSX, or PPTX"],
+          ["fake-row", "Create invite or sharing flow"],
+          ["fake-row", "Future: governed magic links"]
+        ],
+        calloutTitle: "Outputs leave the workspace",
+        callout: "Artifacts are the files the assistant or team creates. Production sharing should add expiration, revocation, audit logs, and strict access checks."
+      }
+    };
+
+    const glossary = {
+      frontend: ["Frontend", "The part of the app you see and click in your browser: screens, buttons, tables, menus, dialogs, and chat boxes."],
+      backend: ["Backend", "The behind-the-scenes part that checks rules, talks to databases, saves records, and calls AI services."],
+      database: ["Database", "A structured place to store records like users, projects, chats, messages, roles, and tasks."],
+      storage: ["Object storage", "A place to store files, such as Word documents, spreadsheets, PowerPoint decks, images, or generated exports."],
+      auth: ["Authentication", "The sign-in system that proves who a user is and decides whether they can use the app."],
+      deployment: ["Deployment", "The process of building the app and putting it on hosting so people can open it in a browser."],
+      serverfn: ["Server function", "A server-side action that the browser can call, such as send a chat message or create a project."],
+      query: ["Query cache", "A frontend memory layer that keeps fetched data handy and refreshes it after something changes."]
+    };
+
+    const plainPanel = document.querySelector("#plain-panel");
+    const techPanel = document.querySelector("#tech-panel");
+    const topicButtons = document.querySelectorAll("[data-topic]");
+    const stepButtons = document.querySelectorAll("[data-step]");
+    const flowTitle = document.querySelector("#flow-screen-title");
+    const flowStatus = document.querySelector("#flow-status");
+    const flowScreen = document.querySelector("#flow-screen");
+    const flowCalloutTitle = document.querySelector("#flow-callout-title");
+    const flowCallout = document.querySelector("#flow-callout");
+    const glossaryResult = document.querySelector("#glossary-result");
+
+    function renderBullets(target, data, plain) {
+      target.innerHTML = `
+        <h3>${data.title}</h3>
+        <ul class="bullet-list">
+          ${data.bullets.map((item, index) => `<li><span class="dot">${index + 1}</span><span>${item}</span></li>`).join("")}
+        </ul>
+        <p class="caption">${plain ? "Plain translation of the product behavior." : "Implementation detail from the current repository."}</p>
+      `;
+    }
+
+    function setTopic(topic) {
+      topicButtons.forEach((button) => button.classList.toggle("active", button.dataset.topic === topic));
+      renderBullets(plainPanel, topics[topic].plain, true);
+      renderBullets(techPanel, topics[topic].tech, false);
+    }
+
+    function setFlow(step) {
+      const data = flow[step];
+      stepButtons.forEach((button) => button.classList.toggle("active", button.dataset.step === step));
+      flowTitle.textContent = data.title;
+      flowStatus.textContent = data.status;
+      flowScreen.innerHTML = data.screen.map(([className, text]) => `<div class="${className}">${text}</div>`).join("");
+      flowCalloutTitle.textContent = data.calloutTitle;
+      flowCallout.textContent = data.callout;
+    }
+
+    topicButtons.forEach((button) => {
+      button.addEventListener("click", () => setTopic(button.dataset.topic));
+    });
+
+    stepButtons.forEach((button) => {
+      button.addEventListener("click", () => setFlow(button.dataset.step));
+    });
+
+    document.querySelectorAll("[data-term]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const [title, text] = glossary[button.dataset.term];
+        glossaryResult.innerHTML = `<h3>${title}</h3><p>${text}</p>`;
+      });
+    });
+
+    setTopic("does");
+    setFlow("signin");
+  </script>
+</body>
+</html>

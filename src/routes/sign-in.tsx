@@ -20,7 +20,7 @@ export const Route = createFileRoute("/sign-in")({
 });
 
 function SignInPage() {
-  const [email, setEmail] = useState("roger.cormier@vertexeducation.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState(() =>
