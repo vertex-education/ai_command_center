@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
 import { lightweightChatTitleModelId } from "@/lib/prompts";
 import { getConversationKey, type ChatMessage, type ChatSection, type ChatSummary, type ProjectSummary, type WorkspaceMode } from "@/lib/pmo-data";
+import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
 import { getRequest } from "@tanstack/start-server-core";
 
 type SessionUser = {
@@ -85,6 +86,10 @@ function getDb() {
   const db = (env as Env).DB;
   if (!db) throw new Error("D1 binding DB is required.");
   return db;
+}
+
+function currentClientId() {
+  return getRequest().headers.get("x-vertex-client-id");
 }
 
 async function currentUser() {
@@ -233,6 +238,44 @@ async function getWorkspaceId(mode: WorkspaceMode) {
   return workspace.id;
 }
 
+async function recordScopedMutation({
+  chatId = null,
+  entity,
+  entityId,
+  invalidates,
+  mode,
+  operation,
+  projectId = null,
+  sourceUserId,
+  teamId = null,
+  workspaceId,
+}: {
+  chatId?: string | null;
+  entity: string;
+  entityId: string;
+  invalidates: RealtimeInvalidationTarget[];
+  mode: WorkspaceMode;
+  operation: string;
+  projectId?: string | null;
+  sourceUserId: string;
+  teamId?: string | null;
+  workspaceId?: string;
+}) {
+  await recordRealtimeMutationEvent(getDb(), {
+    chatId,
+    entity,
+    entityId,
+    invalidates,
+    mode,
+    operation,
+    projectId,
+    sourceClientId: currentClientId(),
+    sourceUserId,
+    teamId: mode === "Team" ? teamId : null,
+    workspaceId: workspaceId ?? await getWorkspaceId(mode),
+  });
+}
+
 async function requireTeamMember(userId: string, teamId: string) {
   const membership = await getDb()
     .prepare("SELECT team_id FROM team_members WHERE team_id = ? AND user_id = ? LIMIT 1")
@@ -288,6 +331,15 @@ export const createTeam = createServerFn({ method: "POST" })
       .prepare("INSERT INTO team_members (team_id, user_id, role, created_at) VALUES (?, ?, ?, ?)")
       .bind(id, user.id, "owner", now)
       .run();
+    await recordScopedMutation({
+      entity: "team",
+      entityId: id,
+      invalidates: ["teams", "projects", "chats"],
+      mode: "Team",
+      operation: "insert",
+      sourceUserId: user.id,
+      teamId: id,
+    });
     return { id, name };
   });
 
@@ -352,6 +404,17 @@ export const createScopedProject = createServerFn({ method: "POST" })
       .prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, team_id, created_at) VALUES (?, ?, ?, ?)")
       .bind(id, user.id, data.mode === "Team" ? data.teamId : null, Date.now())
       .run();
+    await recordScopedMutation({
+      entity: "project",
+      entityId: id,
+      invalidates: ["projects", "chats", "workspace"],
+      mode: data.mode,
+      operation: "insert",
+      projectId: id,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId: workspace.id,
+    });
 
     return {
       id,
@@ -372,7 +435,7 @@ export const deleteScopedProject = createServerFn({ method: "POST" })
 
     const project = await getDb()
       .prepare(
-        `SELECT p.id
+        `SELECT p.id, p.workspace_id as workspaceId
          FROM projects p
          INNER JOIN workspaces w ON w.id = p.workspace_id
          WHERE p.id = ?
@@ -380,7 +443,7 @@ export const deleteScopedProject = createServerFn({ method: "POST" })
          LIMIT 1`,
       )
       .bind(data.projectId, scopeForMode(data.mode))
-      .first<{ id: string }>();
+      .first<{ id: string; workspaceId: string }>();
     if (!project) throw new Error("Project was not found.");
 
     const projectChats = await getDb()
@@ -416,6 +479,17 @@ export const deleteScopedProject = createServerFn({ method: "POST" })
       .prepare("DELETE FROM projects WHERE id = ?")
       .bind(data.projectId)
       .run();
+    await recordScopedMutation({
+      entity: "project",
+      entityId: data.projectId,
+      invalidates: ["projects", "chats", "workspace"],
+      mode: data.mode,
+      operation: "delete",
+      projectId: data.projectId,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId: project.workspaceId,
+    });
 
     return { id: data.projectId };
   });
@@ -592,6 +666,18 @@ export const createScopedChat = createServerFn({ method: "POST" })
         .bind(id, data.mode === "Team" ? null : user.id, data.mode === "Team" ? data.teamId ?? null : null, Date.now())
         .run();
     }
+    await recordScopedMutation({
+      chatId: id,
+      entity: "chat",
+      entityId: id,
+      invalidates: ["chats", "projects"],
+      mode: data.mode,
+      operation: "insert",
+      projectId: data.section === "project" ? data.projectId ?? null : null,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
 
     return { id, title, description } satisfies ChatSummary;
   });
@@ -743,6 +829,18 @@ export const branchScopedChat = createServerFn({ method: "POST" })
         new Date().toISOString(),
       )
       .run();
+    await recordScopedMutation({
+      chatId: nextChatId,
+      entity: "chat",
+      entityId: nextChatId,
+      invalidates: ["chats", "projects"],
+      mode: data.mode,
+      operation: "branch",
+      projectId: data.section === "project" ? data.projectId ?? null : null,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
 
     return {
       chat: { id: nextChatId, title, description },
@@ -805,6 +903,18 @@ export const deleteScopedChat = createServerFn({ method: "POST" })
     await getDb().prepare("DELETE FROM chat_members WHERE chat_id = ?").bind(data.chatId).run();
     await getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").bind(data.chatId).run();
     await getDb().prepare("DELETE FROM chats WHERE id = ?").bind(data.chatId).run();
+    await recordScopedMutation({
+      chatId: data.chatId,
+      entity: "chat",
+      entityId: data.chatId,
+      invalidates: ["chats", "projects"],
+      mode: data.mode,
+      operation: "delete",
+      projectId: data.section === "project" ? data.projectId ?? null : null,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
 
     return { id: data.chatId };
   });
@@ -864,6 +974,18 @@ export const renameScopedChat = createServerFn({ method: "POST" })
     }
 
     await getDb().prepare("UPDATE chats SET title = ? WHERE id = ?").bind(title, data.chatId).run();
+    await recordScopedMutation({
+      chatId: data.chatId,
+      entity: "chat",
+      entityId: data.chatId,
+      invalidates: ["chats", "projects"],
+      mode: data.mode,
+      operation: "rename",
+      projectId: data.section === "project" ? data.projectId ?? null : null,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
     return { id: data.chatId, title };
   });
 
@@ -880,6 +1002,16 @@ export const createScopedInvite = createServerFn({ method: "POST" })
       )
       .bind(id, data.scope, data.targetId, data.targetTeamId ?? null, data.targetName, email, user.id, Date.now())
       .run();
+    await recordScopedMutation({
+      entity: "scoped_invite",
+      entityId: id,
+      invalidates: ["teams", "projects", "chats"],
+      mode: data.targetTeamId ? "Team" : "Org",
+      operation: "insert",
+      projectId: data.scope === "project" ? data.targetId : null,
+      sourceUserId: user.id,
+      teamId: data.targetTeamId ?? (data.scope === "team" ? data.targetId : null),
+    });
     return { id, scope: data.scope, targetName: data.targetName, email };
   });
 
@@ -930,6 +1062,16 @@ export const acceptScopedInvite = createServerFn({ method: "POST" })
           .run();
       }
       await getDb().prepare("UPDATE scoped_invites SET accepted_at = ? WHERE id = ?").bind(now, invite.id).run();
+      await recordScopedMutation({
+        entity: "scoped_invite",
+        entityId: invite.id,
+        invalidates: ["teams", "projects", "chats"],
+        mode: invite.targetTeamId ? "Team" : "Org",
+        operation: "accept",
+        projectId: invite.scope === "project" ? invite.targetId : null,
+        sourceUserId: user.id,
+        teamId: invite.targetTeamId ?? (invite.scope === "team" ? invite.targetId : null),
+      });
     }
     return { id: invite.id, scope: invite.scope, targetName: invite.targetName };
   });

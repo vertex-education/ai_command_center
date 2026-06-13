@@ -41,6 +41,7 @@ import {
   PanelRightOpen,
   Pencil,
   Plus,
+  Settings,
   Search,
   Send,
   Share2,
@@ -48,13 +49,13 @@ import {
   Sparkles,
   Star,
   Trash2,
-  UserRound,
   Users,
   X,
   Zap,
 } from "lucide-react";
 import { ArtifactUploader } from "@/components/ArtifactUploader";
 import { ArtifactRenderer } from "@/components/ArtifactRenderer";
+import { AppRail } from "@/components/AppRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -142,9 +143,9 @@ import {
   workspaceModes,
 } from "@/lib/pmo-data";
 import {
-  chatWithScopedRag,
   type ChatWithScopedRagCitation,
 } from "@/lib/rag";
+import type { RealtimeMutationEvent } from "@/lib/realtime-events";
 import {
   deleteScopedChat,
   deleteScopedProject,
@@ -206,6 +207,31 @@ const emptyScopedChatsResult: ScopedChatsResult = {
 
 const emptyChatImageSrc =
   "data:image/svg+xml,%3Csvg width='192' height='144' viewBox='0 0 192 144' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='18' y='25' width='156' height='94' rx='20' fill='%23F8FAFC'/%3E%3Crect x='34' y='42' width='87' height='12' rx='6' fill='%23215A96' fill-opacity='.18'/%3E%3Crect x='34' y='64' width='124' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Crect x='34' y='82' width='73' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Ccircle cx='139' cy='51' r='17' fill='%23215A96'/%3E%3Cpath d='M139 41v20M129 51h20' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M61 119l-13 17-3-22' fill='%23F8FAFC'/%3E%3Crect x='18' y='25' width='156' height='94' rx='20' stroke='%23215A96' stroke-opacity='.16' stroke-width='2'/%3E%3C/svg%3E";
+
+const onboardingCompletedKey = "vertex-onboarding-tutorial-completed";
+const onboardingRelaunchKey = "vertex-onboarding-tutorial-relaunch";
+const realtimeClientIdKey = "vertex-realtime-client-id";
+
+function getRealtimeClientId() {
+  if (typeof window === "undefined") return "";
+  const existing = window.sessionStorage.getItem(realtimeClientIdKey);
+  if (existing) return existing;
+  const nextId = crypto.randomUUID();
+  window.sessionStorage.setItem(realtimeClientIdKey, nextId);
+  return nextId;
+}
+
+function realtimeLastEventKey(mode: WorkspaceMode, teamId: string | null, userId: string) {
+  return `vertex-realtime-last-event:${mode}:${teamId ?? userId}`;
+}
+
+type TutorialStep = {
+  title: string;
+  description: string;
+  detail: string;
+  actionLabel?: string;
+  onAction?: () => void;
+};
 
 function appendChatMessageToScopedChats(current: ScopedChatsResult | undefined, event: ChatMessageInsertEvent) {
   if (!current) return current;
@@ -271,6 +297,93 @@ function addArtifactToWorkspaceCache(current: PmoWorkspaceState | undefined, mod
       [mode]: {
         ...scopedWorkspace,
         artifacts: [artifact, ...scopedWorkspace.artifacts.filter((item) => item.r2Key !== artifact.r2Key)],
+      },
+    },
+  } satisfies PmoWorkspaceState;
+}
+
+function updateArtifactInWorkspaceCache(
+  current: PmoWorkspaceState | undefined,
+  mode: WorkspaceMode,
+  r2Key: string,
+  updateArtifact: (artifact: Artifact) => Artifact,
+) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        artifacts: scopedWorkspace.artifacts.map((artifact) =>
+          artifact.r2Key === r2Key ? updateArtifact(artifact) : artifact,
+        ),
+      },
+    },
+  } satisfies PmoWorkspaceState;
+}
+
+function removeArtifactFromWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, r2Key: string) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        artifacts: scopedWorkspace.artifacts.filter((artifact) => artifact.r2Key !== r2Key),
+      },
+    },
+  } satisfies PmoWorkspaceState;
+}
+
+function cycleApprovalStatus(status: Approval["status"]): Approval["status"] {
+  if (status === "Needed") return "Requested";
+  if (status === "Requested") return "Approved";
+  return "Needed";
+}
+
+function cycleTaskStatus(status: Task["status"]): Task["status"] {
+  if (status === "Open") return "In progress";
+  if (status === "In progress") return "Done";
+  return "Open";
+}
+
+function updateApprovalInWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, id: string) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        approvals: scopedWorkspace.approvals.map((approval) =>
+          approval.id === id
+            ? { ...approval, status: cycleApprovalStatus(approval.status), clientStatus: "pending" }
+            : approval,
+        ),
+      },
+    },
+  } satisfies PmoWorkspaceState;
+}
+
+function updateTaskInWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, id: string) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        tasks: scopedWorkspace.tasks.map((task) =>
+          task.id === id
+            ? { ...task, status: cycleTaskStatus(task.status), clientStatus: "pending" }
+            : task,
+        ),
       },
     },
   } satisfies PmoWorkspaceState;
@@ -412,6 +525,8 @@ function getDetailMetrics({
 function PMOCommandCenter() {
   const { session } = Route.useLoaderData();
   const queryClient = useQueryClient();
+  const realtimeClientIdRef = useRef("");
+  const realtimeSeenEventIdsRef = useRef<Set<number>>(new Set());
   const workspaceQuery = useSuspenseQuery(pmoWorkspaceQueryOptions());
   const teamsQuery = useSuspenseQuery({
     queryKey: ["my-teams"],
@@ -531,7 +646,26 @@ function PMOCommandCenter() {
     if (typeof window === "undefined") return true;
     return window.localStorage.getItem("vertex-show-token-usage") !== "0";
   });
+  const [isTutorialOpen, setIsTutorialOpen] = useState(false);
+  const [tutorialStepIndex, setTutorialStepIndex] = useState(0);
   const canEdit = session.user.role === "admin" || session.user.role === "user";
+
+  useEffect(() => {
+    const requestedRail = window.sessionStorage.getItem("vertex-target-rail") as RailName | null;
+    if (!requestedRail) return;
+    window.sessionStorage.removeItem("vertex-target-rail");
+    handleRailClick(requestedRail);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const shouldRelaunch = window.sessionStorage.getItem(onboardingRelaunchKey) === "1";
+    const hasCompleted = window.localStorage.getItem(onboardingCompletedKey) === "1";
+    if (!shouldRelaunch && hasCompleted) return;
+    window.sessionStorage.removeItem(onboardingRelaunchKey);
+    setTutorialStepIndex(0);
+    setIsTutorialOpen(true);
+  }, []);
 
   const invalidateWorkspace = () =>
     queryClient.invalidateQueries({ queryKey: pmoWorkspaceQueryKey });
@@ -598,14 +732,53 @@ function PMOCommandCenter() {
   });
   const toggleArtifactPinMutation = useMutation({
     mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => toggleArtifactPin({ data: input }),
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        updateArtifactInWorkspaceCache(current, input.mode, input.r2Key, (artifact) => {
+          const isPinned = artifact.pinnedTo.includes(input.mode);
+          return {
+            ...artifact,
+            pinnedTo: isPinned
+              ? artifact.pinnedTo.filter((mode) => mode !== input.mode)
+              : [...artifact.pinnedTo, input.mode],
+            clientStatus: "pinning",
+          };
+        }),
+      );
+      return { previousWorkspace };
+    },
     onSuccess: (workspace) => {
       queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
+      updateToast(error instanceof Error ? error.message : "Could not update artifact pin.");
+    },
+    onSettled: async () => {
+      await invalidateWorkspace();
     },
   });
   const deleteArtifactMutation = useMutation({
     mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => deleteArtifact({ data: input }),
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        removeArtifactFromWorkspaceCache(current, input.mode, input.r2Key),
+      );
+      return { previousWorkspace };
+    },
     onSuccess: (workspace) => {
       queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
+      updateToast(error instanceof Error ? error.message : "Could not delete artifact.");
+    },
+    onSettled: async () => {
+      await invalidateWorkspace();
     },
   });
   const toggleDecisionMutation = useMutation({
@@ -614,11 +787,45 @@ function PMOCommandCenter() {
   });
   const toggleApprovalMutation = useMutation({
     mutationFn: (id: string) => toggleApprovalStatus({ data: { id, mode: activeMode } }),
-    onSuccess: invalidateWorkspace,
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        updateApprovalInWorkspaceCache(current, activeMode, id),
+      );
+      return { previousWorkspace };
+    },
+    onSuccess: (workspace) => {
+      queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
+    onError: (error, _id, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
+      updateToast(error instanceof Error ? error.message : "Could not update approval.");
+    },
+    onSettled: async () => {
+      await invalidateWorkspace();
+    },
   });
   const toggleTaskMutation = useMutation({
     mutationFn: (id: string) => toggleTaskStatus({ data: { id, mode: activeMode } }),
-    onSuccess: invalidateWorkspace,
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        updateTaskInWorkspaceCache(current, activeMode, id),
+      );
+      return { previousWorkspace };
+    },
+    onSuccess: (workspace) => {
+      queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
+    onError: (error, _id, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
+      updateToast(error instanceof Error ? error.message : "Could not update task.");
+    },
+    onSettled: async () => {
+      await invalidateWorkspace();
+    },
   });
   const createTeamMutation = useMutation({
     mutationFn: (input: { name: string; description?: string }) => createTeam({ data: input }),
@@ -871,6 +1078,58 @@ function PMOCommandCenter() {
   }, [activeMode, queryClient, scopedChatsQueryKey, selectedTeam, session.user.email, session.user.id, session.user.name]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeMode === "Team" && !selectedTeam) return;
+
+    const clientId = getRealtimeClientId();
+    realtimeClientIdRef.current = clientId;
+    const teamId = activeMode === "Team" ? selectedTeam?.id ?? null : null;
+    const lastEventStorageKey = realtimeLastEventKey(activeMode, teamId, session.user.id);
+    const lastEventId = window.sessionStorage.getItem(lastEventStorageKey);
+    const params = new URLSearchParams({ mode: activeMode, clientId });
+    if (teamId) params.set("teamId", teamId);
+    if (lastEventId) params.set("lastEventId", lastEventId);
+
+    const events = new EventSource(`/api/events?${params.toString()}`);
+
+    events.addEventListener("mutation", (mutationEvent) => {
+      try {
+        const event = JSON.parse(mutationEvent.data) as RealtimeMutationEvent;
+        if (event.sourceClientId && event.sourceClientId === realtimeClientIdRef.current) return;
+        if (realtimeSeenEventIdsRef.current.has(event.id)) return;
+
+        realtimeSeenEventIdsRef.current.add(event.id);
+        if (realtimeSeenEventIdsRef.current.size > 500) {
+          const oldest = realtimeSeenEventIdsRef.current.values().next().value;
+          if (typeof oldest === "number") realtimeSeenEventIdsRef.current.delete(oldest);
+        }
+        window.sessionStorage.setItem(lastEventStorageKey, String(event.id));
+
+        if (event.invalidates.includes("workspace")) void invalidateWorkspace();
+        if (event.invalidates.includes("teams")) void invalidateTeams();
+        if (event.invalidates.includes("projects")) void invalidateProjects();
+        if (event.invalidates.includes("chats")) void invalidateChats();
+      } catch (error) {
+        console.warn("Could not apply realtime mutation event.", error);
+      }
+    });
+
+    events.addEventListener("stream-error", (errorEvent) => {
+      console.warn("Realtime event stream reported an error.", (errorEvent as MessageEvent).data);
+    });
+
+    events.onerror = () => {
+      if (events.readyState === EventSource.CLOSED) {
+        void invalidateWorkspace();
+        void invalidateProjects();
+        void invalidateChats();
+      }
+    };
+
+    return () => events.close();
+  }, [activeMode, queryClient, selectedTeam, session.user.id]);
+
+  useEffect(() => {
     if (canEdit && activeTab === "Chat" && activeChatId) {
       focusChatComposer();
     }
@@ -899,6 +1158,77 @@ function PMOCommandCenter() {
     };
     setActiveTab(nextTab[label] ?? "Ideas");
   }
+
+  function startTutorial() {
+    setTutorialStepIndex(0);
+    setIsTutorialOpen(true);
+  }
+
+  function completeTutorial() {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(onboardingCompletedKey, "1");
+      window.sessionStorage.removeItem(onboardingRelaunchKey);
+    }
+    setIsTutorialOpen(false);
+  }
+
+  const tutorialSteps: TutorialStep[] = [
+    {
+      title: "Start in your workspace",
+      description: "The blue rail stays with you as you move through the app. Use it to return to Workspaces, Chats, Ideas, Artifacts, Docs, and Settings.",
+      detail: "The main workspace opens in Personal scope so new users can try the assistant without exposing work to a team.",
+      actionLabel: "Show workspace",
+      onAction: () => {
+        setActiveMode("Personal");
+        handleRailClick("Workspaces");
+      },
+    },
+    {
+      title: "Create your first chat",
+      description: "Chats keep AI conversations organized by personal, team, org, or project context.",
+      detail: "Create separate chats for different workstreams so history, artifacts, and future branches stay easy to find.",
+      actionLabel: "Open new chat form",
+      onAction: () => {
+        setActiveMode("Personal");
+        handleRailClick("Workspaces");
+        setCreateChatState({ section: "workspace", projectId: null });
+      },
+    },
+    {
+      title: "Create your first team",
+      description: "Team workspaces let a group share projects, chats, artifacts, and scoped invites.",
+      detail: "After a team exists, switch to Team scope and create shared project work inside that team.",
+      actionLabel: "Open team form",
+      onAction: () => {
+        setActiveMode("Team");
+        setIsCreateTeamOpen(true);
+      },
+    },
+    {
+      title: "Create your first project",
+      description: "Projects collect focused chats, artifacts, decisions, approvals, tasks, and prompts under one delivery scope.",
+      detail: "Use projects when work has a clear owner, timeline, or artifact set.",
+      actionLabel: "Open project form",
+      onAction: () => {
+        handleRailClick("Workspaces");
+        setIsCreateProjectOpen(true);
+      },
+    },
+    {
+      title: "Review artifacts and actions",
+      description: "Artifacts, Ideas, Decisions, Approvals, and Tasks are available from the workspace tabs and the blue rail.",
+      detail: "Pinned outputs appear at the top of the workspace so important files and ideas stay visible.",
+      actionLabel: "Show artifacts",
+      onAction: () => handleRailClick("Artifacts"),
+    },
+    {
+      title: "Use prompts and settings later",
+      description: "Prompt templates help start structured assistant requests. Settings lets you relaunch this tutorial whenever you need a reset.",
+      detail: "The tutorial is skippable now and available again from User Settings.",
+      actionLabel: "Open settings",
+      onAction: () => (window.location.href = "/profile"),
+    },
+  ];
 
   function handleWorkspaceMode(mode: WorkspaceMode) {
     setActiveMode(mode);
@@ -1123,12 +1453,7 @@ function PMOCommandCenter() {
     });
     setIsScopedRagStreaming(true);
     try {
-      const response = await chatWithScopedRag({ data: { prompt, teamId, workspaceId, projectId } });
-      if (!(response instanceof Response)) throw new Error("Scoped RAG did not return a streaming response.");
-      if (!response.ok) throw new Error(`Scoped RAG stream failed (${response.status}).`);
-      if (!response.body) throw new Error("Scoped RAG stream did not include a body.");
-
-      await readScopedRagSse(response.body, {
+      await consumeScopedRagEventSource({ prompt, teamId, workspaceId, projectId }, {
         onCitations: (nextCitations) => {
           citations = nextCitations;
           queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
@@ -1509,6 +1834,7 @@ function PMOCommandCenter() {
           onRailClick={handleRailClick}
           onShowTokenUsageChange={setShowTokenUsage}
           onSignOut={handleSignOut}
+          onStartTutorial={startTutorial}
         />
 
         <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
@@ -1522,6 +1848,7 @@ function PMOCommandCenter() {
             onSearchTerm={setSearchTerm}
             onShowTokenUsageChange={setShowTokenUsage}
             onSignOut={handleSignOut}
+            onStartTutorial={startTutorial}
             onMobileMenu={() => handleRailClick("Workspaces")}
             onNotify={() => updateToast("Decision taxonomy is still blocked")}
           />
@@ -1859,6 +2186,21 @@ function PMOCommandCenter() {
         ) : null}
       </div>
 
+      <TutorialDialog
+        canAct={canEdit}
+        open={isTutorialOpen}
+        stepIndex={tutorialStepIndex}
+        steps={tutorialSteps}
+        onComplete={completeTutorial}
+        onOpenChange={(open) => {
+          if (open) {
+            setIsTutorialOpen(true);
+            return;
+          }
+          completeTutorial();
+        }}
+        onStepChange={setTutorialStepIndex}
+      />
       {canEdit ? (
         <>
           <AddIdeaDialog
@@ -2375,6 +2717,7 @@ function PrimaryRail({
   onRailClick,
   onShowTokenUsageChange,
   onSignOut,
+  onStartTutorial,
 }: {
   activeRail: RailName;
   canAdmin: boolean;
@@ -2384,47 +2727,22 @@ function PrimaryRail({
   onRailClick: (rail: RailName) => void;
   onShowTokenUsageChange: (value: boolean) => void;
   onSignOut: () => void;
+  onStartTutorial: () => void;
 }) {
-  const items: Array<{ label: RailName; icon: ComponentType<{ className?: string }> }> = [
-    { label: "Workspaces", icon: FolderOpen },
-    { label: "Chats", icon: MessageCircle },
-    { label: "Ideas", icon: Lightbulb },
-    { label: "Artifacts", icon: Archive },
-  ];
-
   return (
-    <aside className="hidden min-h-0 flex-col items-center gap-2 bg-sidebar px-2 py-5 text-sidebar-foreground lg:flex">
-      <div className="mb-4 grid size-10 place-items-center rounded-md bg-white">
-        <img alt="Vertex" className="size-7" src="/vertex-mountain-blue.svg" />
-      </div>
-      {items.map(({ label, icon: Icon }) => (
-        <button
-          aria-label={label}
-          className={cn(
-            "group relative grid size-12 place-items-center rounded-md text-white/75 transition-colors hover:bg-white/15 hover:text-white",
-            activeRail === label && "bg-white/15 text-white",
-          )}
-          key={label}
-          type="button"
-          onClick={() => onRailClick(label)}
-        >
-          <Icon className="size-5" />
-          <span className="pointer-events-none absolute left-[calc(100%+10px)] z-50 rounded-md border border-white/15 bg-sidebar px-2 py-1 text-xs font-semibold opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
-            {label}
-          </span>
-        </button>
-      ))}
-      <div className="flex-1" />
-      <AccountMenu
-        align="rail"
-        canAdmin={canAdmin}
-        showTokenUsage={showTokenUsage}
-        userEmail={userEmail}
-        userName={userName}
-        onShowTokenUsageChange={onShowTokenUsageChange}
-        onSignOut={onSignOut}
-      />
-    </aside>
+    <AppRail
+      account={{
+        canAdmin,
+        showTokenUsage,
+        userEmail,
+        userName,
+        onShowTokenUsageChange,
+        onSignOut,
+        onStartTutorial,
+      }}
+      activeItem={activeRail === "Workspaces" || activeRail === "Chats" || activeRail === "Ideas" || activeRail === "Artifacts" ? activeRail : undefined}
+      onRailClick={onRailClick}
+    />
   );
 }
 
@@ -2440,6 +2758,7 @@ function Topbar({
   onSearchTerm,
   onShowTokenUsageChange,
   onSignOut,
+  onStartTutorial,
 }: {
   canAdmin: boolean;
   presenceUsers: WorkspacePresenceUser[];
@@ -2452,6 +2771,7 @@ function Topbar({
   onSearchTerm: (value: string) => void;
   onShowTokenUsageChange: (value: boolean) => void;
   onSignOut: () => void;
+  onStartTutorial: () => void;
 }) {
   return (
     <header className="grid min-h-16 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(200px,1fr)_minmax(340px,460px)_auto] lg:px-5">
@@ -2493,6 +2813,7 @@ function Topbar({
             userName={userName}
             onShowTokenUsageChange={onShowTokenUsageChange}
             onSignOut={onSignOut}
+            onStartTutorial={onStartTutorial}
           />
         </div>
       </div>
@@ -2582,6 +2903,7 @@ function AccountMenu({
   userName,
   onShowTokenUsageChange,
   onSignOut,
+  onStartTutorial,
 }: {
   align: "rail" | "topbar";
   canAdmin: boolean;
@@ -2590,6 +2912,7 @@ function AccountMenu({
   userName: string;
   onShowTokenUsageChange: (value: boolean) => void;
   onSignOut: () => void;
+  onStartTutorial: () => void;
 }) {
   const [isOpen, setIsOpen] = useState(false);
   const displayName = userName || userEmail;
@@ -2641,8 +2964,17 @@ function AccountMenu({
             role="menuitem"
             onClick={() => runMenuAction(() => (window.location.href = "/profile"))}
           >
-            <UserRound className="size-4" />
-            User profile
+            <Settings className="size-4" />
+            User settings
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-accent"
+            role="menuitem"
+            onClick={() => runMenuAction(onStartTutorial)}
+          >
+            <CheckCircle2 className="size-4" />
+            Relaunch tutorial
           </button>
           <button
             type="button"
@@ -3345,63 +3677,82 @@ type ScopedRagSseHandlers = {
   onToken: (token: string) => void;
 };
 
-async function readScopedRagSse(stream: ReadableStream<Uint8Array>, handlers: ScopedRagSseHandlers) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+function consumeScopedRagEventSource(input: {
+  projectId: string;
+  prompt: string;
+  teamId: string;
+  workspaceId: string;
+}, handlers: ScopedRagSseHandlers) {
+  return new Promise<void>((resolve, reject) => {
+    const eventSource = new EventSource(scopedRagStreamUrl(input));
+    let completed = false;
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
-      for (const eventText of events) {
-        handleScopedRagSseEvent(eventText, handlers);
+    eventSource.addEventListener("citations", (event) => {
+      const payload = parseScopedRagSsePayload(event as MessageEvent);
+      const citations = typeof payload === "object" && payload ? (payload as { citations?: unknown }).citations : null;
+      if (Array.isArray(citations)) handlers.onCitations(citations.filter(isScopedRagCitation));
+    });
+
+    eventSource.addEventListener("token", (event) => {
+      const payload = parseScopedRagSsePayload(event as MessageEvent);
+      const token = typeof payload === "object" && payload ? (payload as { token?: unknown }).token : payload;
+      if (typeof token === "string") handlers.onToken(token);
+    });
+
+    eventSource.addEventListener("done", () => {
+      completed = true;
+      eventSource.close();
+      resolve();
+    });
+
+    eventSource.addEventListener("stream-error", (event) => {
+      if (completed) return;
+      const payload = parseScopedRagSsePayload(event as MessageEvent);
+      const message = typeof payload === "object" && payload ? (payload as { message?: unknown }).message : payload;
+      const errorMessage = typeof message === "string" ? message : "Scoped RAG stream failed.";
+      completed = true;
+      eventSource.close();
+      try {
+        handlers.onError(errorMessage);
+      } catch {
+        // The promise rejection below is the consumer-facing failure path.
       }
-    }
+      reject(new Error(errorMessage));
+    });
 
-    const tail = decoder.decode();
-    if (tail) buffer += tail;
-    if (buffer.trim()) handleScopedRagSseEvent(buffer, handlers);
-  } finally {
-    reader.releaseLock();
-  }
+    eventSource.onerror = () => {
+      if (completed) return;
+      const errorMessage = "Scoped RAG stream connection failed.";
+      completed = true;
+      eventSource.close();
+      reject(new Error(errorMessage));
+    };
+  });
 }
 
-function handleScopedRagSseEvent(eventText: string, handlers: ScopedRagSseHandlers) {
-  const event = eventText.match(/^event:\s*(.+)$/m)?.[1]?.trim() ?? "message";
-  const data = eventText
-    .split("\n")
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trim())
-    .join("\n");
-  if (!data) return;
+function scopedRagStreamUrl(input: {
+  projectId: string;
+  prompt: string;
+  teamId: string;
+  workspaceId: string;
+}) {
+  const params = new URLSearchParams({
+    prompt: input.prompt,
+    teamId: input.teamId,
+    workspaceId: input.workspaceId,
+    projectId: input.projectId,
+  });
+  return `/api/scoped-rag-stream?${params.toString()}`;
+}
 
+function parseScopedRagSsePayload(event: MessageEvent) {
   let payload: unknown;
   try {
-    payload = JSON.parse(data);
+    payload = JSON.parse(event.data);
   } catch {
-    payload = data;
+    payload = event.data;
   }
-
-  if (event === "token") {
-    const token = typeof payload === "object" && payload ? (payload as { token?: unknown }).token : payload;
-    if (typeof token === "string") handlers.onToken(token);
-    return;
-  }
-
-  if (event === "citations") {
-    const citations = typeof payload === "object" && payload ? (payload as { citations?: unknown }).citations : null;
-    if (Array.isArray(citations)) handlers.onCitations(citations.filter(isScopedRagCitation));
-    return;
-  }
-
-  if (event === "error") {
-    const message = typeof payload === "object" && payload ? (payload as { message?: unknown }).message : payload;
-    handlers.onError(typeof message === "string" ? message : "Scoped RAG stream failed.");
-  }
+  return payload;
 }
 
 function isScopedRagCitation(value: unknown): value is ChatWithScopedRagCitation {
@@ -4001,7 +4352,11 @@ function ArtifactsView({
             <span className="min-w-0">
               <strong className="block truncate">{row.original.title}</strong>
               <em className="block text-xs not-italic text-muted-foreground">
-                {row.original.clientStatus === "saving" ? "Saving..." : row.original.summary}
+                {row.original.clientStatus === "saving"
+                  ? "Saving..."
+                  : row.original.clientStatus === "pinning"
+                    ? "Updating pin..."
+                    : row.original.summary}
               </em>
             </span>
           </div>
@@ -4012,9 +4367,11 @@ function ArtifactsView({
       {
         accessorKey: "status",
         header: "Status",
-        cell: ({ row }) => row.original.clientStatus === "saving" ? (
-          <Badge variant="warning">Saving</Badge>
-        ) : row.original.status,
+        cell: ({ row }) => {
+          if (row.original.clientStatus === "saving") return <Badge variant="warning">Saving</Badge>;
+          if (row.original.clientStatus === "pinning") return <Badge variant="warning">Pending</Badge>;
+          return row.original.status;
+        },
       },
       {
         id: "actions",
@@ -4026,7 +4383,7 @@ function ArtifactsView({
               variant="ghost"
               size="icon"
               aria-label={`Preview ${row.original.title}`}
-              disabled={row.original.clientStatus === "saving"}
+              disabled={Boolean(row.original.clientStatus)}
               onClick={(event) => {
                 event.stopPropagation();
                 onPreview(row.original);
@@ -4042,7 +4399,7 @@ function ArtifactsView({
                   size="icon"
                   aria-label={row.original.pinnedTo.includes(activeMode) ? `Unpin ${row.original.title}` : `Pin ${row.original.title}`}
                   title={row.original.pinnedTo.includes(activeMode) ? "Unpin artifact" : "Pin artifact"}
-                  disabled={row.original.clientStatus === "saving"}
+                  disabled={Boolean(row.original.clientStatus)}
                   onClick={(event) => {
                     event.stopPropagation();
                     onTogglePin(row.original);
@@ -4056,7 +4413,7 @@ function ArtifactsView({
                   size="icon"
                   aria-label={`Delete ${row.original.title}`}
                   title="Delete artifact"
-                  disabled={row.original.clientStatus === "saving"}
+                  disabled={Boolean(row.original.clientStatus)}
                   onClick={(event) => {
                     event.stopPropagation();
                     onDelete(row.original);
@@ -4066,7 +4423,7 @@ function ArtifactsView({
               </Button>
             </>
             ) : null}
-            {row.original.clientStatus === "saving" ? (
+            {row.original.clientStatus ? (
               <Button type="button" variant="ghost" size="icon" aria-label={`Download ${row.original.title}`} disabled>
                 <Download />
               </Button>
@@ -4105,7 +4462,7 @@ function ArtifactsView({
         selectedId={selectedArtifactTitle}
         getRowId={(artifact) => artifact.title}
         onRowClick={(artifact) => {
-          if (artifact.clientStatus === "saving") return;
+          if (artifact.clientStatus) return;
           onSelectArtifact(artifact);
         }}
       />
@@ -4152,17 +4509,22 @@ function ApprovalView({ approvals, canEdit, onToggle }: { approvals: Approval[];
       {
         accessorKey: "status",
         header: "Status",
-        cell: ({ row }) => <Badge variant={row.original.status === "Approved" ? "success" : row.original.status === "Requested" ? "warning" : "info"}>{row.original.status}</Badge>,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-2">
+            <Badge variant={row.original.status === "Approved" ? "success" : row.original.status === "Requested" ? "warning" : "info"}>{row.original.status}</Badge>
+            {row.original.clientStatus === "pending" ? <Badge variant="warning">Pending</Badge> : null}
+          </div>
+        ),
       },
       {
         id: "action",
         header: "",
         cell: ({ row }) => canEdit ? (
-          <Button type="button" variant="outline" size="sm" onClick={(event) => {
+          <Button type="button" variant="outline" size="sm" disabled={row.original.clientStatus === "pending"} onClick={(event) => {
             event.stopPropagation();
             onToggle(row.original.id);
           }}>
-            Toggle
+            {row.original.clientStatus === "pending" ? "Pending" : "Toggle"}
           </Button>
         ) : null,
       },
@@ -4182,17 +4544,22 @@ function TaskView({ canEdit, tasks, onToggle }: { canEdit: boolean; tasks: Task[
       {
         accessorKey: "status",
         header: "Status",
-        cell: ({ row }) => <Badge variant={row.original.status === "Done" ? "success" : row.original.status === "In progress" ? "warning" : "info"}>{row.original.status}</Badge>,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-2">
+            <Badge variant={row.original.status === "Done" ? "success" : row.original.status === "In progress" ? "warning" : "info"}>{row.original.status}</Badge>
+            {row.original.clientStatus === "pending" ? <Badge variant="warning">Pending</Badge> : null}
+          </div>
+        ),
       },
       {
         id: "action",
         header: "",
         cell: ({ row }) => canEdit ? (
-          <Button type="button" variant="outline" size="sm" onClick={(event) => {
+          <Button type="button" variant="outline" size="sm" disabled={row.original.clientStatus === "pending"} onClick={(event) => {
             event.stopPropagation();
             onToggle(row.original.id);
           }}>
-            Toggle
+            {row.original.clientStatus === "pending" ? "Pending" : "Toggle"}
           </Button>
         ) : null,
       },
@@ -5054,6 +5421,98 @@ function CreateTeamDialog({
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TutorialDialog({
+  canAct,
+  open,
+  stepIndex,
+  steps,
+  onComplete,
+  onOpenChange,
+  onStepChange,
+}: {
+  canAct: boolean;
+  open: boolean;
+  stepIndex: number;
+  steps: TutorialStep[];
+  onComplete: () => void;
+  onOpenChange: (open: boolean) => void;
+  onStepChange: (index: number) => void;
+}) {
+  const activeStep = steps[stepIndex] ?? steps[0];
+  const isFirst = stepIndex === 0;
+  const isLast = stepIndex === steps.length - 1;
+
+  function runStepAction() {
+    if (!canAct && activeStep.actionLabel?.toLowerCase().includes("form")) return;
+    activeStep.onAction?.();
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+            <Badge variant="secondary">Step {stepIndex + 1} of {steps.length}</Badge>
+            <div className="flex gap-1" aria-hidden="true">
+              {steps.map((step, index) => (
+                <span
+                  key={step.title}
+                  className={cn(
+                    "h-1.5 w-8 rounded-full",
+                    index <= stepIndex ? "bg-primary" : "bg-muted",
+                  )}
+                />
+              ))}
+            </div>
+          </div>
+          <DialogTitle>{activeStep.title}</DialogTitle>
+          <DialogDescription>{activeStep.description}</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4 md:grid-cols-[160px_minmax(0,1fr)]">
+          <div className="grid min-h-36 place-items-center rounded-md border bg-primary/5 text-primary">
+            <div className="grid size-20 place-items-center rounded-full bg-primary text-2xl font-semibold text-primary-foreground">
+              {stepIndex + 1}
+            </div>
+          </div>
+          <div className="space-y-3">
+            <p className="text-sm leading-6 text-muted-foreground">{activeStep.detail}</p>
+            {!canAct ? (
+              <p className="rounded-md border border-warning/35 bg-warning/10 p-3 text-sm text-muted-foreground">
+                Viewer access is read-only, so creation steps are shown as navigation only.
+              </p>
+            ) : null}
+            {activeStep.actionLabel ? (
+              <Button type="button" variant="outline" onClick={runStepAction}>
+                <Sparkles className="size-4" />
+                {activeStep.actionLabel}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          <Button type="button" variant="ghost" onClick={onComplete}>
+            Skip tutorial
+          </Button>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" disabled={isFirst} onClick={() => onStepChange(Math.max(0, stepIndex - 1))}>
+              Back
+            </Button>
+            {isLast ? (
+              <Button type="button" onClick={onComplete}>
+                Finish
+              </Button>
+            ) : (
+              <Button type="button" onClick={() => onStepChange(Math.min(steps.length - 1, stepIndex + 1))}>
+                Next
+              </Button>
+            )}
+          </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

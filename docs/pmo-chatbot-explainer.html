@@ -1078,8 +1078,8 @@
               </tr>
               <tr>
                 <td>AI grounding</td>
-                <td>Workers AI receives selected scope metadata and recent chat messages.</td>
-                <td>Production should add retrieval from real project documents, citations, and stronger controls against data leakage.</td>
+                <td>Workers AI receives selected scope metadata and recent chat messages. Team project scoped RAG can also stream cited responses from indexed project artifacts.</td>
+                <td>Production should keep retrieval permissions, citations, and controls against data leakage consistent across every chat and artifact path.</td>
               </tr>
               <tr>
                 <td>Authorization depth</td>
@@ -1212,6 +1212,7 @@
             "The server is the app's decision-making layer.",
             "It checks whether you are signed in and allowed to do something.",
             "It saves messages and asks Workers AI for a chatbot response.",
+            "For Team project scoped RAG, it can stream response tokens back to the browser with Server-Sent Events.",
             "It talks to the database and file storage so the browser does not do that directly."
           ]
         },
@@ -1220,6 +1221,7 @@
           bullets: [
             "Server functions are created with createServerFn in pmo-data.ts, team-workflow.ts, and auth-workflow.ts.",
             "sendChatMessage checks editor role, verifies chat membership, persists user and assistant messages, and calls Workers AI.",
+            "Scoped RAG chat uses /api/scoped-rag-stream, createScopedRagStreamResponse, Workers AI stream: true, and browser EventSource listeners for citations, token, done, and stream-error events.",
             "team-workflow.ts handles D1-backed teams, project membership, scoped chats, and scoped invites.",
             "src/worker.ts passes Cloudflare env bindings into the TanStack Start server entry."
           ]
@@ -1329,10 +1331,11 @@
           ["fake-field", "Message: Create a RAID summary"],
           ["fake-row selected", "Server checks membership"],
           ["fake-row", "Workers AI receives prompt plus scoped context"],
+          ["fake-row", "Scoped RAG tokens stream into the assistant message"],
           ["fake-row", "User and assistant messages are saved"]
         ],
         calloutTitle: "The chatbot response path",
-        callout: "The browser sends your message to a server function. The server verifies access, asks Workers AI for a response, saves both messages, then refreshes the chat."
+        callout: "The browser sends your message to the backend. Standard chat verifies access, asks Workers AI for a response, saves both messages, then refreshes the chat. Team project scoped RAG uses EventSource to stream citations and Markdown tokens until the SSE stream ends."
       },
       act: {
         title: "Take action",

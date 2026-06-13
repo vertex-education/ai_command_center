@@ -412,7 +412,7 @@ function createAiSseResponse(aiStream: ReadableStream<Uint8Array>, citations: Ch
         if (!fullResponse.trim()) enqueue("token", { token: "The model did not return a response." });
         enqueue("done", { response: fullResponse.trim(), citations });
       } catch (error) {
-        enqueue("error", { message: error instanceof Error ? error.message : "Scoped RAG stream failed." });
+        enqueue("stream-error", { message: error instanceof Error ? error.message : "Scoped RAG stream failed." });
       } finally {
         reader.releaseLock();
         controller.close();
@@ -616,77 +616,20 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
     };
   });
 
-export const chatWithScopedRag = createServerFn({ method: "POST" })
-  .validator((data: ChatWithScopedRagInput) => data)
-  .handler(async ({ data }): Promise<Response> => {
-    const teamId = assertRequiredString(data.teamId, "Team ID");
-    const workspaceId = assertRequiredString(data.workspaceId, "Workspace ID");
-    const projectId = assertRequiredString(data.projectId, "Project ID");
-    const prompt = assertRequiredString(data.prompt, "Prompt");
+export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput): Promise<Response> {
+  const teamId = assertRequiredString(data.teamId, "Team ID");
+  const workspaceId = assertRequiredString(data.workspaceId, "Workspace ID");
+  const projectId = assertRequiredString(data.projectId, "Project ID");
+  const prompt = assertRequiredString(data.prompt, "Prompt");
 
-    await requireScopedProjectAccess(teamId, projectId);
-    const scopedPromptContext = await fetchScopedPromptContext(workspaceId, projectId);
+  await requireScopedProjectAccess(teamId, projectId);
+  const scopedPromptContext = await fetchScopedPromptContext(workspaceId, projectId);
 
-    const intent = await classifyPromptIntent(prompt);
-    if (intent === "DIRECT_CHAT" || intent === "ARTIFACT_GENERATION") {
-      const aiStream = (await getAi().run(generationModelId, {
-        messages: [
-          { role: "system", content: prependScopedContextToSystemPrompt(buildVertexAiSystemPrompt(), scopedPromptContext) },
-          { role: "user", content: prompt },
-        ],
-        max_completion_tokens: 1_200,
-        stream: true,
-        temperature: 0.2,
-      })) as unknown as ReadableStream<Uint8Array>;
-
-      return createAiSseResponse(aiStream, []);
-    }
-
-    const runtimeEnv = getRuntimeEnv();
-    const webContext = requiresExternalWebKnowledge(prompt)
-      ? await fetchConsolidatedWebSearch(prompt, runtimeEnv)
-      : "";
-
-    const [promptEmbedding] = await embedTexts([prompt]);
-    const matches = await getVectorize().query(promptEmbedding, {
-      topK: 8,
-      returnMetadata: "indexed",
-      filter: {
-        team_id: { $eq: teamId },
-        project_id: { $eq: projectId },
-      },
-    });
-
-    const vectorIds = matches.matches.map((match) => match.id);
-    const chunks = await fetchChunksByIds(vectorIds);
-    const context = buildContext(chunks);
-    const scoresById = new Map(matches.matches.map((match) => [match.id, typeof match.score === "number" ? match.score : null]));
-    const citations: ChatWithScopedRagCitation[] = chunks.map((chunk) => ({
-      id: chunk.id,
-      documentName: chunk.documentName,
-      r2Key: chunk.r2Key,
-      score: scoresById.get(chunk.id) ?? null,
-    }));
-
-    const systemPrompt = [
-      buildScopedEnvironmentContext(scopedPromptContext),
-      "",
-      "You are a scoped team-project assistant.",
-      webContext
-        ? "Use the real-time web context for external current facts, and use the historical chunks for prior generated artifacts."
-        : "Use only the historical chunks included below when answering questions about prior generated artifacts.",
-      "Cite supporting artifact keys inline using the format [r2_key: path].",
-      "If the chunks do not contain enough evidence, say that the scoped artifact history does not contain enough information.",
-      "Do not invent citations, file names, paths, dates, or facts.",
-      "",
-      ...(webContext ? ["Real-Time Web Context:", webContext, ""] : []),
-      "Scoped historical chunks:",
-      context,
-    ].join("\n");
-
+  const intent = await classifyPromptIntent(prompt);
+  if (intent === "DIRECT_CHAT" || intent === "ARTIFACT_GENERATION") {
     const aiStream = (await getAi().run(generationModelId, {
       messages: [
-        { role: "system", content: systemPrompt },
+        { role: "system", content: prependScopedContextToSystemPrompt(buildVertexAiSystemPrompt(), scopedPromptContext) },
         { role: "user", content: prompt },
       ],
       max_completion_tokens: 1_200,
@@ -694,5 +637,64 @@ export const chatWithScopedRag = createServerFn({ method: "POST" })
       temperature: 0.2,
     })) as unknown as ReadableStream<Uint8Array>;
 
-    return createAiSseResponse(aiStream, citations);
+    return createAiSseResponse(aiStream, []);
+  }
+
+  const runtimeEnv = getRuntimeEnv();
+  const webContext = requiresExternalWebKnowledge(prompt)
+    ? await fetchConsolidatedWebSearch(prompt, runtimeEnv)
+    : "";
+
+  const [promptEmbedding] = await embedTexts([prompt]);
+  const matches = await getVectorize().query(promptEmbedding, {
+    topK: 8,
+    returnMetadata: "indexed",
+    filter: {
+      team_id: { $eq: teamId },
+      project_id: { $eq: projectId },
+    },
   });
+
+  const vectorIds = matches.matches.map((match) => match.id);
+  const chunks = await fetchChunksByIds(vectorIds);
+  const context = buildContext(chunks);
+  const scoresById = new Map(matches.matches.map((match) => [match.id, typeof match.score === "number" ? match.score : null]));
+  const citations: ChatWithScopedRagCitation[] = chunks.map((chunk) => ({
+    id: chunk.id,
+    documentName: chunk.documentName,
+    r2Key: chunk.r2Key,
+    score: scoresById.get(chunk.id) ?? null,
+  }));
+
+  const systemPrompt = [
+    buildScopedEnvironmentContext(scopedPromptContext),
+    "",
+    "You are a scoped team-project assistant.",
+    webContext
+      ? "Use the real-time web context for external current facts, and use the historical chunks for prior generated artifacts."
+      : "Use only the historical chunks included below when answering questions about prior generated artifacts.",
+    "Cite supporting artifact keys inline using the format [r2_key: path].",
+    "If the chunks do not contain enough evidence, say that the scoped artifact history does not contain enough information.",
+    "Do not invent citations, file names, paths, dates, or facts.",
+    "",
+    ...(webContext ? ["Real-Time Web Context:", webContext, ""] : []),
+    "Scoped historical chunks:",
+    context,
+  ].join("\n");
+
+  const aiStream = (await getAi().run(generationModelId, {
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: prompt },
+    ],
+    max_completion_tokens: 1_200,
+    stream: true,
+    temperature: 0.2,
+  })) as unknown as ReadableStream<Uint8Array>;
+
+  return createAiSseResponse(aiStream, citations);
+}
+
+export const chatWithScopedRag = createServerFn({ method: "POST" })
+  .validator((data: ChatWithScopedRagInput) => data)
+  .handler(async ({ data }): Promise<Response> => createScopedRagStreamResponse(data));

@@ -114,6 +114,30 @@ export const authEmailEvents = sqliteTable(
   }),
 );
 
+export const events = sqliteTable(
+  "events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    teamId: text("team_id"),
+    projectId: text("project_id"),
+    chatId: text("chat_id"),
+    mode: text("mode", { enum: ["Personal", "Team", "Org"] }).notNull(),
+    entity: text("entity").notNull(),
+    entityId: text("entity_id").notNull(),
+    operation: text("operation").notNull(),
+    invalidatesJson: text("invalidates_json").notNull().default("[]"),
+    sourceUserId: text("source_user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    sourceClientId: text("source_client_id"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => ({
+    scopeIdx: index("events_scope_idx").on(table.workspaceId, table.mode, table.teamId, table.id),
+    sourceUserIdx: index("events_source_user_idx").on(table.workspaceId, table.sourceUserId, table.id),
+    entityIdx: index("events_entity_idx").on(table.entity, table.entityId, table.id),
+  }),
+);
+
 export const teams = sqliteTable(
   "teams",
   {

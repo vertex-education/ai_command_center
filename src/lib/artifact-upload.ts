@@ -1,6 +1,7 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
 import { createServerFn } from "@tanstack/react-start";
+import { setResponseStatus } from "@tanstack/react-start/server";
 import { getRequest } from "@tanstack/start-server-core";
 import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
@@ -11,7 +12,7 @@ export type { ScopeLevel } from "@/lib/document-ingestion-queue";
 export type ArtifactUploadResult = {
   artifactId: string;
   r2Key: string;
-  status: "pending";
+  status: "queued";
 };
 
 type UploadEnv = Env & {
@@ -202,9 +203,11 @@ export const uploadArtifact = createServerFn({ method: "POST" })
       customTags,
     });
 
+    setResponseStatus(202);
+
     return {
       artifactId,
       r2Key,
-      status: "pending",
+      status: "queued",
     };
   });

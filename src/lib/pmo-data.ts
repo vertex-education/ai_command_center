@@ -6,6 +6,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
 import { getAuth } from "@/lib/auth";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
+import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
 import {
   xlsxBlobFromRows,
   type ExportTable,
@@ -93,7 +94,7 @@ export type Artifact = {
   preview: string[];
   previewJson?: JsonValue;
   pinnedTo: WorkspaceMode[];
-  clientStatus?: "saving";
+  clientStatus?: "deleting" | "pinning" | "saving";
 };
 
 export type Decision = {
@@ -112,6 +113,7 @@ export type Approval = {
   owner: string;
   due: string;
   status: "Needed" | "Requested" | "Approved";
+  clientStatus?: "pending";
 };
 
 export type Task = {
@@ -121,6 +123,7 @@ export type Task = {
   owner: string;
   source: string;
   status: "Open" | "In progress" | "Done";
+  clientStatus?: "pending";
 };
 
 export type ActivityItem = {
@@ -1501,7 +1504,48 @@ async function requireWorkspaceEditor() {
   if (user?.role !== "admin" && user?.role !== "user" || !user.id) {
     throw new Error("Viewer accounts have view-only access.");
   }
-  return { id: user.id };
+  return { id: user.id, clientId: request.headers.get("x-vertex-client-id") };
+}
+
+async function recordWorkspaceMutation({
+  chatId = null,
+  entity,
+  entityId,
+  invalidates,
+  mode,
+  operation,
+  projectId = null,
+  sourceClientId = null,
+  sourceUserId,
+  teamId = null,
+  workspaceId,
+}: {
+  chatId?: string | null;
+  entity: string;
+  entityId: string;
+  invalidates: RealtimeInvalidationTarget[];
+  mode: WorkspaceMode;
+  operation: string;
+  projectId?: string | null;
+  sourceClientId?: string | null;
+  sourceUserId: string;
+  teamId?: string | null;
+  workspaceId?: string;
+}) {
+  const resolvedWorkspaceId = workspaceId ?? `ws-${scopeByMode[mode]}`;
+  await recordRealtimeMutationEvent(getDb(), {
+    chatId,
+    entity,
+    entityId,
+    invalidates,
+    mode,
+    operation,
+    projectId,
+    sourceClientId,
+    sourceUserId,
+    teamId,
+    workspaceId: resolvedWorkspaceId,
+  });
 }
 
 async function requireChatContributor({
@@ -1648,6 +1692,19 @@ export const sendChatMessage = createServerFn({ method: "POST" })
       }),
       insertedMessages,
     );
+    await recordWorkspaceMutation({
+      chatId: data.chatId,
+      entity: "chat_message",
+      entityId: insertedMessages.at(-1)?.id ?? data.chatId,
+      invalidates: ["workspace", "chats", "projects"],
+      mode: data.mode,
+      operation: "insert",
+      projectId: data.projectId,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+      teamId: data.mode === "Team" ? data.teamId ?? null : null,
+      workspaceId,
+    });
     workspace.conversations[conversationKey] = [...existingMessages, userMessage, response];
     recordActivity(workspace, "Chat response generated", `${chatTitle} updated in ${workspaceModeLabel(data.mode)}.`);
     return { workspace: clone(getMutableRoot()), llmTrace: aiResult.trace };
@@ -1656,7 +1713,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
 export const addIdea = createServerFn({ method: "POST" })
   .validator((data: AddIdeaInput & { mode?: WorkspaceMode; projectId?: string | null }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const mode = data.mode ?? "Personal";
     const workspace = getMutableWorkspace(mode);
     const project = workspace.projects.find((item) => item.id === data.projectId);
@@ -1686,47 +1743,87 @@ export const addIdea = createServerFn({ method: "POST" })
     workspace.ideas = [nextIdea, ...workspace.ideas];
     workspace.pinnedIdeaIds = [nextIdea.id, ...workspace.pinnedIdeaIds];
     recordActivity(workspace, "Idea added", `${nextIdea.title} entered ${workspaceModeLabel(mode)}.`);
+    await recordWorkspaceMutation({
+      entity: "idea",
+      entityId: nextIdea.id,
+      invalidates: ["workspace"],
+      mode,
+      operation: "insert",
+      projectId: nextIdea.projectId,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const updateIdeaStatus = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string; status: IdeaStatus }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.ideas = workspace.ideas.map((idea) => (idea.id === data.id ? { ...idea, status: data.status } : idea));
     const idea = workspace.ideas.find((item) => item.id === data.id);
     recordActivity(workspace, "Idea status changed", `${idea?.title ?? "Idea"} moved to ${data.status}.`);
+    await recordWorkspaceMutation({
+      entity: "idea",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "update",
+      projectId: idea?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const voteIdea = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.ideas = workspace.ideas.map((idea) => (idea.id === data.id ? { ...idea, votes: idea.votes + 1 } : idea));
     const idea = workspace.ideas.find((item) => item.id === data.id);
     recordActivity(workspace, "Idea vote added", `${idea?.title ?? "Idea"} gained a vote.`);
+    await recordWorkspaceMutation({
+      entity: "idea",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "vote",
+      projectId: idea?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const toggleIdeaPin = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     const isPinned = workspace.pinnedIdeaIds.includes(data.id);
     workspace.pinnedIdeaIds = isPinned ? workspace.pinnedIdeaIds.filter((id) => id !== data.id) : [data.id, ...workspace.pinnedIdeaIds];
     const idea = workspace.ideas.find((item) => item.id === data.id);
     recordActivity(workspace, isPinned ? "Idea unpinned" : "Idea pinned", `${idea?.title ?? "Idea"} workspace pin changed.`);
+    await recordWorkspaceMutation({
+      entity: "idea",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: isPinned ? "unpin" : "pin",
+      projectId: idea?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const toggleArtifactPin = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; r2Key: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     const persistedArtifact = await getDb()
       .prepare("SELECT pinned FROM artifacts WHERE r2_key = ? LIMIT 1")
@@ -1748,13 +1845,23 @@ export const toggleArtifactPin = createServerFn({ method: "POST" })
       .run();
     const artifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key) ?? memoryArtifact;
     recordActivity(workspace, "Artifact pin changed", `${artifact?.title ?? "Artifact"} updated for ${workspaceModeLabel(data.mode)}.`);
+    await recordWorkspaceMutation({
+      entity: "artifact",
+      entityId: data.r2Key,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: nextPinned ? "pin" : "unpin",
+      projectId: artifact?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return mergePersistedArtifacts(clone(getMutableRoot()));
   });
 
 export const deleteArtifact = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; r2Key: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     const artifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key);
     workspace.artifacts = workspace.artifacts.filter((item) => item.r2Key !== data.r2Key);
@@ -1764,13 +1871,23 @@ export const deleteArtifact = createServerFn({ method: "POST" })
       .run();
     await getArtifactsBucket().delete(data.r2Key).catch(() => undefined);
     recordActivity(workspace, "Artifact deleted", `${artifact?.title ?? "Artifact"} removed from ${workspaceModeLabel(data.mode)}.`);
+    await recordWorkspaceMutation({
+      entity: "artifact",
+      entityId: data.r2Key,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "delete",
+      projectId: artifact?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return mergePersistedArtifacts(clone(getMutableRoot()));
   });
 
 export const saveTableArtifact = createServerFn({ method: "POST" })
   .validator((data: FormData) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const modeValue = requiredFormString(data, "mode", "Workspace mode");
     if (!workspaceModes.includes(modeValue as WorkspaceMode)) throw new Error("Workspace mode is invalid.");
     const mode = modeValue as WorkspaceMode;
@@ -1855,6 +1972,16 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
 
     workspace.artifacts = [artifact, ...workspace.artifacts.filter((item) => item.r2Key !== r2Key)];
     recordActivity(workspace, "Artifact saved", `${title} saved as XLSX.`);
+    await recordWorkspaceMutation({
+      entity: "artifact",
+      entityId: r2Key,
+      invalidates: ["workspace"],
+      mode,
+      operation: "insert",
+      projectId,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return { workspace: clone(getMutableRoot()), artifact };
   });
 
@@ -1879,43 +2006,82 @@ function buildTablePreviewJson(
 export const toggleDecisionStatus = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.decisions = workspace.decisions.map((decision) => (decision.id === data.id ? { ...decision, status: cycleDecisionStatus(decision.status) } : decision));
     const decision = workspace.decisions.find((item) => item.id === data.id);
     recordActivity(workspace, "Decision updated", `${decision?.title ?? "Decision"} is now ${decision?.status ?? "updated"}.`);
+    await recordWorkspaceMutation({
+      entity: "decision",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "update",
+      projectId: decision?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const toggleApprovalStatus = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.approvals = workspace.approvals.map((approval) => (approval.id === data.id ? { ...approval, status: cycleApprovalStatus(approval.status) } : approval));
     const approval = workspace.approvals.find((item) => item.id === data.id);
     recordActivity(workspace, "Approval updated", `${approval?.title ?? "Approval"} is now ${approval?.status ?? "updated"}.`);
+    await recordWorkspaceMutation({
+      entity: "approval",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "update",
+      projectId: approval?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const toggleTaskStatus = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.tasks = workspace.tasks.map((task) => (task.id === data.id ? { ...task, status: cycleTaskStatus(task.status) } : task));
     const task = workspace.tasks.find((item) => item.id === data.id);
     recordActivity(workspace, "Task updated", `${task?.title ?? "Task"} is now ${task?.status ?? "updated"}.`);
+    await recordWorkspaceMutation({
+      entity: "task",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "update",
+      projectId: task?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 
 export const updateAccessLevel = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; accessLevel: ScopedWorkspaceState["accessLevel"] }) => data)
   .handler(async ({ data }) => {
-    await requireWorkspaceEditor();
+    const user = await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
     workspace.accessLevel = data.accessLevel;
     recordActivity(workspace, "Workspace access updated", `${workspaceModeLabel(data.mode)} access set to ${data.accessLevel}.`);
+    await recordWorkspaceMutation({
+      entity: "workspace",
+      entityId: `ws-${scopeByMode[data.mode]}`,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "update",
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
     return clone(getMutableRoot());
   });
 

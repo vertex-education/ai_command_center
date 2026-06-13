@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Ban, Save, Trash2, UserPlus, UsersRound } from "lucide-react";
+import { AppRail } from "@/components/AppRail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -179,8 +180,11 @@ function AdminUsersPage() {
   }
 
   return (
-    <main className="min-h-screen bg-muted/30 p-4 lg:p-8">
-      <div className="mx-auto grid max-w-6xl gap-5">
+    <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
+      <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
+        <AppRail />
+        <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30 p-4 lg:p-8">
+          <div className="mx-auto grid max-w-6xl gap-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold">Users</h1>
@@ -366,13 +370,15 @@ function AdminUsersPage() {
             </Card>
           </div>
         )}
+          </div>
+        </section>
+        <AdminConfirmDialog
+          state={confirmDialog}
+          onOpenChange={(open) => {
+            if (!open) setConfirmDialog(null);
+          }}
+        />
       </div>
-      <AdminConfirmDialog
-        state={confirmDialog}
-        onOpenChange={(open) => {
-          if (!open) setConfirmDialog(null);
-        }}
-      />
     </main>
   );
 }

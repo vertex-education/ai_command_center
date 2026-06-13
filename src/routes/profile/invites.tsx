@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Check, UsersRound } from "lucide-react";
+import { AppRail } from "@/components/AppRail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { acceptScopedInvite, listMyScopedInvites } from "@/lib/team-workflow";
@@ -38,17 +39,22 @@ function InvitesPage() {
   const projectInvites = invites.filter((invite) => invite.scope === "project");
 
   return (
-    <main className="min-h-screen bg-muted/30 p-4">
-      <div className="mx-auto grid max-w-4xl gap-4">
-        <div className="flex items-center justify-between gap-3">
-          <Button type="button" variant="outline" onClick={() => (window.location.href = "/profile")}>
-            Back to profile
-          </Button>
-          <img className="h-9 w-fit" src="/vertex-horizontal.svg" alt="Vertex Education" />
-        </div>
+    <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
+      <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
+        <AppRail />
+        <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30 p-4 lg:p-6">
+          <div className="mx-auto grid max-w-4xl gap-4">
+            <div className="flex items-center justify-between gap-3">
+              <Button type="button" variant="outline" onClick={() => (window.location.href = "/profile")}>
+                Back to settings
+              </Button>
+              <img className="h-9 w-fit" src="/vertex-horizontal.svg" alt="Vertex Education" />
+            </div>
 
-        <InviteSection title="Team invites" description="Teams you have been invited to join." invites={teamInvites} pendingId={acceptMutation.variables} onAccept={(id) => acceptMutation.mutate(id)} />
-        <InviteSection title="Project invites" description="Projects assigned directly to you." invites={projectInvites} pendingId={acceptMutation.variables} onAccept={(id) => acceptMutation.mutate(id)} />
+            <InviteSection title="Team invites" description="Teams you have been invited to join." invites={teamInvites} pendingId={acceptMutation.variables} onAccept={(id) => acceptMutation.mutate(id)} />
+            <InviteSection title="Project invites" description="Projects assigned directly to you." invites={projectInvites} pendingId={acceptMutation.variables} onAccept={(id) => acceptMutation.mutate(id)} />
+          </div>
+        </section>
       </div>
     </main>
   );
