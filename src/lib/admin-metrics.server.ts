@@ -60,9 +60,14 @@ type RecentUsageRow = {
   outputTokens: number | null;
   totalTokens: number | null;
   durationMs: number | null;
+  teamId: string | null;
+  projectId: string | null;
+  chatId: string | null;
   metadataJson: string;
   createdAt: number;
 };
+
+type UsageMetadata = Record<string, string | number | boolean | null>;
 
 type GatewayUsageSummary = {
   requests: number;
@@ -159,13 +164,20 @@ function formatDateTime(value: number | null | undefined) {
   return number === null ? "No activity" : new Date(number).toLocaleString();
 }
 
-function parseMetadata(value: string | null | undefined) {
+function parseMetadata(value: string | null | undefined): UsageMetadata {
   if (!value) return {};
   try {
     const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? parsed as Record<string, unknown>
-      : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .filter(([, metadataValue]) => (
+          metadataValue === null ||
+          typeof metadataValue === "string" ||
+          typeof metadataValue === "number" ||
+          typeof metadataValue === "boolean"
+        )),
+    ) as UsageMetadata;
   } catch {
     return {};
   }
@@ -326,11 +338,14 @@ async function getRecentUsageRows() {
               output_tokens as outputTokens,
               total_tokens as totalTokens,
               duration_ms as durationMs,
+              team_id as teamId,
+              project_id as projectId,
+              chat_id as chatId,
               metadata_json as metadataJson,
               created_at as createdAt
        FROM admin_usage_events
        ORDER BY created_at DESC
-       LIMIT 12`,
+       LIMIT 50`,
     )
     .all<RecentUsageRow>();
 
@@ -613,6 +628,7 @@ async function getHealthMetrics() {
     },
     recentUsage: await Promise.all(recentUsage.map(async (row) => {
       const aiGatewayLogId = getAiGatewayLogIdFromMetadata(row.metadataJson);
+      const metadata = parseMetadata(row.metadataJson);
       const gatewayLog = aiGatewayLogId ? await getAiGatewayLog(aiGatewayLogId) : null;
       const gatewayTokensIn = gatewayLog?.tokens_in ?? null;
       const gatewayTokensOut = gatewayLog?.tokens_out ?? null;
@@ -621,6 +637,7 @@ async function getHealthMetrics() {
         : null;
       return {
         ...row,
+        metadata,
         aiGatewayLogId,
         gatewayStatus: gatewayLog ? `${gatewayLog.status_code} ${gatewayLog.success ? "OK" : "Failed"}` : "Not available",
         gatewayCached: gatewayLog?.cached ?? null,

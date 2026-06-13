@@ -261,6 +261,34 @@ function customTagsIndexValue(customTags: string[]) {
   return customTags.map((tag) => tag.trim().toLowerCase()).filter(Boolean).join(",");
 }
 
+function isConfidentialTag(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "confidential" || normalized === "restricted";
+}
+
+function inferSensitivityLabel({
+  customTags = [],
+  documentName,
+  metadata,
+}: {
+  customTags?: string[];
+  documentName: string;
+  metadata?: Record<string, string>;
+}) {
+  const metadataValues = metadata
+    ? [
+        metadata.confidentiality,
+        metadata.sensitivity,
+        metadata.sensitivity_label,
+        metadata.classification,
+        metadata.restricted,
+        metadata.access,
+      ].filter((value): value is string => typeof value === "string")
+    : [];
+  const values = [...customTags, ...metadataValues, documentName];
+  return values.some(isConfidentialTag) ? "Confidential" : "Standard";
+}
+
 async function updateArtifactStatus(env: DocumentIngestionEnv, artifactId: string, status: "processing" | "completed" | "failed", errorMessage?: string, chunkCount = 0) {
   const completedAt = status === "completed" ? new Date().toISOString() : null;
   await env.DB.prepare(
@@ -306,6 +334,12 @@ async function processRegistryUploadJob(env: DocumentIngestionEnv, job: Registry
     embedding: embeddings[index],
   }));
   const customTags = customTagsIndexValue(job.customTags);
+  const sensitivityLabel = inferSensitivityLabel({
+    customTags: job.customTags,
+    documentName: job.originalFilename,
+    metadata: object.customMetadata,
+  });
+  const restricted = sensitivityLabel === "Confidential";
 
   await env.VECTORIZE.upsert(
     rows.map((row) => ({
@@ -321,6 +355,8 @@ async function processRegistryUploadJob(env: DocumentIngestionEnv, job: Registry
         project_id: job.projectId ?? "",
         document_type: job.documentType,
         custom_tags: customTags,
+        confidentiality: sensitivityLabel,
+        restricted,
         chunk_index: row.chunkIndex,
       },
     })),
@@ -372,6 +408,11 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
   const rawText = await object.text();
   const chunks = chunkText(rawText);
   if (chunks.length === 0) throw new Error("No text chunks were created.");
+  const sensitivityLabel = inferSensitivityLabel({
+    documentName: job.documentName,
+    metadata: object.customMetadata,
+  });
+  const restricted = sensitivityLabel === "Confidential";
 
   const embeddings = await embedTexts(env, chunks, {
     feature: "scoped-rag-generated-artifact-embedding",
@@ -398,6 +439,8 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
         project_id: job.projectId,
         document_name: job.documentName,
         r2_key: job.r2Key,
+        confidentiality: sensitivityLabel,
+        restricted,
         chunk_index: row.chunkIndex,
       },
     })),
@@ -406,9 +449,18 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
   await env.DB.batch(
     rows.map((row) =>
       env.DB.prepare(
-        `INSERT INTO document_chunks (id, team_id, project_id, document_name, r2_key, content, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(row.id, job.teamId, job.projectId, job.documentName, job.r2Key, row.content, createdAt),
+        `INSERT INTO document_chunks (
+          id,
+          team_id,
+          project_id,
+          document_name,
+          r2_key,
+          content,
+          sensitivity_label,
+          restricted,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(row.id, job.teamId, job.projectId, job.documentName, job.r2Key, row.content, sensitivityLabel, restricted ? 1 : 0, createdAt),
     ),
   );
 }

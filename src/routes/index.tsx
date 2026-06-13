@@ -2,9 +2,6 @@ import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEven
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useForm } from "@tanstack/react-form";
-import ReactMarkdown from "react-markdown";
-import rehypeSanitize from "rehype-sanitize";
-import remarkGfm from "remark-gfm";
 import {
   type ColumnDef,
   type SortingState,
@@ -123,7 +120,6 @@ import {
   avatarAlex,
   chatReasoningLevels,
   chatReasoningProfiles,
-  deleteArtifact,
   getConversationKey,
   initials,
   pmoWorkspaceQueryKey,
@@ -322,21 +318,6 @@ function updateArtifactInWorkspaceCache(
         artifacts: scopedWorkspace.artifacts.map((artifact) =>
           artifact.r2Key === r2Key ? updateArtifact(artifact) : artifact,
         ),
-      },
-    },
-  } satisfies PmoWorkspaceState;
-}
-
-function removeArtifactFromWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, r2Key: string) {
-  if (!current) return current;
-  const scopedWorkspace = current.workspaces[mode];
-  return {
-    ...current,
-    workspaces: {
-      ...current.workspaces,
-      [mode]: {
-        ...scopedWorkspace,
-        artifacts: scopedWorkspace.artifacts.filter((artifact) => artifact.r2Key !== r2Key),
       },
     },
   } satisfies PmoWorkspaceState;
@@ -762,27 +743,6 @@ function PMOCommandCenter() {
     onError: (error, _input, context) => {
       if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
       updateToast(error instanceof Error ? error.message : "Could not update artifact pin.");
-    },
-    onSettled: async () => {
-      await invalidateWorkspace();
-    },
-  });
-  const deleteArtifactMutation = useMutation({
-    mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => deleteArtifact({ data: input }),
-    onMutate: async (input) => {
-      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
-      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
-      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
-        removeArtifactFromWorkspaceCache(current, input.mode, input.r2Key),
-      );
-      return { previousWorkspace };
-    },
-    onSuccess: (workspace) => {
-      queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
-    },
-    onError: (error, _input, context) => {
-      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
-      updateToast(error instanceof Error ? error.message : "Could not delete artifact.");
     },
     onSettled: async () => {
       await invalidateWorkspace();
@@ -1603,26 +1563,6 @@ function PMOCommandCenter() {
     });
   }
 
-  function handleDeleteArtifact(artifact: Artifact) {
-    if (!canEdit) {
-      updateToast("Viewer access is read-only");
-      return;
-    }
-    setConfirmDialog({
-      title: `Delete ${artifact.title}`,
-      description: "This removes the artifact from this workspace and deletes the saved file if it is stored in artifact storage.",
-      actionLabel: "Delete artifact",
-      destructive: true,
-      onConfirm: async () => {
-        await deleteArtifactMutation.mutateAsync({ mode: activeMode, r2Key: artifact.r2Key });
-        if (selectedArtifactTitle === artifact.title) {
-          setSelectedArtifactTitle(scopedArtifacts.find((item) => item.r2Key !== artifact.r2Key)?.title ?? "");
-        }
-        updateToast(`${artifact.title} deleted`);
-      },
-    });
-  }
-
   function handleRenameChat({
     chat,
     project,
@@ -1991,13 +1931,20 @@ function PMOCommandCenter() {
                       >
                         {activeTab === "Chat" ? (
                           <ChatView
+                            approvals={scopedApprovals}
                             canBranch={canEdit && !branchChatMutation.isPending}
+                            canEdit={canEdit}
                             chatTitle={activeChat?.title}
                             isTyping={sendMessageMutation.isPending || isScopedRagStreaming}
                             llmTraces={llmTraces}
                             messages={currentMessages}
+                            pendingApproval={toggleApprovalMutation.isPending}
+                            pendingTask={toggleTaskMutation.isPending}
                             showTokenUsage={showTokenUsage}
+                            tasks={scopedTasks}
                             onBranchContext={handleBranchMessage}
+                            onToggleApproval={(id) => toggleApprovalMutation.mutate(id)}
+                            onToggleTask={(id) => toggleTaskMutation.mutate(id)}
                           />
                         ) : null}
                     {activeTab === "Ideas" ? (
@@ -2024,7 +1971,6 @@ function PMOCommandCenter() {
                         canEdit={canEdit}
                         artifacts={scopedArtifacts}
                         selectedArtifactTitle={selectedArtifact?.title}
-                        onDelete={handleDeleteArtifact}
                         onPreview={setPreviewArtifact}
                         onSelectArtifact={(artifact) => {
                           setSelectedArtifactTitle(artifact.title);
@@ -2223,7 +2169,7 @@ function PMOCommandCenter() {
                       task={selectedTask}
                       workspaceTitle={workspaceTitle}
                       onClose={() => setRightOpen(false)}
-                      onPreviewArtifact={() => selectedArtifact && setPreviewArtifact(selectedArtifact)}
+                      onPreviewArtifact={(artifact) => setPreviewArtifact(artifact)}
                       onRestoreArtifactVersion={(artifactId) =>
                         restoreArtifactMutation.mutate({ mode: activeMode, artifactId })
                       }
@@ -3610,20 +3556,34 @@ function SectionHeader({
 }
 
 function ChatView({
+  approvals,
   canBranch,
+  canEdit,
   chatTitle,
   isTyping,
   llmTraces,
   messages,
+  pendingApproval,
+  pendingTask,
+  tasks,
   onBranchContext,
+  onToggleApproval,
+  onToggleTask,
   showTokenUsage,
 }: {
+  approvals: Approval[];
   canBranch: boolean;
+  canEdit: boolean;
   chatTitle?: string;
   isTyping: boolean;
   llmTraces: LlmDevTrace[];
   messages: ChatMessage[];
+  pendingApproval: boolean;
+  pendingTask: boolean;
+  tasks: Task[];
   onBranchContext: (message: ChatMessage) => void;
+  onToggleApproval: (id: string) => void;
+  onToggleTask: (id: string) => void;
   showTokenUsage: boolean;
 }) {
   const messageEndRef = useRef<HTMLDivElement>(null);
@@ -3683,11 +3643,18 @@ function ChatView({
               >
                 {isUser ? message.text : (
                   <AssistantResponseContent
+                    approvals={approvals}
+                    canEdit={canEdit}
                     chatTitle={chatTitle}
+                    pendingApproval={pendingApproval}
+                    pendingTask={pendingTask}
                     requestedFormats={parseChatExportRequest(previousUserMessage?.text ?? "")}
                     requestedJson={wasJsonRequested(previousUserMessage?.text ?? "")}
+                    tasks={tasks}
                     title={previousUserMessage?.text ?? "Vertex AI chat export"}
                     text={message.text}
+                    onToggleApproval={onToggleApproval}
+                    onToggleTask={onToggleTask}
                   />
                 )}
               </div>
@@ -3905,7 +3872,7 @@ function parseAssistantResponse(text: string, requestedJson: boolean): ParsedAss
   if (jsonCandidate) {
     try {
       const parsed = JSON.parse(jsonCandidate);
-      if (requestedJson) {
+      if (requestedJson || hasWorkflowActionSchema(parsed)) {
         return { kind: "json", content: JSON.stringify(parsed, null, 2) };
       }
       const extracted = extractReadableJson(parsed);
@@ -3928,6 +3895,19 @@ function extractJsonCandidate(text: string) {
   if (fenced?.[1]) return fenced[1].trim();
   if ((text.startsWith("{") && text.endsWith("}")) || (text.startsWith("[") && text.endsWith("]"))) return text;
   return "";
+}
+
+function hasWorkflowActionSchema(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasWorkflowActionSchema);
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return Object.entries(record).some(([key, nestedValue]) => {
+    const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
+    if (["approval", "approvals", "pendingapproval", "pendingapprovals", "task", "tasks", "assignedtask", "assignedtasks"].includes(normalizedKey)) {
+      return true;
+    }
+    return hasWorkflowActionSchema(nestedValue);
+  });
 }
 
 function extractReadableJson(value: unknown): string {
@@ -3978,19 +3958,42 @@ function looksLikeMarkdown(text: string) {
 }
 
 function AssistantResponseContent({
+  approvals,
+  canEdit,
   chatTitle,
+  pendingApproval,
+  pendingTask,
   requestedFormats,
   requestedJson,
+  tasks,
   text,
   title,
+  onToggleApproval,
+  onToggleTask,
 }: {
+  approvals: Approval[];
+  canEdit: boolean;
   chatTitle?: string;
+  pendingApproval: boolean;
+  pendingTask: boolean;
   requestedFormats: ChatExportFormat[];
   requestedJson: boolean;
+  tasks: Task[];
   text: string;
   title: string;
+  onToggleApproval: (id: string) => void;
+  onToggleTask: (id: string) => void;
 }) {
   const parsed = parseAssistantResponse(text, requestedJson);
+  const workflowActions = {
+    approvals,
+    tasks,
+    canEdit,
+    pendingApproval,
+    pendingTask,
+    onToggleApproval,
+    onToggleTask,
+  };
   const exportActions = requestedFormats.length ? (
     <div className="mb-3 flex flex-wrap items-center gap-1.5">
       {requestedFormats.map((format) => (
@@ -4012,9 +4015,7 @@ function AssistantResponseContent({
     return (
       <div data-source-chat-title={chatTitle ?? ""}>
         {exportActions}
-        <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">
-          <code>{parsed.content}</code>
-        </pre>
+        <ArtifactRenderer fileType="json" previewJson={parsed.content} workflowActions={workflowActions} />
       </div>
     );
   }
@@ -4022,7 +4023,7 @@ function AssistantResponseContent({
     return (
       <div data-source-chat-title={chatTitle ?? ""}>
         {exportActions}
-        <MarkdownContent text={parsed.content} />
+        <ArtifactRenderer fileType="markdown" previewJson={{ markdown: parsed.content }} workflowActions={workflowActions} />
       </div>
     );
   }
@@ -4030,54 +4031,6 @@ function AssistantResponseContent({
     <div data-source-chat-title={chatTitle ?? ""}>
       {exportActions}
       <p className="whitespace-pre-wrap">{parsed.content}</p>
-    </div>
-  );
-}
-
-function MarkdownContent({ text }: { text: string }) {
-  return (
-    <div className="space-y-3" data-rendered-markdown="true">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeSanitize]}
-        components={{
-          a: ({ children, href }) => (
-            <a className="font-medium text-primary underline-offset-4 hover:underline" href={href} rel="noreferrer" target="_blank">
-              {children}
-            </a>
-          ),
-          blockquote: ({ children }) => <blockquote className="border-l-2 border-border pl-3 text-muted-foreground">{children}</blockquote>,
-          code: ({ children, className }) => (
-            <code className={cn("rounded bg-background/80 px-1 py-0.5 font-mono text-xs", className)}>
-              {children}
-            </code>
-          ),
-          h1: ({ children }) => <p className="text-base font-semibold">{children}</p>,
-          h2: ({ children }) => <p className="text-base font-semibold">{children}</p>,
-          h3: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
-          h4: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
-          h5: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
-          h6: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
-          hr: () => <hr className="my-3 border-border" />,
-          li: ({ children }) => <li className="pl-1">{children}</li>,
-          ol: ({ children }) => <ol className="space-y-1 pl-5 list-decimal">{children}</ol>,
-          p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
-          pre: ({ children }) => <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">{children}</pre>,
-          table: ({ children }) => (
-            <div className="max-w-full overflow-x-auto rounded-md border bg-background/80">
-              <table className="min-w-max border-collapse text-xs">{children}</table>
-            </div>
-          ),
-          tbody: ({ children }) => <tbody>{children}</tbody>,
-          td: ({ children }) => <td className="border-t px-3 py-2 align-top">{children}</td>,
-          th: ({ children }) => <th className="whitespace-nowrap px-3 py-2 text-left font-semibold text-muted-foreground">{children}</th>,
-          thead: ({ children }) => <thead className="bg-muted/70">{children}</thead>,
-          tr: ({ children }) => <tr>{children}</tr>,
-          ul: ({ children }) => <ul className="space-y-1 pl-5 list-disc">{children}</ul>,
-        }}
-      >
-        {text}
-      </ReactMarkdown>
     </div>
   );
 }
@@ -4459,7 +4412,6 @@ function ArtifactsView({
   canEdit,
   artifacts,
   selectedArtifactTitle,
-  onDelete,
   onPreview,
   onSelectArtifact,
   onShare,
@@ -4469,7 +4421,6 @@ function ArtifactsView({
   canEdit: boolean;
   artifacts: Artifact[];
   selectedArtifactTitle?: string;
-  onDelete: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
   onSelectArtifact: (artifact: Artifact) => void;
   onShare: () => void;
@@ -4547,15 +4498,11 @@ function ArtifactsView({
                   type="button"
                   variant="ghost"
                   size="icon"
-                  aria-label={`Delete ${row.original.title}`}
-                  title="Delete artifact"
-                  disabled={Boolean(row.original.clientStatus)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDelete(row.original);
-                  }}
+                  aria-label={`${row.original.title} is protected by immutable version history`}
+                  title="Artifacts are immutable. Restore older versions from the timeline."
+                  disabled
                 >
-                <Trash2 className="text-destructive" />
+                <ShieldCheck className="text-muted-foreground" />
               </Button>
             </>
             ) : null}
@@ -4574,7 +4521,7 @@ function ArtifactsView({
         ),
       },
     ],
-    [activeMode, canEdit, onDelete, onPreview, onTogglePin],
+    [activeMode, canEdit, onPreview, onTogglePin],
   );
 
   return (
@@ -5000,7 +4947,7 @@ function DetailPanel({
   task?: Task;
   workspaceTitle: string;
   onClose: () => void;
-  onPreviewArtifact: () => void;
+  onPreviewArtifact: (artifact: Artifact) => void;
   onRestoreArtifactVersion: (artifactId: string) => void;
   onShare: () => void;
   onStatusChange: (status: IdeaStatus) => void;
@@ -5312,12 +5259,13 @@ function ArtifactDetail({
   activeMode: WorkspaceMode;
   artifact: Artifact;
   canEdit: boolean;
-  onPreviewArtifact: () => void;
+  onPreviewArtifact: (artifact: Artifact) => void;
   onRestoreArtifactVersion: (artifactId: string) => void;
   onShare: () => void;
   onToggleArtifactPin: () => void;
 }) {
   const isPinned = artifact.pinnedTo.includes(activeMode);
+  const isWorkbook = artifact.type === "XLSX";
   const versionHistory = artifact.versionHistory ?? [];
 
   return (
@@ -5330,11 +5278,13 @@ function ArtifactDetail({
       </CardHeader>
       <CardContent className="space-y-4 pt-4">
         <p className="text-sm leading-6 text-muted-foreground">{artifact.summary}</p>
-        <ArtifactRenderer
-          fileType={artifact.type}
-          previewJson={artifact.previewJson}
-          fallbackPreview={artifact.preview}
-        />
+        {!isWorkbook ? (
+          <ArtifactRenderer
+            fileType={artifact.type}
+            previewJson={artifact.previewJson}
+            fallbackPreview={artifact.preview}
+          />
+        ) : null}
         <div className="grid grid-cols-2 gap-2">
           {canEdit ? (
             <Button type="button" variant="outline" onClick={onToggleArtifactPin}>
@@ -5342,7 +5292,7 @@ function ArtifactDetail({
               {isPinned ? "Unpin" : "Pin"}
             </Button>
           ) : null}
-          <Button type="button" variant="outline" onClick={onPreviewArtifact}>
+          <Button type="button" variant="outline" onClick={() => onPreviewArtifact(artifact)}>
             <Eye />
             Preview
           </Button>
@@ -5375,21 +5325,18 @@ function ArtifactDetail({
                         <strong className="block text-sm">Version {version.version}{isLatest ? " current" : ""}</strong>
                         <span className="block text-xs text-muted-foreground">{version.date} / {version.commitMessage}</span>
                       </div>
-                      {canEdit && !isLatest ? (
-                        <Button type="button" variant="outline" size="sm" onClick={() => onRestoreArtifactVersion(version.id)}>
-                          Restore
+                      <div className="flex shrink-0 flex-wrap gap-1">
+                        <Button type="button" variant="outline" size="sm" title="Preview this version read-only" onClick={() => onPreviewArtifact(version)}>
+                          <Eye />
+                          Preview
                         </Button>
-                      ) : null}
-                    </div>
-                    {!isLatest ? (
-                      <div className="mt-3">
-                        <ArtifactRenderer
-                          fileType={version.type}
-                          previewJson={version.previewJson}
-                          fallbackPreview={version.preview}
-                        />
+                        {canEdit && !isLatest ? (
+                          <Button type="button" variant="outline" size="sm" title="Restore by creating a new latest version" onClick={() => onRestoreArtifactVersion(version.id)}>
+                            Restore
+                          </Button>
+                        ) : null}
                       </div>
-                    ) : null}
+                    </div>
                   </div>
                 );
               })}

@@ -1,6 +1,8 @@
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { CheckCircle2, ClipboardCheck, ClipboardList } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -18,6 +20,7 @@ type ArtifactRendererProps = {
   previewJson?: JsonValue;
   fallbackPreview?: string[];
   className?: string;
+  workflowActions?: WorkflowActionContext;
 };
 
 type NormalizedTable = {
@@ -30,18 +33,64 @@ type CodePayload = {
   language: string;
 };
 
+export type WorkflowApprovalAction = {
+  id: string;
+  title: string;
+  owner: string;
+  due: string;
+  status: string;
+  clientStatus?: "pending";
+};
+
+export type WorkflowTaskAction = {
+  id: string;
+  title: string;
+  owner: string;
+  source: string;
+  status: string;
+  clientStatus?: "pending";
+};
+
+export type WorkflowActionContext = {
+  approvals?: WorkflowApprovalAction[];
+  tasks?: WorkflowTaskAction[];
+  canEdit?: boolean;
+  pendingApproval?: boolean;
+  pendingTask?: boolean;
+  onToggleApproval?: (id: string) => void;
+  onToggleTask?: (id: string) => void;
+};
+
+type WorkflowActionKind = "approval" | "task";
+
+type ParsedWorkflowAction = {
+  kind: WorkflowActionKind;
+  id?: string;
+  title: string;
+  owner?: string;
+  due?: string;
+  source?: string;
+  status?: string;
+};
+
 export function ArtifactRenderer({
   className,
   fallbackPreview = [],
   fileType,
   previewJson,
+  workflowActions,
 }: ArtifactRendererProps) {
   const normalizedFileType = fileType.trim().toLowerCase();
   const parsedPreview = parsePreviewJson(previewJson);
+  const structuredActions = normalizeWorkflowActionPreview(parsedPreview);
   const table = normalizeTablePreview(parsedPreview);
   const code = normalizeCodePreview(parsedPreview, normalizedFileType);
   const markdown = normalizeMarkdownPreview(parsedPreview, normalizedFileType);
   const summaryItems = normalizeSummaryPreview(parsedPreview, fallbackPreview);
+
+  if (structuredActions.length > 0) {
+    return <WorkflowActionList actions={structuredActions} className={className} workflowActions={workflowActions} />;
+  }
 
   if (table) {
     return (
@@ -85,7 +134,7 @@ export function ArtifactRenderer({
   }
 
   if (markdown) {
-    return <MarkdownArtifact className={className} markdown={markdown} />;
+    return <MarkdownArtifact className={className} markdown={markdown} workflowActions={workflowActions} />;
   }
 
   return (
@@ -176,7 +225,107 @@ function normalizeSummaryPreview(value: unknown, fallbackPreview: string[]) {
   return fallbackPreview;
 }
 
-function MarkdownArtifact({ className, markdown }: { className?: string; markdown: string }) {
+function normalizeWorkflowActionPreview(value: unknown): ParsedWorkflowAction[] {
+  const parsed = typeof value === "string" ? safeParseJson(value) : value;
+  if (!parsed) return [];
+  return collectWorkflowActionCandidates(parsed)
+    .map(normalizeWorkflowAction)
+    .filter((action): action is ParsedWorkflowAction => Boolean(action));
+}
+
+function collectWorkflowActionCandidates(value: unknown): Array<{ kind: WorkflowActionKind; value: unknown }> {
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => {
+      const itemKind = isRecord(item) ? normalizeWorkflowKind(item.kind ?? item.type ?? item.category ?? item.actionType) : null;
+      return itemKind ? [{ kind: itemKind, value: item }] : collectWorkflowActionCandidates(item);
+    });
+  }
+  if (!isRecord(value)) return [];
+
+  const candidates: Array<{ kind: WorkflowActionKind; value: unknown }> = [];
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const keyKind = normalizeWorkflowKind(key);
+    if (keyKind && Array.isArray(nestedValue)) {
+      candidates.push(...nestedValue.map((item) => ({ kind: keyKind, value: item })));
+      continue;
+    }
+    if (keyKind && isRecord(nestedValue)) {
+      candidates.push({ kind: keyKind, value: nestedValue });
+      continue;
+    }
+    candidates.push(...collectWorkflowActionCandidates(nestedValue));
+  }
+  return candidates;
+}
+
+function normalizeWorkflowAction(candidate: { kind: WorkflowActionKind; value: unknown }): ParsedWorkflowAction | null {
+  if (typeof candidate.value === "string") {
+    const title = cleanActionTitle(candidate.value);
+    return title ? { kind: candidate.kind, title } : null;
+  }
+  if (!isRecord(candidate.value)) return null;
+  const title = extractStringField(candidate.value, ["title", "name", "label", "summary", "task", "approval"]);
+  if (!title) return null;
+  return {
+    kind: candidate.kind,
+    id: extractStringField(candidate.value, ["id", "actionId", "approvalId", "taskId"]) || undefined,
+    title,
+    owner: extractStringField(candidate.value, ["owner", "assignee", "assignedTo", "requester"]) || undefined,
+    due: extractStringField(candidate.value, ["due", "dueDate", "deadline"]) || undefined,
+    source: extractStringField(candidate.value, ["source", "sourceChat", "artifact"]) || undefined,
+    status: extractStringField(candidate.value, ["status", "state"]) || undefined,
+  };
+}
+
+function resolveMarkdownWorkflowAction(text: string, workflowActions: WorkflowActionContext | undefined): ParsedWorkflowAction | null {
+  const rawText = text.replace(/\s+/g, " ").trim();
+  const explicit = rawText.match(/\b(approval|task)\s*[:#]\s*([a-z0-9][\w:-]*)/i);
+  if (explicit) {
+    return {
+      kind: explicit[1].toLowerCase() === "approval" ? "approval" : "task",
+      id: explicit[2],
+      title: cleanActionTitle(rawText.replace(explicit[0], "")) || explicit[2],
+    };
+  }
+  const normalizedText = cleanActionTitle(rawText);
+  if (!normalizedText) return null;
+
+  const approval = workflowActions?.approvals?.find((item) => titleMatches(normalizedText, item.title));
+  if (approval) return { kind: "approval", id: approval.id, title: approval.title };
+  const task = workflowActions?.tasks?.find((item) => titleMatches(normalizedText, item.title));
+  if (task) return { kind: "task", id: task.id, title: task.title };
+
+  if (/\b(approval|approve|sign[- ]?off)\b/i.test(normalizedText)) return { kind: "approval", title: normalizedText };
+  if (/\b(task|assigned|follow[- ]?up|todo|to do)\b/i.test(normalizedText)) return { kind: "task", title: normalizedText };
+  return null;
+}
+
+function resolveWorkflowAction(action: ParsedWorkflowAction, workflowActions: WorkflowActionContext | undefined) {
+  const collection = action.kind === "approval" ? workflowActions?.approvals : workflowActions?.tasks;
+  const exact = action.id ? collection?.find((item) => item.id === action.id) : undefined;
+  const titleMatch = collection?.find((item) => titleMatches(action.title, item.title));
+  const matched = exact ?? titleMatch;
+  return {
+    ...action,
+    id: matched?.id ?? action.id,
+    title: matched?.title ?? action.title,
+    owner: matched?.owner ?? action.owner,
+    due: action.kind === "approval" ? (matched as WorkflowApprovalAction | undefined)?.due ?? action.due : action.due,
+    source: action.kind === "task" ? (matched as WorkflowTaskAction | undefined)?.source ?? action.source : action.source,
+    status: matched?.status ?? action.status,
+    clientStatus: matched?.clientStatus,
+  };
+}
+
+function MarkdownArtifact({
+  className,
+  markdown,
+  workflowActions,
+}: {
+  className?: string;
+  markdown: string;
+  workflowActions?: WorkflowActionContext;
+}) {
   return (
     <div className={cn("space-y-3 text-sm leading-6", className)} data-rendered-markdown="true">
       <ReactMarkdown
@@ -201,24 +350,107 @@ function MarkdownArtifact({ className, markdown }: { className?: string; markdow
           h2: ({ children }) => <h3 className="text-base font-semibold text-foreground">{children}</h3>,
           h3: ({ children }) => <h4 className="text-sm font-semibold text-foreground">{children}</h4>,
           hr: () => <hr className="my-3 border-border" />,
-          li: ({ children }) => <li className="pl-1">{children}</li>,
+          li: ({ children }) => {
+            const action = resolveMarkdownWorkflowAction(textFromReactNode(children), workflowActions);
+            return (
+              <li className="pl-1">
+                {action ? (
+                  <InlineWorkflowAction action={action} workflowActions={workflowActions} />
+                ) : children}
+              </li>
+            );
+          },
           ol: ({ children }) => <ol className="space-y-1 pl-5 list-decimal">{children}</ol>,
           p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
           pre: ({ children }) => <>{children}</>,
           table: ({ children }) => (
             <div className="max-w-full overflow-x-auto rounded-md border bg-background">
-              <table className="min-w-max border-collapse text-xs">{children}</table>
+              <Table className="w-max min-w-full text-xs">{children}</Table>
             </div>
           ),
-          td: ({ children }) => <td className="border-t px-3 py-2 align-top">{children}</td>,
-          th: ({ children }) => <th className="whitespace-nowrap px-3 py-2 text-left font-semibold text-muted-foreground">{children}</th>,
-          thead: ({ children }) => <thead className="bg-muted/70">{children}</thead>,
+          tbody: ({ children }) => <TableBody>{children}</TableBody>,
+          td: ({ children }) => <TableCell className="max-w-80 align-top">{children}</TableCell>,
+          th: ({ children }) => <TableHead className="whitespace-nowrap bg-muted/70">{children}</TableHead>,
+          thead: ({ children }) => <TableHeader>{children}</TableHeader>,
+          tr: ({ children }) => <TableRow>{children}</TableRow>,
           ul: ({ children }) => <ul className="space-y-1 pl-5 list-disc">{children}</ul>,
         }}
       >
         {markdown}
       </ReactMarkdown>
     </div>
+  );
+}
+
+function WorkflowActionList({
+  actions,
+  className,
+  workflowActions,
+}: {
+  actions: ParsedWorkflowAction[];
+  className?: string;
+  workflowActions?: WorkflowActionContext;
+}) {
+  return (
+    <div className={cn("space-y-2", className)} data-rendered-workflow-actions="true">
+      {actions.map((action, index) => (
+        <InlineWorkflowAction
+          action={action}
+          key={`${action.kind}-${action.id ?? action.title}-${index}`}
+          workflowActions={workflowActions}
+        />
+      ))}
+    </div>
+  );
+}
+
+function InlineWorkflowAction({
+  action,
+  workflowActions,
+}: {
+  action: ParsedWorkflowAction;
+  workflowActions?: WorkflowActionContext;
+}) {
+  const resolved = resolveWorkflowAction(action, workflowActions);
+  const isApproval = resolved.kind === "approval";
+  const status = resolved.status || (isApproval ? "Needed" : "Open");
+  const isComplete = isApproval ? status === "Approved" : status === "Done";
+  const isPending = Boolean(resolved.clientStatus === "pending" || (isApproval ? workflowActions?.pendingApproval : workflowActions?.pendingTask));
+  const canMutate = Boolean(workflowActions?.canEdit && resolved.id && (isApproval ? workflowActions?.onToggleApproval : workflowActions?.onToggleTask));
+  const Icon = isApproval ? ClipboardCheck : ClipboardList;
+  const buttonLabel = isApproval
+    ? status === "Approved" ? "Approved" : status === "Requested" ? "Mark approved" : "Request approval"
+    : status === "Done" ? "Done" : status === "In progress" ? "Mark done" : "Start task";
+
+  return (
+    <span className="inline-flex max-w-full flex-wrap items-center gap-2 rounded-md border bg-background px-2 py-1.5 align-middle text-sm">
+      <Icon className={cn("size-4 shrink-0", isComplete ? "text-success" : "text-primary")} />
+      <span className="min-w-0">
+        <span className="font-medium text-foreground">{resolved.title}</span>
+        <span className="ml-2 text-xs text-muted-foreground">
+          {status}
+          {resolved.owner ? ` / ${resolved.owner}` : ""}
+          {resolved.due ? ` / ${resolved.due}` : ""}
+          {resolved.source ? ` / ${resolved.source}` : ""}
+        </span>
+      </span>
+      <Button
+        type="button"
+        size="sm"
+        variant={isComplete ? "secondary" : "outline"}
+        className="h-7 gap-1.5 px-2 text-xs"
+        disabled={!canMutate || isPending}
+        title={canMutate ? buttonLabel : "No matching workspace action is available"}
+        onClick={() => {
+          if (!resolved.id) return;
+          if (isApproval) workflowActions?.onToggleApproval?.(resolved.id);
+          else workflowActions?.onToggleTask?.(resolved.id);
+        }}
+      >
+        <CheckCircle2 className="size-3.5" />
+        {isPending ? "Updating..." : buttonLabel}
+      </Button>
+    </span>
   );
 }
 
@@ -280,6 +512,47 @@ function extractStringField(value: unknown, keys: string[]) {
   for (const key of keys) {
     if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
   }
+  return "";
+}
+
+function normalizeWorkflowKind(value: unknown): WorkflowActionKind | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase().replace(/[^a-z]/g, "");
+  if (["approval", "approvals", "pendingapproval", "pendingapprovals"].includes(normalized)) return "approval";
+  if (["task", "tasks", "assignedtask", "assignedtasks", "todo", "todos"].includes(normalized)) return "task";
+  return null;
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function titleMatches(left: string, right: string) {
+  const normalizedLeft = normalizeActionText(left);
+  const normalizedRight = normalizeActionText(right);
+  return normalizedLeft === normalizedRight || normalizedLeft.includes(normalizedRight) || normalizedRight.includes(normalizedLeft);
+}
+
+function cleanActionTitle(value: string) {
+  return value
+    .replace(/\b(?:approval|task)\s*[:#]\s*[a-z0-9][\w:-]*/gi, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s:;-]+|[\s:;-]+$/g, "")
+    .trim();
+}
+
+function normalizeActionText(value: string) {
+  return cleanActionTitle(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function textFromReactNode(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textFromReactNode).join(" ");
+  if (isRecord(node) && isRecord(node.props)) return textFromReactNode(node.props.children);
   return "";
 }
 

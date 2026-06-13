@@ -58,6 +58,15 @@ function compactMetadata(metadata: AiGatewayMetadata | undefined) {
   return entries.length ? Object.fromEntries(entries) as AiGatewayMetadata : undefined;
 }
 
+function jsonSafeMetadata(metadata: AiGatewayMetadata | undefined) {
+  if (!metadata) return {};
+  return Object.fromEntries(
+    Object.entries(metadata)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, typeof value === "bigint" ? value.toString() : value]),
+  );
+}
+
 export function getAiGatewayLogId(ai: Ai | null | undefined) {
   return ai?.aiGatewayLogId ?? null;
 }
@@ -166,7 +175,7 @@ async function recordWorkersAiGatewayUsageEvent({
         projectId ?? null,
         chatId ?? null,
         JSON.stringify({
-          ...(metadata ?? {}),
+          ...jsonSafeMetadata(metadata),
           aiGatewayLogId: getAiGatewayLogId(ai),
           trackedBy: "ai-gateway-wrapper",
           success: !error,

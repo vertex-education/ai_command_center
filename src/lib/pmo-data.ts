@@ -4,9 +4,8 @@ import { env } from "cloudflare:workers";
 import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
-import { getAiGatewayLogId, runTrackedWorkersAiWithGateway, runWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
 import { getAuth } from "@/lib/auth";
-import { recordAdminUsageEvent } from "@/lib/admin-metrics.server";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
 import {
@@ -19,6 +18,7 @@ import {
   emptyAiResponseMessage,
   lightweightChatTitleModelId,
   modelOptions,
+  prependDynamicWorkspaceContextHeader,
   promptTemplates,
   vertexAiModelId,
 } from "@/lib/prompts";
@@ -31,6 +31,7 @@ export type WorkspaceMode = "Personal" | "Team" | "Org";
 export type WorkspaceScope = "personal" | "team" | "org";
 export type ChatSection = "project" | "workspace";
 export type ChatReasoningLevel = "low" | "medium" | "high";
+export type ProjectStatus = "Active" | "Watch" | "Planning" | "Blocked" | "In Progress";
 
 export type ChatSummary = {
   id: string;
@@ -42,7 +43,7 @@ export type ProjectSummary = {
   id: string;
   name: string;
   description: string;
-  status: "Active" | "Watch" | "Planning";
+  status: ProjectStatus;
   projectChats: ChatSummary[];
 };
 
@@ -248,6 +249,13 @@ type SendChatMessageInput = {
   reasoningLevel?: ChatReasoningLevel;
   webSearchEnabled?: boolean;
   attachments?: ChatAttachment[];
+};
+
+type ChatDynamicWorkspaceContext = {
+  workspaceName: string;
+  projectName: string | null;
+  projectDescription: string | null;
+  projectStatus: string | null;
 };
 
 const chatTitleStopWords = new Set([
@@ -1252,7 +1260,17 @@ function buildMessageContentForHistory(message: ChatMessage) {
   return `${message.author}: ${message.text}${attachmentSummary}`;
 }
 
-async function searchWebForPrompt(context: unknown, query: string, enabled?: boolean): Promise<WebSearchTrace> {
+async function searchWebForPrompt(
+  context: unknown,
+  query: string,
+  enabled: boolean | undefined,
+  usageScope: {
+    mode: WorkspaceMode;
+    projectId?: string | null;
+    chatId: string;
+    chatTitle: string;
+  },
+): Promise<WebSearchTrace> {
   if (!enabled) {
     return {
       enabled: false,
@@ -1276,7 +1294,15 @@ async function searchWebForPrompt(context: unknown, query: string, enabled?: boo
   }
 
   try {
-    const consolidatedContext = await fetchConsolidatedWebSearch(query, env as unknown as Parameters<typeof fetchConsolidatedWebSearch>[1]);
+    const consolidatedContext = await fetchConsolidatedWebSearch(query, env as unknown as Parameters<typeof fetchConsolidatedWebSearch>[1], {
+      projectId: usageScope.projectId,
+      chatId: usageScope.chatId,
+      metadata: {
+        mode: usageScope.mode,
+        chatTitle: usageScope.chatTitle.slice(0, 120),
+        source: "chat-web-search",
+      },
+    });
     return {
       enabled: true,
       query,
@@ -1331,14 +1357,41 @@ async function runGemmaChat({
 }): Promise<{ text: string; trace: LlmDevTrace }> {
   const reasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
   const reasoningProfile = chatReasoningProfiles[reasoningLevel];
-  const webSearch = await searchWebForPrompt(context, data.text, data.webSearchEnabled);
+  const webSearch = await searchWebForPrompt(context, data.text, data.webSearchEnabled, {
+    mode: data.mode,
+    projectId: data.projectId,
+    chatId: data.chatId,
+    chatTitle: data.chatTitle,
+  });
   const webSearchContext = buildWebSearchPromptContext(webSearch);
-  const project = data.projectId
+  const workspaceContext: ChatDynamicWorkspaceContext = data.projectId
     ? await getDb()
-      .prepare("SELECT name, description FROM projects WHERE id = ? LIMIT 1")
+      .prepare(
+        `SELECT w.name as workspaceName,
+                p.name as projectName,
+                p.description as projectDescription,
+                p.status as projectStatus
+         FROM projects p
+         INNER JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.id = ?
+         LIMIT 1`,
+      )
       .bind(data.projectId)
-      .first<{ name: string; description: string }>()
-    : null;
+      .first<ChatDynamicWorkspaceContext>() ?? {
+        workspaceName: `${workspaceModeLabel(data.mode)} Workspace`,
+        projectName: null,
+        projectDescription: null,
+        projectStatus: null,
+      }
+    : {
+      ...(await getDb()
+      .prepare("SELECT name as workspaceName FROM workspaces WHERE scope = ? LIMIT 1")
+      .bind(workspace.scope)
+      .first<{ workspaceName: string }>() ?? { workspaceName: `${workspaceModeLabel(data.mode)} Workspace` }),
+      projectName: null,
+      projectDescription: null,
+      projectStatus: null,
+    };
   const recentMessages: Array<{ role: "user" | "assistant"; content: string }> = existingMessages.slice(-8).map((message) => ({
     role: message.role === "assistant" ? "assistant" : "user",
     content: buildMessageContentForHistory(message),
@@ -1347,8 +1400,7 @@ async function runGemmaChat({
 
   const scopeContext = [
     `Workspace scope: ${workspaceModeLabel(data.mode)} (${workspace.scope})`,
-    `Selected scope: ${project?.name ?? workspaceModeLabel(data.mode)}`,
-    project?.description ? `Project description: ${project.description}` : null,
+    `Selected scope: ${workspaceContext.projectName ?? workspaceModeLabel(data.mode)}`,
     `Active chat: ${data.chatTitle}`,
     "This is routing metadata for command-center record questions, not a limit on general conversation.",
     "Use this scoped context only when it is relevant to the user's request. Otherwise answer the user's request directly.",
@@ -1363,7 +1415,15 @@ async function runGemmaChat({
     messages: [
       {
         role: "system" as const,
-        content: `${buildVertexAiSystemPrompt()} ${buildReasoningInstruction(reasoningLevel)}`,
+        content: prependDynamicWorkspaceContextHeader(
+          `${buildVertexAiSystemPrompt()} ${buildReasoningInstruction(reasoningLevel)}`,
+          {
+            workspaceName: workspaceContext.workspaceName,
+            projectName: workspaceContext.projectName,
+            projectDescription: workspaceContext.projectDescription,
+            projectStatus: workspaceContext.projectStatus,
+          },
+        ),
       },
       {
         role: "user" as const,
@@ -1448,11 +1508,14 @@ async function runGemmaChat({
   const startedAt = Date.now();
   try {
     const result = await withAiTimeout(
-      (signal) => runWorkersAiWithGateway(
+      (signal) => runTrackedWorkersAiWithGateway(
         ai,
         vertexAiModelId,
         requestPayload,
         {
+          feature: webSearch ? "gemma-chat-with-web-search" : "gemma-chat",
+          projectId: data.projectId,
+          chatId: data.chatId,
           signal,
           metadata: {
             feature: webSearch ? "gemma-chat-web" : "gemma-chat",
@@ -1464,7 +1527,6 @@ async function runGemmaChat({
       ),
       reasoningProfile.timeoutMs,
     );
-    const aiGatewayLogId = getAiGatewayLogId(ai);
 
     const responseText = extractAiResponse(result).trim();
     const thinkingText = extractThinkingFromResponse(result);
@@ -1488,24 +1550,6 @@ async function runGemmaChat({
       diagnostics: getAiDiagnostics(result, responseText, thinkingText),
       rawResponse: cloneJsonValue(result),
     };
-    await recordAdminUsageEvent({
-      provider: "cloudflare-workers-ai",
-      feature: webSearch ? "gemma-chat-with-web-search" : "gemma-chat",
-      model: vertexAiModelId,
-      inputTokens: trace.diagnostics.tokenUsage.inputTokens,
-      outputTokens: trace.diagnostics.tokenUsage.outputTokens,
-      totalTokens: trace.diagnostics.tokenUsage.totalTokens,
-      durationMs: trace.durationMs,
-      projectId: data.projectId,
-      chatId: data.chatId,
-      metadata: {
-        mode: data.mode,
-        reasoningLevel,
-        maxCompletionTokens: requestPayload.max_completion_tokens,
-        webSearch,
-        aiGatewayLogId,
-      },
-    });
     return {
       text,
       trace,
@@ -1518,23 +1562,6 @@ async function runGemmaChat({
     });
     const text = `I could not complete the Workers AI request. ${detail}`;
     const durationMs = Date.now() - startedAt;
-    const aiGatewayLogId = getAiGatewayLogId(ai);
-    await recordAdminUsageEvent({
-      provider: "cloudflare-workers-ai",
-      feature: webSearch ? "gemma-chat-with-web-search-error" : "gemma-chat-error",
-      model: vertexAiModelId,
-      durationMs,
-      projectId: data.projectId,
-      chatId: data.chatId,
-      metadata: {
-        mode: data.mode,
-        reasoningLevel,
-        maxCompletionTokens: requestPayload.max_completion_tokens,
-        webSearch,
-        aiGatewayLogId,
-        error: detail,
-      },
-    });
     return {
       text,
       trace: {
@@ -2103,33 +2130,15 @@ export const toggleArtifactPin = createServerFn({ method: "POST" })
 
 export const deleteArtifact = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; r2Key: string }) => data)
-  .handler(async ({ data }) => {
-    const user = await requireWorkspaceEditor();
-    const workspace = getMutableWorkspace(data.mode);
-    const artifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key);
-    workspace.artifacts = workspace.artifacts.filter((item) => item.r2Key !== data.r2Key);
-    await getDb()
-      .prepare("DELETE FROM artifacts WHERE r2_key = ?")
-      .bind(data.r2Key)
-      .run();
-    await getArtifactsBucket().delete(data.r2Key).catch(() => undefined);
-    recordActivity(workspace, "Artifact deleted", `${artifact?.title ?? "Artifact"} removed from ${workspaceModeLabel(data.mode)}.`);
-    await recordWorkspaceMutation({
-      entity: "artifact",
-      entityId: data.r2Key,
-      invalidates: ["workspace"],
-      mode: data.mode,
-      operation: "delete",
-      projectId: artifact?.projectId ?? null,
-      sourceClientId: user.clientId,
-      sourceUserId: user.id,
-    });
-    return mergePersistedArtifacts(clone(getMutableRoot()));
+  .handler(async () => {
+    await requireWorkspaceEditor();
+    throw new Error("Artifacts are immutable. Use version history to restore an earlier state instead of deleting historical records.");
   });
 
 type ArtifactVersionSourceRow = {
   id: string;
   workspaceId: string;
+  parentArtifactId: string | null;
   title: string;
   fileType: string;
   owner: string;
@@ -2148,6 +2157,7 @@ async function findArtifactVersionSource(id: string) {
     .prepare(
       `SELECT id,
               workspace_id as workspaceId,
+              parent_artifact_id as parentArtifactId,
               title,
               file_type as fileType,
               owner,
@@ -2165,6 +2175,43 @@ async function findArtifactVersionSource(id: string) {
     )
     .bind(id)
     .first<ArtifactVersionSourceRow>();
+}
+
+async function findLatestArtifactVersionInLineage(id: string) {
+  return getDb()
+    .prepare(
+      `WITH RECURSIVE ancestors(id, parent_artifact_id) AS (
+         SELECT id, parent_artifact_id
+         FROM artifacts
+         WHERE id = ?
+         UNION ALL
+         SELECT artifacts.id, artifacts.parent_artifact_id
+         FROM artifacts
+         INNER JOIN ancestors ON ancestors.parent_artifact_id = artifacts.id
+       ),
+       root(id) AS (
+         SELECT id
+         FROM ancestors
+         WHERE parent_artifact_id IS NULL
+         LIMIT 1
+       ),
+       descendants(id, version, pinned, r2Key) AS (
+         SELECT artifacts.id, artifacts.version, artifacts.pinned, artifacts.r2_key
+         FROM artifacts
+         INNER JOIN root ON artifacts.id = root.id
+         UNION ALL
+         SELECT artifacts.id, artifacts.version, artifacts.pinned, artifacts.r2_key
+         FROM artifacts
+         INNER JOIN descendants ON artifacts.parent_artifact_id = descendants.id
+       )
+       SELECT id, version, pinned, r2Key
+       FROM descendants
+       WHERE id NOT IN (SELECT parent_artifact_id FROM artifacts WHERE parent_artifact_id IS NOT NULL)
+       ORDER BY version DESC
+       LIMIT 1`,
+    )
+    .bind(id)
+    .first<{ id: string; version: number; pinned: boolean | number; r2Key: string }>();
 }
 
 function versionedR2KeyFrom(baseKey: string, nextVersion: number) {
@@ -2186,25 +2233,7 @@ export const restoreArtifactVersion = createServerFn({ method: "POST" })
     const workspaceId = `ws-${scopeByMode[data.mode]}`;
     if (source.workspaceId !== workspaceId) throw new Error("Artifact version is outside the selected workspace.");
 
-    const latest = await getDb()
-      .prepare(
-        `WITH RECURSIVE descendants(id, version, pinned, r2Key) AS (
-           SELECT id, version, pinned, r2_key
-           FROM artifacts
-           WHERE id = ?
-           UNION ALL
-           SELECT artifacts.id, artifacts.version, artifacts.pinned, artifacts.r2_key
-           FROM artifacts
-           INNER JOIN descendants ON artifacts.parent_artifact_id = descendants.id
-         )
-         SELECT id, version, pinned, r2Key
-         FROM descendants
-         WHERE id NOT IN (SELECT parent_artifact_id FROM artifacts WHERE parent_artifact_id IS NOT NULL)
-         ORDER BY version DESC
-         LIMIT 1`,
-      )
-      .bind(source.id)
-      .first<{ id: string; version: number; pinned: boolean | number; r2Key: string }>();
+    const latest = await findLatestArtifactVersionInLineage(source.id);
     if (!latest) throw new Error("Latest artifact version was not found.");
 
     const object = await getArtifactsBucket().get(source.r2Key);
@@ -2307,12 +2336,14 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     if (baseArtifactId && (!baseArtifact || baseArtifact.workspaceId !== workspaceId)) {
       throw new Error("The artifact being updated is not available in this workspace.");
     }
+    const latestBaseArtifact = baseArtifact ? await findLatestArtifactVersionInLineage(baseArtifact.id) : null;
+    if (baseArtifact && !latestBaseArtifact) throw new Error("Latest artifact version was not found.");
     const title = baseArtifact?.title ?? (await generateArtifactTitle(seedTitle, rows)).slice(0, 96);
-    const nextVersion = baseArtifact ? (baseArtifact.version || 1) + 1 : 1;
+    const nextVersion = latestBaseArtifact ? (latestBaseArtifact.version || 1) + 1 : 1;
     const fileName = `${safeArtifactFileName(title)}.xlsx`;
     const xlsxBlob = await xlsxBlobFromRows(title, rows);
     const r2Key = baseArtifact
-      ? versionedR2KeyFrom(baseArtifact.r2Key, nextVersion)
+      ? versionedR2KeyFrom(latestBaseArtifact?.r2Key ?? baseArtifact.r2Key, nextVersion)
       : `${scopeByMode[mode]}/generated/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${fileName}`;
     const href = artifactDownloadHref(r2Key, `/artifacts/${fileName}`);
     const artifactDate = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
@@ -2331,9 +2362,9 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       r2Key,
       preview: ["Saved table export", fileName],
       previewJson: buildTablePreviewJson(rows, ["Saved table export", fileName], projectId, sourceChatTitle),
-      pinnedTo: baseArtifact?.pinned ? [mode] : [],
+      pinnedTo: latestBaseArtifact?.pinned ? [mode] : [],
       version: nextVersion,
-      parentArtifactId: baseArtifact?.id ?? null,
+      parentArtifactId: latestBaseArtifact?.id ?? null,
       commitMessage: baseArtifact ? commitMessage : "Saved from chat table export",
     };
 
@@ -2346,7 +2377,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
         workspace_mode: mode,
         project_id: projectId ?? "",
         source_chat_title: sourceChatTitle ?? "",
-        parent_artifact_id: baseArtifact?.id ?? "",
+        parent_artifact_id: latestBaseArtifact?.id ?? "",
         version: String(nextVersion),
       },
     });
@@ -2380,9 +2411,9 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
         r2Key,
         href,
         JSON.stringify(artifact.previewJson),
-        baseArtifact?.pinned ? 1 : 0,
+        latestBaseArtifact?.pinned ? 1 : 0,
         nextVersion,
-        baseArtifact?.id ?? null,
+        latestBaseArtifact?.id ?? null,
         artifact.commitMessage,
       )
       .run();
@@ -2399,7 +2430,8 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       sourceClientId: user.clientId,
       sourceUserId: user.id,
     });
-    return { workspace: clone(getMutableRoot()), artifact };
+    const mergedWorkspace = await mergePersistedArtifacts(clone(getMutableRoot()));
+    return { workspace: mergedWorkspace, artifact };
   });
 
 function buildTablePreviewJson(

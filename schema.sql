@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS document_chunks (
   document_name TEXT NOT NULL,
   r2_key TEXT NOT NULL,
   content TEXT NOT NULL,
+  sensitivity_label TEXT NOT NULL DEFAULT 'Standard' CHECK (sensitivity_label IN ('Standard', 'Confidential')),
+  restricted INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 

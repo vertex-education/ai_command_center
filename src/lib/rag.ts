@@ -4,12 +4,19 @@ import { env } from "cloudflare:workers";
 import { createServerFn } from "@tanstack/react-start";
 import { setResponseStatus } from "@tanstack/react-start/server";
 import { getRequest } from "@tanstack/start-server-core";
-import { getAiGatewayLogId, runTrackedWorkersAiWithGateway, runWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
 import { recordAdminUsageEvent } from "@/lib/admin-metrics.server";
 import { getAuth } from "@/lib/auth";
 import type { DocumentIngestionJob } from "@/lib/document-ingestion-queue";
 import { classifyPromptIntent, type PromptIntent } from "@/lib/intent-routing";
-import { buildVertexAiSystemPrompt } from "@/lib/prompts";
+import {
+  buildDynamicWorkspaceContextHeader,
+  buildInferenceAuthorizationDirective,
+  buildVertexAiSystemPrompt,
+  prependDynamicWorkspaceContextHeader,
+  prependInferenceAuthorizationDirective,
+  type InferenceAuthorizationContext,
+} from "@/lib/prompts";
 
 const embeddingModelId = "@cf/baai/bge-large-en-v1.5";
 const generationModelId = "@cf/google/gemma-4-26b-a4b-it";
@@ -30,11 +37,15 @@ type AuthSession = {
   };
 };
 
+type AuthorizationRole = "admin" | "user" | "viewer";
+
 export type IngestGeneratedArtifactInput = {
   rawText: string;
   fileName: string;
   teamId: string;
   projectId: string;
+  sensitivityLabel?: "Standard" | "Confidential";
+  restricted?: boolean;
 };
 
 export type IngestGeneratedArtifactResult = {
@@ -71,6 +82,8 @@ type DocumentChunkRow = {
   documentName: string;
   r2Key: string;
   content: string;
+  sensitivityLabel: string;
+  restricted: boolean;
 };
 
 type ScopedPromptContext = {
@@ -131,9 +144,28 @@ async function currentUserId() {
   return userId;
 }
 
+function normalizeAuthorizationRole(role: string | null | undefined): AuthorizationRole {
+  return role === "admin" || role === "viewer" ? role : "user";
+}
+
+function buildAuthorizationContext(role: AuthorizationRole): InferenceAuthorizationContext {
+  return {
+    role,
+    canModifyState: role === "admin" || role === "user",
+    canAccessConfidentialArtifacts: role === "admin" || role === "user",
+  };
+}
+
 async function requireScopedProjectAccess(teamId: string, projectId: string) {
   const userId = await currentUserId();
   const db = getDb();
+
+  const activeUser = await db
+    .prepare('SELECT role FROM "user" WHERE id = ? LIMIT 1')
+    .bind(userId)
+    .first<{ role: string | null }>();
+  if (!activeUser) throw new Error("Signed-in user was not found.");
+  const role = normalizeAuthorizationRole(activeUser.role);
 
   const teamMembership = await db
     .prepare("SELECT team_id FROM team_members WHERE team_id = ? AND user_id = ? LIMIT 1")
@@ -153,6 +185,11 @@ async function requireScopedProjectAccess(teamId: string, projectId: string) {
     .bind(projectId, teamId, userId)
     .first<{ project_id: string }>();
   if (!projectMembership) throw new Error("You are not assigned to this project.");
+
+  return {
+    userId,
+    ...buildAuthorizationContext(role),
+  };
 }
 
 async function fetchScopedPromptContext(workspaceId: string, projectId: string) {
@@ -176,21 +213,25 @@ async function fetchScopedPromptContext(workspaceId: string, projectId: string) 
 }
 
 function buildScopedEnvironmentContext(context: ScopedPromptContext) {
-  return [
-    "Current Workspace Context",
-    `Workspace: ${context.workspaceName}`,
-    `Project: ${context.projectName}`,
-    `Project status: ${context.projectStatus}`,
-    `Project description: ${context.projectDescription || "No project description is recorded."}`,
-  ].join("\n");
+  return buildDynamicWorkspaceContextHeader({
+    workspaceName: context.workspaceName,
+    projectName: context.projectName,
+    projectDescription: context.projectDescription,
+    projectStatus: context.projectStatus,
+  });
 }
 
 function prependScopedContextToSystemPrompt(basePrompt: string, context: ScopedPromptContext) {
-  return [
-    buildScopedEnvironmentContext(context),
-    "",
-    basePrompt,
-  ].join("\n");
+  return prependDynamicWorkspaceContextHeader(basePrompt, {
+    workspaceName: context.workspaceName,
+    projectName: context.projectName,
+    projectDescription: context.projectDescription,
+    projectStatus: context.projectStatus,
+  });
+}
+
+function prependScopedAuthorizationToSystemPrompt(basePrompt: string, authorization: InferenceAuthorizationContext) {
+  return prependInferenceAuthorizationDirective(basePrompt, authorization);
 }
 
 function assertRequiredString(value: string, label: string) {
@@ -215,6 +256,11 @@ function contentTypeFor(fileName: string) {
 
 function createR2Key(teamId: string, projectId: string, fileName: string) {
   return `rag/${teamId}/${projectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName(fileName)}`;
+}
+
+function normalizeSensitivityLabel(value: string | undefined, restricted: boolean | undefined) {
+  if (restricted) return "Confidential";
+  return value === "Confidential" ? "Confidential" : "Standard";
 }
 
 async function embedTexts(
@@ -293,9 +339,20 @@ function buildContext(chunks: DocumentChunkRow[]) {
   return chunks
     .map(
       (chunk, index) =>
-        `[${index + 1}] document="${chunk.documentName}" r2_key="${chunk.r2Key}" vector_id="${chunk.id}"\n${chunk.content}`,
+        `[${index + 1}] document="${chunk.documentName}" r2_key="${chunk.r2Key}" vector_id="${chunk.id}" sensitivity="${chunk.sensitivityLabel}" restricted="${chunk.restricted ? "true" : "false"}"\n${chunk.content}`,
     )
     .join("\n\n");
+}
+
+function buildScopedVectorFilter(teamId: string, projectId: string, authorization: InferenceAuthorizationContext) {
+  return {
+    team_id: { $eq: teamId },
+    project_id: { $eq: projectId },
+    ...(authorization.canAccessConfidentialArtifacts ? {} : {
+      confidentiality: { $ne: "Confidential" },
+      restricted: { $ne: true },
+    }),
+  };
 }
 
 async function fetchScopedHistoricalPromptContext({
@@ -304,12 +361,14 @@ async function fetchScopedHistoricalPromptContext({
   workspaceId,
   projectId,
   feature,
+  authorization,
 }: {
   prompt: string;
   teamId: string;
   workspaceId: string;
   projectId: string;
   feature: string;
+  authorization: InferenceAuthorizationContext;
 }) {
   const [promptEmbedding] = await embedTexts([prompt], {
     feature: "scoped-rag-query-embedding",
@@ -321,10 +380,7 @@ async function fetchScopedHistoricalPromptContext({
   const matches = await getVectorize().query(promptEmbedding, {
     topK: 8,
     returnMetadata: "indexed",
-    filter: {
-      team_id: { $eq: teamId },
-      project_id: { $eq: projectId },
-    },
+    filter: buildScopedVectorFilter(teamId, projectId, authorization),
   });
   await recordAdminUsageEvent({
     provider: "vectorize",
@@ -336,6 +392,8 @@ async function fetchScopedHistoricalPromptContext({
       workspaceId,
       topK: 8,
       matches: matches.matches.length,
+      userRole: authorization.role,
+      confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
     },
   });
 
@@ -360,7 +418,12 @@ async function fetchChunksByIds(ids: string[]) {
   const placeholders = ids.map(() => "?").join(", ");
   const result = await getDb()
     .prepare(
-      `SELECT id, document_name as documentName, r2_key as r2Key, content
+      `SELECT id,
+              document_name as documentName,
+              r2_key as r2Key,
+              content,
+              COALESCE(sensitivity_label, 'Standard') as sensitivityLabel,
+              COALESCE(restricted, 0) as restricted
        FROM document_chunks
        WHERE id IN (${placeholders})`,
     )
@@ -443,6 +506,7 @@ async function createDirectGenerationResponse({
   intent,
   prompt,
   projectId,
+  authorization,
   scopedPromptContext,
   teamId,
   workspaceId,
@@ -452,43 +516,41 @@ async function createDirectGenerationResponse({
   teamId: string;
   workspaceId: string;
   projectId: string;
+  authorization: InferenceAuthorizationContext;
   scopedPromptContext: ScopedPromptContext;
 }) {
   const startedAt = Date.now();
   const ai = getAi();
-  const aiStream = (await runWorkersAiWithGateway(ai, generationModelId, {
+  const systemPrompt = prependScopedAuthorizationToSystemPrompt(
+    prependScopedContextToSystemPrompt(buildVertexAiSystemPrompt(), scopedPromptContext),
+    authorization,
+  );
+  const aiStream = (await runTrackedWorkersAiWithGateway(ai, generationModelId, {
     messages: [
-      { role: "system", content: prependScopedContextToSystemPrompt(buildVertexAiSystemPrompt(), scopedPromptContext) },
+      { role: "system", content: systemPrompt },
       { role: "user", content: prompt },
     ],
     max_completion_tokens: 1_200,
     stream: true,
     temperature: 0.2,
   }, {
+    feature: intent === "ARTIFACT_GENERATION" ? "scoped-rag-artifact-generation" : "scoped-rag-direct-chat",
+    teamId,
+    projectId,
     metadata: {
       feature: intent === "ARTIFACT_GENERATION" ? "scoped-rag-artifact" : "scoped-rag-direct",
       model: generationModelId,
       teamId: teamId.slice(0, 80),
       projectId: projectId.slice(0, 80),
-    },
-  })) as unknown as ReadableStream<Uint8Array>;
-  const aiGatewayLogId = getAiGatewayLogId(ai);
-  await recordAdminUsageEvent({
-    provider: "cloudflare-workers-ai",
-    feature: intent === "ARTIFACT_GENERATION" ? "scoped-rag-artifact-generation" : "scoped-rag-direct-chat",
-    model: generationModelId,
-    durationMs: Date.now() - startedAt,
-    teamId,
-    projectId,
-    metadata: {
       workspaceId,
       intent,
       vectorizeBypassed: true,
+      userRole: authorization.role,
+      confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
       maxCompletionTokens: 1_200,
       streamed: true,
-      aiGatewayLogId,
     },
-  });
+  })) as unknown as ReadableStream<Uint8Array>;
 
   return createAiSseResponse(aiStream, []);
 }
@@ -496,6 +558,7 @@ async function createDirectGenerationResponse({
 async function createWebSearchGenerationResponse({
   prompt,
   projectId,
+  authorization,
   runtimeEnv,
   scopedPromptContext,
   teamId,
@@ -505,20 +568,31 @@ async function createWebSearchGenerationResponse({
   teamId: string;
   workspaceId: string;
   projectId: string;
+  authorization: InferenceAuthorizationContext;
   runtimeEnv: RagEnv;
   scopedPromptContext: ScopedPromptContext;
 }) {
   const [webContext, historicalContext] = await Promise.all([
-    fetchConsolidatedWebSearch(prompt, runtimeEnv),
+    fetchConsolidatedWebSearch(prompt, runtimeEnv, {
+      teamId,
+      projectId,
+      metadata: {
+        workspaceId,
+        source: "scoped-rag-stream",
+      },
+    }),
     fetchScopedHistoricalPromptContext({
       prompt,
       teamId,
       workspaceId,
       projectId,
       feature: "scoped-rag-web-context-query",
+      authorization,
     }),
   ]);
   const systemPrompt = [
+    buildInferenceAuthorizationDirective(authorization),
+    "",
     buildScopedEnvironmentContext(scopedPromptContext),
     "",
     "You are a scoped team-project assistant.",
@@ -537,7 +611,7 @@ async function createWebSearchGenerationResponse({
 
   const startedAt = Date.now();
   const ai = getAi();
-  const aiStream = (await runWorkersAiWithGateway(ai, generationModelId, {
+  const aiStream = (await runTrackedWorkersAiWithGateway(ai, generationModelId, {
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: prompt },
@@ -546,31 +620,24 @@ async function createWebSearchGenerationResponse({
     stream: true,
     temperature: 0.2,
   }, {
+    feature: "scoped-rag-web-search",
+    teamId,
+    projectId,
     metadata: {
       feature: "scoped-rag-web",
       model: generationModelId,
       teamId: teamId.slice(0, 80),
       projectId: projectId.slice(0, 80),
-    },
-  })) as unknown as ReadableStream<Uint8Array>;
-  const aiGatewayLogId = getAiGatewayLogId(ai);
-  await recordAdminUsageEvent({
-    provider: "cloudflare-workers-ai",
-    feature: "scoped-rag-web-search",
-    model: generationModelId,
-    durationMs: Date.now() - startedAt,
-    teamId,
-    projectId,
-    metadata: {
       workspaceId,
       intent: "WEB_SEARCH",
       vectorizeBypassed: true,
+      userRole: authorization.role,
+      confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
       maxCompletionTokens: 1_200,
       streamed: true,
-      aiGatewayLogId,
       citations: historicalContext.citations.length,
     },
-  });
+  })) as unknown as ReadableStream<Uint8Array>;
 
   return createAiSseResponse(aiStream, historicalContext.citations);
 }
@@ -683,7 +750,16 @@ function firecrawlMarkdownFromPayload(payload: FirecrawlSearchPayload) {
   return sections.length ? sections.join("\n\n") : "Firecrawl did not return markdown content.";
 }
 
-export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
+export async function fetchConsolidatedWebSearch(
+  query: string,
+  env: RagEnv,
+  usageScope: {
+    teamId?: string | null;
+    projectId?: string | null;
+    chatId?: string | null;
+    metadata?: Record<string, unknown>;
+  } = {},
+) {
   const tasks: Array<Promise<{ provider: "tavily" | "firecrawl"; payload: TavilySearchPayload | FirecrawlSearchPayload }>> = [];
 
   if (env.TAVILY_API_KEY) {
@@ -693,7 +769,10 @@ export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
         provider: "tavily",
         feature: "web-search",
         durationMs: Date.now() - startedAt,
-        metadata: { queryLength: query.length },
+        teamId: usageScope.teamId,
+        projectId: usageScope.projectId,
+        chatId: usageScope.chatId,
+        metadata: { queryLength: query.length, ...usageScope.metadata },
       });
       return { provider: "tavily" as const, payload };
     }).catch(async (error) => {
@@ -701,8 +780,12 @@ export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
         provider: "tavily",
         feature: "web-search-error",
         durationMs: Date.now() - startedAt,
+        teamId: usageScope.teamId,
+        projectId: usageScope.projectId,
+        chatId: usageScope.chatId,
         metadata: {
           queryLength: query.length,
+          ...usageScope.metadata,
           error: error instanceof Error ? error.message : "Unknown Tavily error.",
         },
       });
@@ -717,7 +800,10 @@ export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
         provider: "firecrawl",
         feature: "web-search",
         durationMs: Date.now() - startedAt,
-        metadata: { queryLength: query.length },
+        teamId: usageScope.teamId,
+        projectId: usageScope.projectId,
+        chatId: usageScope.chatId,
+        metadata: { queryLength: query.length, ...usageScope.metadata },
       });
       return { provider: "firecrawl" as const, payload };
     }).catch(async (error) => {
@@ -725,8 +811,12 @@ export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
         provider: "firecrawl",
         feature: "web-search-error",
         durationMs: Date.now() - startedAt,
+        teamId: usageScope.teamId,
+        projectId: usageScope.projectId,
+        chatId: usageScope.chatId,
         metadata: {
           queryLength: query.length,
+          ...usageScope.metadata,
           error: error instanceof Error ? error.message : "Unknown Firecrawl error.",
         },
       });
@@ -773,6 +863,8 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
     const projectId = assertRequiredString(data.projectId, "Project ID");
     const documentName = safeFileName(assertRequiredString(data.fileName, "File name"));
     const rawText = assertRequiredString(data.rawText, "Raw text");
+    const sensitivityLabel = normalizeSensitivityLabel(data.sensitivityLabel, data.restricted);
+    const restricted = data.restricted || sensitivityLabel === "Confidential";
 
     await requireScopedProjectAccess(teamId, projectId);
 
@@ -785,6 +877,8 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
         team_id: teamId,
         project_id: projectId,
         document_name: documentName,
+        confidentiality: sensitivityLabel,
+        restricted: restricted ? "true" : "false",
       },
     });
 
@@ -811,7 +905,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
   const projectId = assertRequiredString(data.projectId, "Project ID");
   const prompt = assertRequiredString(data.prompt, "Prompt");
 
-  await requireScopedProjectAccess(teamId, projectId);
+  const authorization = await requireScopedProjectAccess(teamId, projectId);
   const scopedPromptContext = await fetchScopedPromptContext(workspaceId, projectId);
 
   const runtimeEnv = getRuntimeEnv();
@@ -823,6 +917,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
       teamId,
       workspaceId,
       projectId,
+      authorization,
       scopedPromptContext,
     });
   }
@@ -833,6 +928,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
       teamId,
       workspaceId,
       projectId,
+      authorization,
       runtimeEnv,
       scopedPromptContext,
     });
@@ -844,9 +940,12 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
     workspaceId,
     projectId,
     feature: "scoped-rag-query",
+    authorization,
   });
 
   const systemPrompt = [
+    buildInferenceAuthorizationDirective(authorization),
+    "",
     buildScopedEnvironmentContext(scopedPromptContext),
     "",
     "You are a scoped team-project assistant.",
@@ -861,7 +960,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
 
   const generationStartedAt = Date.now();
   const ai = getAi();
-  const aiStream = (await runWorkersAiWithGateway(ai, generationModelId, {
+  const aiStream = (await runTrackedWorkersAiWithGateway(ai, generationModelId, {
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: prompt },
@@ -870,31 +969,24 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
     stream: true,
     temperature: 0.2,
   }, {
+    feature: "scoped-rag-search",
+    teamId,
+    projectId,
     metadata: {
       feature: "scoped-rag-search",
       model: generationModelId,
       teamId: teamId.slice(0, 80),
       projectId: projectId.slice(0, 80),
-    },
-  })) as unknown as ReadableStream<Uint8Array>;
-  const aiGatewayLogId = getAiGatewayLogId(ai);
-  await recordAdminUsageEvent({
-    provider: "cloudflare-workers-ai",
-    feature: "scoped-rag-search",
-    model: generationModelId,
-    durationMs: Date.now() - generationStartedAt,
-    teamId,
-    projectId,
-    metadata: {
       workspaceId,
       maxCompletionTokens: 1_200,
       streamed: true,
       citations: historicalContext.citations.length,
       intent,
       vectorizeBypassed: false,
-      aiGatewayLogId,
+      userRole: authorization.role,
+      confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
     },
-  });
+  })) as unknown as ReadableStream<Uint8Array>;
 
   return createAiSseResponse(aiStream, historicalContext.citations);
 }

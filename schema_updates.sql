@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS document_chunks_v2 (
   project_id TEXT,
   document_type TEXT NOT NULL,
   custom_tags_json TEXT NOT NULL DEFAULT '[]',
+  sensitivity_label TEXT NOT NULL DEFAULT 'Standard' CHECK (sensitivity_label IN ('Standard', 'Confidential')),
+  restricted INTEGER NOT NULL DEFAULT 0,
   token_count INTEGER,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   UNIQUE (artifact_id, chunk_index)

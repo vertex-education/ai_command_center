@@ -1,6 +1,7 @@
 /// <reference path="../worker-configuration.d.ts" />
 
 import serverEntry from "@tanstack/react-start/server-entry";
+import { runDailyProjectBriefings } from "./lib/daily-briefings";
 import { handleDocumentIngestionQueue, type DocumentIngestionEnv, type DocumentIngestionJob } from "./lib/document-ingestion-queue";
 
 export { ChatSyncDurableObject } from "./lib/chat-sync";
@@ -18,5 +19,9 @@ export default {
 
   queue(batch: MessageBatch<DocumentIngestionJob>, env: DocumentIngestionEnv) {
     return handleDocumentIngestionQueue(batch, env);
+  },
+
+  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runDailyProjectBriefings(env, controller.scheduledTime));
   },
 };

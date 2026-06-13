@@ -235,7 +235,7 @@ export const projects = sqliteTable(
     workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
     name: text("name").notNull(),
     description: text("description").notNull(),
-    status: text("status", { enum: ["Active", "Watch", "Planning"] }).notNull(),
+    status: text("status", { enum: ["Active", "Watch", "Planning", "Blocked", "In Progress"] }).notNull(),
     sortOrder: integer("sort_order").notNull().default(0),
   },
   (table) => ({
@@ -349,6 +349,8 @@ export const documentChunks = sqliteTable(
     documentName: text("document_name").notNull(),
     r2Key: text("r2_key").notNull(),
     content: text("content").notNull(),
+    sensitivityLabel: text("sensitivity_label", { enum: ["Standard", "Confidential"] }).notNull().default("Standard"),
+    restricted: integer("restricted", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull(),
   },
   (table) => ({
