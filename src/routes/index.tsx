@@ -4492,19 +4492,24 @@ function ArtifactPreviewDialog({
   artifact: Artifact | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  const isWorkbook = artifact?.type === "XLSX";
+
   return (
     <Dialog open={Boolean(artifact)} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className={cn(isWorkbook ? "max-h-[92vh] max-w-[min(1120px,calc(100vw-32px))] overflow-hidden p-0" : "max-w-2xl")}>
         {artifact ? (
           <>
-            <DialogHeader>
+            <DialogHeader className={cn(isWorkbook && "border-b px-5 py-4")}>
               <DialogTitle>{artifact.title}</DialogTitle>
               <DialogDescription>
                 {artifact.type} / {artifact.status} / {artifact.owner}
                 {artifact.sourceChatTitle ? ` / Chat: ${artifact.sourceChatTitle}` : ""}
               </DialogDescription>
             </DialogHeader>
-            <div className="grid gap-4 sm:grid-cols-[150px_minmax(0,1fr)]">
+            <div className={cn(
+              "grid gap-4 sm:grid-cols-[150px_minmax(0,1fr)]",
+              isWorkbook && "mx-5 mt-4 rounded-md border bg-muted/30 p-3 sm:grid-cols-[96px_minmax(0,1fr)]",
+            )}>
               <div className="grid min-h-44 place-items-center content-center gap-2 rounded-lg border bg-muted text-primary">
                 {artifactIcon(artifact.type)}
                 <strong>{artifact.type}</strong>
@@ -4526,7 +4531,8 @@ function ArtifactPreviewDialog({
                 </ul>
               </div>
             </div>
-            <DialogFooter>
+            {isWorkbook ? <XlsxArtifactPreview artifact={artifact} /> : null}
+            <DialogFooter className={cn(isWorkbook && "border-t px-5 py-4")}>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Close
               </Button>
@@ -4542,6 +4548,181 @@ function ArtifactPreviewDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+type XlsxPreviewSheet = {
+  name: string;
+  rows: string[][];
+  rowCount: number;
+  columnCount: number;
+};
+
+const xlsxPreviewMaxRows = 100;
+const xlsxPreviewMaxColumns = 30;
+
+function XlsxArtifactPreview({ artifact }: { artifact: Artifact }) {
+  const [sheets, setSheets] = useState<XlsxPreviewSheet[]>([]);
+  const [activeSheetName, setActiveSheetName] = useState("");
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setStatus("loading");
+    setError("");
+    setSheets([]);
+    setActiveSheetName("");
+
+    async function loadWorkbookPreview() {
+      try {
+        const response = await fetch(artifact.href, { signal: controller.signal });
+        if (!response.ok) throw new Error(`Could not load workbook preview (${response.status}).`);
+        const buffer = await response.arrayBuffer();
+        const { default: ExcelJS } = await import("exceljs");
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
+        const nextSheets: XlsxPreviewSheet[] = [];
+        workbook.eachSheet((worksheet) => {
+          const rowCount = worksheet.actualRowCount;
+          const columnCount = worksheet.actualColumnCount;
+          const visibleRows = Math.min(rowCount, xlsxPreviewMaxRows);
+          const visibleColumns = Math.min(columnCount, xlsxPreviewMaxColumns);
+          const rows = Array.from({ length: visibleRows }, (_row, rowIndex) => {
+            const worksheetRow = worksheet.getRow(rowIndex + 1);
+            return Array.from({ length: visibleColumns }, (_column, columnIndex) =>
+              previewCellValue(worksheetRow.getCell(columnIndex + 1).value),
+            );
+          });
+          nextSheets.push({ name: worksheet.name, rows, rowCount, columnCount });
+        });
+        if (controller.signal.aborted) return;
+        setSheets(nextSheets);
+        setActiveSheetName(nextSheets[0]?.name ?? "");
+        setStatus("ready");
+      } catch (loadError) {
+        if (controller.signal.aborted) return;
+        setError(loadError instanceof Error ? loadError.message : "Could not load workbook preview.");
+        setStatus("error");
+      }
+    }
+
+    void loadWorkbookPreview();
+    return () => controller.abort();
+  }, [artifact.href]);
+
+  const activeSheet = sheets.find((sheet) => sheet.name === activeSheetName) ?? sheets[0];
+  const hasTruncation = activeSheet
+    ? activeSheet.rowCount > xlsxPreviewMaxRows || activeSheet.columnCount > xlsxPreviewMaxColumns
+    : false;
+
+  return (
+    <div className="mx-5 my-4 min-h-0 space-y-3 overflow-hidden rounded-md border bg-background p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">Workbook preview</h3>
+          <p className="text-xs text-muted-foreground">
+            {status === "ready" && activeSheet
+              ? `${activeSheet.rowCount} rows / ${activeSheet.columnCount} columns`
+              : "Loading workbook data"}
+          </p>
+        </div>
+        {sheets.length > 1 ? (
+          <div className="flex max-w-full flex-wrap gap-1">
+            {sheets.map((sheet) => (
+              <Button
+                key={sheet.name}
+                type="button"
+                size="sm"
+                variant={sheet.name === activeSheet?.name ? "default" : "outline"}
+                onClick={() => setActiveSheetName(sheet.name)}
+              >
+                {sheet.name}
+              </Button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {status === "loading" ? (
+        <div className="grid min-h-40 place-items-center rounded-md border border-dashed text-sm text-muted-foreground">
+          Loading workbook preview...
+        </div>
+      ) : null}
+      {status === "error" ? (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          {error}
+        </div>
+      ) : null}
+      {status === "ready" && activeSheet ? (
+        <>
+          <div className="max-h-[52vh] max-w-full overflow-auto rounded-md border">
+            <Table className="w-max min-w-full">
+              <TableBody>
+                {activeSheet.rows.map((row, rowIndex) => (
+                  <TableRow key={`${activeSheet.name}-${rowIndex}`}>
+                    {row.map((cell, columnIndex) => (
+                      rowIndex === 0 ? (
+                        <TableHead
+                          key={`${activeSheet.name}-${rowIndex}-${columnIndex}`}
+                          className="sticky top-0 z-10 min-w-28 max-w-56 bg-primary px-2 py-2 text-primary-foreground"
+                        >
+                          <span className="line-clamp-2 normal-case">{cell || columnLabel(columnIndex)}</span>
+                        </TableHead>
+                      ) : (
+                        <TableCell
+                          key={`${activeSheet.name}-${rowIndex}-${columnIndex}`}
+                          className="min-w-28 max-w-56 truncate px-2 py-2 text-xs"
+                          title={cell}
+                        >
+                          {cell}
+                        </TableCell>
+                      )
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          {hasTruncation ? (
+            <p className="text-xs text-muted-foreground">
+              Preview is limited to the first {xlsxPreviewMaxRows} rows and {xlsxPreviewMaxColumns} columns.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function previewCellValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toLocaleDateString();
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "object") {
+    const record = value as {
+      text?: unknown;
+      result?: unknown;
+      formula?: unknown;
+      richText?: Array<{ text?: unknown }>;
+      hyperlink?: unknown;
+    };
+    if (record.result !== undefined) return previewCellValue(record.result);
+    if (record.text !== undefined) return previewCellValue(record.text);
+    if (Array.isArray(record.richText)) return record.richText.map((part) => previewCellValue(part.text)).join("");
+    if (record.formula !== undefined) return `=${String(record.formula)}`;
+    if (record.hyperlink !== undefined) return String(record.hyperlink);
+  }
+  return String(value);
+}
+
+function columnLabel(index: number) {
+  let label = "";
+  let current = index + 1;
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    current = Math.floor((current - 1) / 26);
+  }
+  return label;
 }
 
 function DataTable<TData extends object>({

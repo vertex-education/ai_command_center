@@ -264,7 +264,7 @@ export const statusMeta: Record<IdeaStatus, { label: string; tone: "info" | "war
   Blocked: { label: "Blocked", tone: "destructive", description: "Needs a decision, data source, or owner." },
 };
 
-export const tabs: TabName[] = ["Chat", "Ideas", "Artifacts", "Decisions", "Approvals", "Tasks", "Prompts"];
+export const tabs: TabName[] = ["Chat", "Artifacts", "Ideas", "Decisions", "Approvals", "Tasks", "Prompts"];
 export const workspaceModes: WorkspaceMode[] = ["Personal", "Team", "Org"];
 export const statusFilters: Array<IdeaStatus | "All"> = ["All", "New", "Review", "Pilot", "Approved", "Implemented", "Blocked"];
 export { modelOptions, promptTemplates };
