@@ -40,6 +40,7 @@ import {
   PanelRightOpen,
   Pencil,
   Plus,
+  RotateCcw,
   Settings,
   Search,
   Send,
@@ -599,6 +600,9 @@ function PMOCommandCenter() {
   const [activeChatSection, setActiveChatSection] = useState<ChatSection>("workspace");
   const [activeChatId, setActiveChatId] = useState(visibleWorkspace.workspaceChats[0]?.id ?? "");
   const [selectedIdeaId, setSelectedIdeaId] = useState(visibleWorkspace.ideas[0]?.id ?? "");
+  const [selectedDecisionId, setSelectedDecisionId] = useState(visibleWorkspace.decisions[0]?.id ?? "");
+  const [selectedApprovalId, setSelectedApprovalId] = useState(visibleWorkspace.approvals[0]?.id ?? "");
+  const [selectedTaskId, setSelectedTaskId] = useState(visibleWorkspace.tasks[0]?.id ?? "");
   const [selectedArtifactTitle, setSelectedArtifactTitle] = useState(visibleWorkspace.artifacts[1]?.title ?? visibleWorkspace.artifacts[0]?.title ?? "");
   const [statusFilter, setStatusFilter] = useState<IdeaStatus | "All">("All");
   const [searchTerm, setSearchTerm] = useState("");
@@ -1022,9 +1026,18 @@ function PMOCommandCenter() {
   const selectedIdea = scopedIdeas.find((idea) => idea.id === selectedIdeaId) ?? scopedIdeas[0];
   const selectedArtifact =
     scopedArtifacts.find((artifact) => artifact.title === selectedArtifactTitle) ?? scopedArtifacts[0];
-  const selectedDecision = scopedDecisions.find((decision) => decision.status !== "Completed") ?? scopedDecisions[0];
-  const selectedApproval = scopedApprovals.find((approval) => !["Approved", "Not Approved"].includes(approval.status)) ?? scopedApprovals[0];
-  const selectedTask = scopedTasks.find((task) => task.status !== "Completed") ?? scopedTasks[0];
+  const selectedDecision =
+    scopedDecisions.find((decision) => decision.id === selectedDecisionId)
+    ?? scopedDecisions.find((decision) => decision.status !== "Completed")
+    ?? scopedDecisions[0];
+  const selectedApproval =
+    scopedApprovals.find((approval) => approval.id === selectedApprovalId)
+    ?? scopedApprovals.find((approval) => !["Approved", "Not Approved"].includes(approval.status))
+    ?? scopedApprovals[0];
+  const selectedTask =
+    scopedTasks.find((task) => task.id === selectedTaskId)
+    ?? scopedTasks.find((task) => task.status !== "Completed")
+    ?? scopedTasks[0];
 
   const pinnedIdeas = visibleWorkspace.pinnedIdeaIds
     .map((id) => scopedIdeas.find((idea) => idea.id === id))
@@ -1070,7 +1083,22 @@ function PMOCommandCenter() {
         ? current
         : scopedArtifacts[0]?.title ?? "",
     );
-  }, [scopedArtifacts, scopedIdeas]);
+    setSelectedDecisionId((current) =>
+      current && scopedDecisions.some((decision) => decision.id === current)
+        ? current
+        : scopedDecisions.find((decision) => decision.status !== "Completed")?.id ?? scopedDecisions[0]?.id ?? "",
+    );
+    setSelectedApprovalId((current) =>
+      current && scopedApprovals.some((approval) => approval.id === current)
+        ? current
+        : scopedApprovals.find((approval) => !["Approved", "Not Approved"].includes(approval.status))?.id ?? scopedApprovals[0]?.id ?? "",
+    );
+    setSelectedTaskId((current) =>
+      current && scopedTasks.some((task) => task.id === current)
+        ? current
+        : scopedTasks.find((task) => task.status !== "Completed")?.id ?? scopedTasks[0]?.id ?? "",
+    );
+  }, [scopedApprovals, scopedArtifacts, scopedDecisions, scopedIdeas, scopedTasks]);
 
   useEffect(() => {
     const activeProjectExists = activeProjectId
@@ -2107,6 +2135,10 @@ function PMOCommandCenter() {
                         onSearchTerm={setSearchTerm}
                         onDeleteIdea={(id) => removeIdeaMutation.mutate(id)}
                         onPreviewIdea={(idea) => setWorkflowPreview(workflowPreviewFromIdea(idea))}
+                        onSelectIdea={(idea) => {
+                          setSelectedIdeaId(idea.id);
+                          setRightOpen(true);
+                        }}
                         onStatusChange={handleIdeaStatusChange}
                         onStatusFilter={setStatusFilter}
                       />
@@ -2134,6 +2166,10 @@ function PMOCommandCenter() {
                         decisions={scopedDecisions}
                         onDelete={(id) => removeDecisionMutation.mutate(id)}
                         onPreview={(decision) => setWorkflowPreview(workflowPreviewFromDecision(decision))}
+                        onSelect={(decision) => {
+                          setSelectedDecisionId(decision.id);
+                          setRightOpen(true);
+                        }}
                         onStatusChange={(id, status) => updateDecisionStatusMutation.mutate({ id, status })}
                       />
                     ) : null}
@@ -2143,6 +2179,10 @@ function PMOCommandCenter() {
                         approvals={scopedApprovals}
                         onDelete={(id) => removeApprovalMutation.mutate(id)}
                         onPreview={(approval) => setWorkflowPreview(workflowPreviewFromApproval(approval))}
+                        onSelect={(approval) => {
+                          setSelectedApprovalId(approval.id);
+                          setRightOpen(true);
+                        }}
                         onStatusChange={(id, status) => updateApprovalStatusMutation.mutate({ id, status })}
                       />
                     ) : null}
@@ -2151,8 +2191,12 @@ function PMOCommandCenter() {
                         canEdit={canEdit}
                         tasks={scopedTasks}
                         onDelete={(id) => removeTaskMutation.mutate(id)}
-                        onComplete={(id) => updateTaskStatusMutation.mutate({ id, status: "Completed" })}
+                        onStatusChange={(id, status) => updateTaskStatusMutation.mutate({ id, status })}
                         onPreview={(task) => setWorkflowPreview(workflowPreviewFromTask(task))}
+                        onSelect={(task) => {
+                          setSelectedTaskId(task.id);
+                          setRightOpen(true);
+                        }}
                       />
                     ) : null}
                         {activeTab === "Prompts" ? (
@@ -4139,7 +4183,32 @@ function hasWorkflowActionSchema(value: unknown): boolean {
   const record = value as Record<string, unknown>;
   return Object.entries(record).some(([key, nestedValue]) => {
     const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, "");
-    if (["approval", "approvals", "pendingapproval", "pendingapprovals", "task", "tasks", "assignedtask", "assignedtasks"].includes(normalizedKey)) {
+    if ([
+      "approval",
+      "approvals",
+      "pendingapproval",
+      "pendingapprovals",
+      "decision",
+      "decisions",
+      "idea",
+      "ideas",
+      "suggestedidea",
+      "suggestedideas",
+      "potentialidea",
+      "potentialideas",
+      "opportunity",
+      "opportunities",
+      "improvement",
+      "improvements",
+      "enhancement",
+      "enhancements",
+      "suggestion",
+      "suggestions",
+      "task",
+      "tasks",
+      "assignedtask",
+      "assignedtasks",
+    ].includes(normalizedKey)) {
       return true;
     }
     return hasWorkflowActionSchema(nestedValue);
@@ -4639,12 +4708,14 @@ function WorkflowLineList({
   items,
   onDelete,
   onPreview,
+  onSelect,
 }: {
   canEdit: boolean;
   emptyLabel: string;
   items: WorkflowLineItem[];
   onDelete: (id: string) => void;
   onPreview: (item: WorkflowLineItem) => void;
+  onSelect: (item: WorkflowLineItem) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -4659,7 +4730,15 @@ function WorkflowLineList({
       {items.map((item) => (
         <div
           key={item.id}
-          className="flex items-center gap-3 rounded-md border bg-background p-3"
+          role="button"
+          tabIndex={0}
+          className="flex cursor-pointer items-center gap-3 rounded-md border bg-background p-3 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+          onClick={() => onSelect(item)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            onSelect(item);
+          }}
         >
           <span className="min-w-0 flex-1">
             <strong
@@ -4673,7 +4752,7 @@ function WorkflowLineList({
             </strong>
             <span className="mt-0.5 block truncate text-xs text-muted-foreground">{item.meta}</span>
           </span>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
             {item.statusControl}
             <Button type="button" variant="outline" size="sm" onClick={() => onPreview(item)}>
               <Eye />
@@ -4702,6 +4781,7 @@ function IdeasView({
   onDeleteIdea,
   onPreviewIdea,
   onSearchTerm,
+  onSelectIdea,
   onStatusChange,
   onStatusFilter,
 }: {
@@ -4714,6 +4794,7 @@ function IdeasView({
   onDeleteIdea: (id: string) => void;
   onPreviewIdea: (idea: Idea) => void;
   onSearchTerm: (value: string) => void;
+  onSelectIdea: (idea: Idea) => void;
   onStatusChange: (idea: Idea, status: IdeaStatus) => void;
   onStatusFilter: (value: IdeaStatus | "All") => void;
 }) {
@@ -4782,6 +4863,10 @@ function IdeasView({
         onPreview={(item) => {
           const idea = ideasById.get(item.id);
           if (idea) onPreviewIdea(idea);
+        }}
+        onSelect={(item) => {
+          const idea = ideasById.get(item.id);
+          if (idea) onSelectIdea(idea);
         }}
       />
     </div>
@@ -4939,12 +5024,14 @@ function DecisionView({
   decisions,
   onDelete,
   onPreview,
+  onSelect,
   onStatusChange,
 }: {
   canEdit: boolean;
   decisions: Decision[];
   onDelete: (id: string) => void;
   onPreview: (decision: Decision) => void;
+  onSelect: (decision: Decision) => void;
   onStatusChange: (id: string, status: Decision["status"]) => void;
 }) {
   const decisionsById = useMemo(() => new Map(decisions.map((decision) => [decision.id, decision])), [decisions]);
@@ -4980,6 +5067,10 @@ function DecisionView({
           const decision = decisionsById.get(item.id);
           if (decision) onPreview(decision);
         }}
+        onSelect={(item) => {
+          const decision = decisionsById.get(item.id);
+          if (decision) onSelect(decision);
+        }}
       />
     </div>
   );
@@ -4990,12 +5081,14 @@ function ApprovalView({
   canEdit,
   onDelete,
   onPreview,
+  onSelect,
   onStatusChange,
 }: {
   approvals: Approval[];
   canEdit: boolean;
   onDelete: (id: string) => void;
   onPreview: (approval: Approval) => void;
+  onSelect: (approval: Approval) => void;
   onStatusChange: (id: string, status: Approval["status"]) => void;
 }) {
   const approvalsById = useMemo(() => new Map(approvals.map((approval) => [approval.id, approval])), [approvals]);
@@ -5031,6 +5124,10 @@ function ApprovalView({
           const approval = approvalsById.get(item.id);
           if (approval) onPreview(approval);
         }}
+        onSelect={(item) => {
+          const approval = approvalsById.get(item.id);
+          if (approval) onSelect(approval);
+        }}
       />
     </div>
   );
@@ -5039,15 +5136,17 @@ function ApprovalView({
 function TaskView({
   canEdit,
   tasks,
-  onComplete,
+  onStatusChange,
   onDelete,
   onPreview,
+  onSelect,
 }: {
   canEdit: boolean;
   tasks: Task[];
-  onComplete: (id: string) => void;
+  onStatusChange: (id: string, status: Task["status"]) => void;
   onDelete: (id: string) => void;
   onPreview: (task: Task) => void;
+  onSelect: (task: Task) => void;
 }) {
   const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const items = useMemo<WorkflowLineItem[]>(
@@ -5058,9 +5157,16 @@ function TaskView({
       meta: `${task.owner} / ${task.source}`,
       complete: task.status === "Completed" ? "success" : undefined,
       statusControl: task.status === "Completed" ? (
-        <Badge variant="success">Completed</Badge>
+        canEdit ? (
+          <Button type="button" variant="outline" size="sm" onClick={() => onStatusChange(task.id, "Open")}>
+            <RotateCcw />
+            Mark Open
+          </Button>
+        ) : (
+          <Badge variant="success">Completed</Badge>
+        )
       ) : canEdit ? (
-        <Button type="button" variant="outline" size="sm" onClick={() => onComplete(task.id)}>
+        <Button type="button" variant="outline" size="sm" onClick={() => onStatusChange(task.id, "Completed")}>
           <CheckCircle2 />
           Complete
         </Button>
@@ -5068,7 +5174,7 @@ function TaskView({
         <Badge variant="info">Open</Badge>
       ),
     })),
-    [canEdit, onComplete, tasks],
+    [canEdit, onStatusChange, tasks],
   );
 
   return (
@@ -5082,6 +5188,10 @@ function TaskView({
         onPreview={(item) => {
           const task = tasksById.get(item.id);
           if (task) onPreview(task);
+        }}
+        onSelect={(item) => {
+          const task = tasksById.get(item.id);
+          if (task) onSelect(task);
         }}
       />
     </div>

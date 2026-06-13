@@ -358,7 +358,7 @@ function resolveMarkdownWorkflowAction(text: string, workflowActions: WorkflowAc
 
   if (/\b(approval|approve|sign[- ]?off)\b/i.test(normalizedText)) return { kind: "approval", title: normalizedText };
   if (/\b(decision|decide|choice|blocked row|trade[- ]?off)\b/i.test(normalizedText)) return { kind: "decision", title: normalizedText };
-  if (/\b(idea|opportunity|proposal|concept|pilot|experiment)\b/i.test(normalizedText)) return { kind: "idea", title: normalizedText };
+  if (hasIdeaLanguage(normalizedText)) return { kind: "idea", title: normalizedText };
   if (hasFollowThroughLanguage(normalizedText)) return { kind: "task", title: normalizedText };
   return null;
 }
@@ -666,7 +666,32 @@ function normalizeWorkflowKind(value: unknown): WorkflowActionKind | null {
   const normalized = value.toLowerCase().replace(/[^a-z]/g, "");
   if (["approval", "approvals", "pendingapproval", "pendingapprovals"].includes(normalized)) return "approval";
   if (["decision", "decisions"].includes(normalized)) return "decision";
-  if (["idea", "ideas", "opportunity", "opportunities"].includes(normalized)) return "idea";
+  if ([
+    "idea",
+    "ideas",
+    "suggestedidea",
+    "suggestedideas",
+    "potentialidea",
+    "potentialideas",
+    "opportunity",
+    "opportunities",
+    "proposal",
+    "proposals",
+    "concept",
+    "concepts",
+    "pilot",
+    "pilots",
+    "experiment",
+    "experiments",
+    "suggestion",
+    "suggestions",
+    "improvement",
+    "improvements",
+    "enhancement",
+    "enhancements",
+    "innovation",
+    "innovations",
+  ].includes(normalized)) return "idea";
   if (["task", "tasks", "assignedtask", "assignedtasks", "todo", "todos"].includes(normalized)) return "task";
   return null;
 }
@@ -687,10 +712,14 @@ function titleMatches(left: string, right: string) {
 
 function cleanActionTitle(value: string) {
   return value
-    .replace(/\b(?:approval|task)\s*[:#]\s*[a-z0-9][\w:-]*/gi, "")
+    .replace(/\b(?:approval|decision|idea|task)\s*[:#]\s*[a-z0-9][\w:-]*/gi, "")
     .replace(/\s+/g, " ")
     .replace(/^[\s:;-]+|[\s:;-]+$/g, "")
     .trim();
+}
+
+function hasIdeaLanguage(value: string) {
+  return /\b(idea|opportunit(?:y|ies)|proposal|concept|pilot|experiment|suggestion|improvement|enhancement|innovation|streamline|automate|optimi[sz]e)\b/i.test(value);
 }
 
 function hasFollowThroughLanguage(value: string) {
