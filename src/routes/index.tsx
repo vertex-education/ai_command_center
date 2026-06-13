@@ -554,12 +554,30 @@ function PMOCommandCenter() {
       : pageScopeKind === "project"
         ? `${baseScopeName} / ${activeProject?.name ?? "Project"}`
         : `${baseScopeName} / General`;
-  const scopedIdeas = visibleWorkspace.ideas.filter((idea) => idea.projectId === scopedProjectId);
-  const scopedArtifacts = visibleWorkspace.artifacts.filter((artifact) => artifact.projectId === scopedProjectId);
-  const scopedDecisions = visibleWorkspace.decisions.filter((decision) => decision.projectId === scopedProjectId);
-  const scopedApprovals = visibleWorkspace.approvals.filter((approval) => approval.projectId === scopedProjectId);
-  const scopedTasks = visibleWorkspace.tasks.filter((task) => task.projectId === scopedProjectId);
-  const scopedPrompts = promptTemplates.map((prompt) => `${scopeContextLabel}: ${prompt}`);
+  const scopedIdeas = useMemo(
+    () => visibleWorkspace.ideas.filter((idea) => idea.projectId === scopedProjectId),
+    [scopedProjectId, visibleWorkspace.ideas],
+  );
+  const scopedArtifacts = useMemo(
+    () => visibleWorkspace.artifacts.filter((artifact) => artifact.projectId === scopedProjectId),
+    [scopedProjectId, visibleWorkspace.artifacts],
+  );
+  const scopedDecisions = useMemo(
+    () => visibleWorkspace.decisions.filter((decision) => decision.projectId === scopedProjectId),
+    [scopedProjectId, visibleWorkspace.decisions],
+  );
+  const scopedApprovals = useMemo(
+    () => visibleWorkspace.approvals.filter((approval) => approval.projectId === scopedProjectId),
+    [scopedProjectId, visibleWorkspace.approvals],
+  );
+  const scopedTasks = useMemo(
+    () => visibleWorkspace.tasks.filter((task) => task.projectId === scopedProjectId),
+    [scopedProjectId, visibleWorkspace.tasks],
+  );
+  const scopedPrompts = useMemo(
+    () => promptTemplates.map((prompt) => `${scopeContextLabel}: ${prompt}`),
+    [scopeContextLabel],
+  );
   const persistedMessages = activeChat ? visibleWorkspace.conversations[conversationKey] ?? [] : [];
   const pendingMessages = activeChat ? optimisticMessages[conversationKey] ?? [] : [];
   const currentMessages = activeChat
@@ -609,15 +627,17 @@ function PMOCommandCenter() {
   });
 
   useEffect(() => {
-    if (!selectedIdea && scopedIdeas[0]) {
-      setSelectedIdeaId(scopedIdeas[0].id);
-    }
-  }, [scopedIdeas, selectedIdea]);
-
-  useEffect(() => {
-    setSelectedIdeaId(scopedIdeas[0]?.id ?? "");
-    setSelectedArtifactTitle(scopedArtifacts[0]?.title ?? "");
-  }, [scopedProjectId, scopedIdeas, scopedArtifacts]);
+    setSelectedIdeaId((current) =>
+      current && scopedIdeas.some((idea) => idea.id === current)
+        ? current
+        : scopedIdeas[0]?.id ?? "",
+    );
+    setSelectedArtifactTitle((current) =>
+      current && scopedArtifacts.some((artifact) => artifact.title === current)
+        ? current
+        : scopedArtifacts[0]?.title ?? "",
+    );
+  }, [scopedArtifacts, scopedIdeas]);
 
   useEffect(() => {
     const activeProjectExists = activeProjectId
@@ -657,13 +677,7 @@ function PMOCommandCenter() {
       setActiveProjectId(projectWithActiveChat.id);
     }
 
-    if (!selectedIdeaId && visibleWorkspace.ideas[0]) {
-      setSelectedIdeaId(visibleWorkspace.ideas[0].id);
-    }
-    if (!selectedArtifactTitle) {
-      setSelectedArtifactTitle(visibleWorkspace.artifacts.find((artifact) => artifact.projectId === null)?.title ?? "");
-    }
-  }, [activeChatId, activeChatSection, activeProjectId, selectedArtifactTitle, selectedIdeaId, visibleWorkspace]);
+  }, [activeChatId, activeChatSection, activeProjectId, visibleWorkspace]);
 
   useEffect(() => {
     if (activeMode === "Team" && teams.length > 0 && !teams.some((team) => team.id === activeTeamId)) {

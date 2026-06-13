@@ -1,4 +1,4 @@
-import ExcelJS from "exceljs";
+import type { Border, Borders, Worksheet } from "exceljs";
 
 export type ChatExportFormat = "pdf" | "docx" | "xlsx" | "csv";
 
@@ -43,7 +43,7 @@ export function exportFormatLabel(format: ChatExportFormat) {
 }
 
 export async function downloadChatExport(format: ChatExportFormat, content: string, baseName: string) {
-  const safeName = safeFileName(baseName || "vertex-ai-chat-export");
+  const safeName = format === "xlsx" ? safeXlsxFileName(baseName || "vertex-ai-chat-export") : safeFileName(baseName || "vertex-ai-chat-export");
   if (format === "csv") {
     const table = extractTables(content)[0] ?? contentTable(content);
     return downloadBlob(`${safeName}.csv`, "text/csv;charset=utf-8", buildCsv(table.rows));
@@ -67,7 +67,7 @@ export async function downloadChatExport(format: ChatExportFormat, content: stri
 }
 
 export async function downloadRows(format: "csv" | "xlsx", title: string, rows: ExportTable["rows"]) {
-  const safeName = safeFileName(title || "chart-export");
+  const safeName = format === "xlsx" ? safeXlsxFileName(title || "chart-export") : safeFileName(title || "chart-export");
   if (format === "csv") {
     return downloadBlob(`${safeName}.csv`, "text/csv;charset=utf-8", buildCsv(rows));
   }
@@ -83,7 +83,7 @@ export async function downloadHtmlTable(format: "csv" | "xlsx", title: string, t
 }
 
 export async function xlsxFileFromHtmlTable(title: string, table: HTMLTableElement) {
-  const safeName = safeFileName(title || "table-export");
+  const safeName = safeXlsxFileName(title || "table-export");
   return new File(
     [await buildXlsx([{ name: title || "Table Export", rows: htmlTableRows(table) }])],
     `${safeName}.xlsx`,
@@ -118,6 +118,17 @@ function safeFileName(value: string) {
     .replace(/[^a-z0-9._-]+/gi, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 72) || "export";
+}
+
+function safeXlsxFileName(value: string) {
+  return value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/\d+/g, " ")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 72) || "vertex-workbook";
 }
 
 function contentTable(content: string): ExportTable {
@@ -201,7 +212,7 @@ function extractMarkdownTables(content: string): ExportTable[] {
       rows.push(Object.fromEntries(header.map((column, columnIndex) => [column || `Column ${columnIndex + 1}`, cells[columnIndex] ?? ""])));
       index += 1;
     }
-    tables.push({ name: `Table ${tables.length + 1}`, rows });
+    tables.push({ name: numberlessTableName(tables.length), rows });
   }
   return tables;
 }
@@ -306,14 +317,16 @@ function buildDocx(content: string) {
 }
 
 async function buildXlsx(tables: ExportTable[]) {
+  const { default: ExcelJS } = await import("exceljs");
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "Vertex AI Command Center";
   workbook.company = "Vertex Education";
   workbook.created = new Date();
   workbook.modified = new Date();
 
+  const usedSheetNames = new Set<string>();
   tables.forEach((table, index) => {
-    const worksheet = workbook.addWorksheet(sanitizeSheetName(table.name || `Sheet ${index + 1}`), {
+    const worksheet = workbook.addWorksheet(uniqueSheetName(table.name, index, usedSheetNames), {
       properties: { tabColor: { argb: `FF${vertexWorkbookBrand.gold}` } },
       views: [{ state: "frozen", ySplit: 1 }],
     });
@@ -325,10 +338,35 @@ async function buildXlsx(tables: ExportTable[]) {
 }
 
 function sanitizeSheetName(name: string) {
-  return name.replace(/[:\\/?*[\]]/g, " ").trim().slice(0, 31) || "Sheet";
+  return name
+    .replace(/\d+/g, " ")
+    .replace(/[:\\/?*[\]]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 31) || "Data";
 }
 
-function brandWorksheet(worksheet: ExcelJS.Worksheet, rows: ExportTable["rows"]) {
+function uniqueSheetName(name: string, index: number, usedSheetNames: Set<string>) {
+  const fallbackNames = ["Data", "Summary", "Records", "Details", "Insights", "Review", "Export", "Worksheet"];
+  const sanitized = sanitizeSheetName(name);
+  const candidates = [sanitized, ...fallbackNames.slice(index), ...fallbackNames.slice(0, index)];
+  const selected = candidates.find((candidate) => !usedSheetNames.has(candidate)) ?? `Data ${sheetNameWord(index)}`;
+  const numberless = sanitizeSheetName(selected);
+  usedSheetNames.add(numberless);
+  return numberless;
+}
+
+function numberlessTableName(index: number) {
+  const names = ["Table", "Summary", "Records", "Details", "Insights", "Review", "Export", "Data"];
+  return names[index] ?? `Table ${sheetNameWord(index)}`;
+}
+
+function sheetNameWord(index: number) {
+  const words = ["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"];
+  return words[index] ?? "Additional";
+}
+
+function brandWorksheet(worksheet: Worksheet, rows: ExportTable["rows"]) {
   const columns = collectColumns(rows);
   worksheet.columns = columns.map((column) => ({
     header: column,
@@ -370,8 +408,8 @@ function brandWorksheet(worksheet: ExcelJS.Worksheet, rows: ExportTable["rows"])
   });
 }
 
-function brandedCellBorder(): Partial<ExcelJS.Borders> {
-  const border: Partial<ExcelJS.Border> = { style: "thin", color: { argb: `FF${vertexWorkbookBrand.lightGray}` } };
+function brandedCellBorder(): Partial<Borders> {
+  const border: Partial<Border> = { style: "thin", color: { argb: `FF${vertexWorkbookBrand.lightGray}` } };
   return { top: border, right: border, bottom: border, left: border };
 }
 

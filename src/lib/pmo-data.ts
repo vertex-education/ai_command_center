@@ -827,9 +827,17 @@ function safeArtifactFileName(value: string) {
   return value
     .trim()
     .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/\d+/g, " ")
     .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/-+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 72) || "table-export";
+}
+
+function artifactDownloadHref(r2Key: string, fallbackHref: string) {
+  return r2Key.includes("/generated/")
+    ? `/api/artifacts?key=${encodeURIComponent(r2Key)}`
+    : fallbackHref;
 }
 
 function requiredFormString(formData: FormData, key: string, label: string) {
@@ -856,6 +864,7 @@ function fallbackArtifactTitle(seedTitle: string, rows: ExportTable["rows"]) {
   const source = `${seedTitle} ${columns}`.trim() || "Table Export";
   return source
     .replace(/\b(option|method|table|export|csv|xlsx)\b/gi, " ")
+    .replace(/\d+/g, " ")
     .replace(/[^a-z0-9\s-]/gi, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -870,6 +879,7 @@ async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"
   const prompt = [
     "Create a concise file name for an XLSX artifact based on this table.",
     "Return only the file name text, no extension, no quotes, no punctuation except hyphens or spaces.",
+    "Do not include any digits or numbered versions in the file name.",
     "Use 3 to 7 words. Make it specific to the content.",
     `Current heading: ${seedTitle}`,
     "Rows:",
@@ -890,6 +900,7 @@ async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"
     const generated = extractAiResponse(result)
       .replace(/\.[a-z0-9]+$/i, "")
       .replace(/["'`]/g, "")
+      .replace(/\d+/g, " ")
       .replace(/[^a-z0-9\s-]/gi, " ")
       .replace(/\s+/g, " ")
       .trim()
@@ -1248,7 +1259,7 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
       date: row.date,
       status: row.status,
       summary: row.summary,
-      href: row.href,
+      href: artifactDownloadHref(row.r2Key, row.href),
       r2Key: row.r2Key,
       preview,
       pinnedTo: row.pinned ? [mode] : [],
@@ -1526,7 +1537,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     const fileName = `${safeArtifactFileName(title)}.xlsx`;
     const xlsxBlob = await xlsxBlobFromRows(title, rows);
     const r2Key = `${scopeByMode[mode]}/generated/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${fileName}`;
-    const href = `/artifacts/${fileName}`;
+    const href = artifactDownloadHref(r2Key, `/artifacts/${fileName}`);
     const artifactDate = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     const artifact: Artifact = {
       projectId,

@@ -16,6 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProfileIndexRouteImport } from './routes/profile/index'
 import { Route as ProfilePasswordRouteImport } from './routes/profile/password'
 import { Route as ProfileInvitesRouteImport } from './routes/profile/invites'
+import { Route as ApiArtifactsRouteImport } from './routes/api/artifacts'
 import { Route as AdminUsersRouteImport } from './routes/admin/users'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 
@@ -54,6 +55,11 @@ const ProfileInvitesRoute = ProfileInvitesRouteImport.update({
   path: '/invites',
   getParentRoute: () => ProfileRoute,
 } as any)
+const ApiArtifactsRoute = ApiArtifactsRouteImport.update({
+  id: '/api/artifacts',
+  path: '/api/artifacts',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AdminUsersRoute = AdminUsersRouteImport.update({
   id: '/admin/users',
   path: '/admin/users',
@@ -71,6 +77,7 @@ export interface FileRoutesByFullPath {
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
+  '/api/artifacts': typeof ApiArtifactsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile/': typeof ProfileIndexRoute
@@ -81,6 +88,7 @@ export interface FileRoutesByTo {
   '/accept-invite': typeof AcceptInviteRoute
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
+  '/api/artifacts': typeof ApiArtifactsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile': typeof ProfileIndexRoute
@@ -93,6 +101,7 @@ export interface FileRoutesById {
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
+  '/api/artifacts': typeof ApiArtifactsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile/': typeof ProfileIndexRoute
@@ -106,6 +115,7 @@ export interface FileRouteTypes {
     | '/profile'
     | '/sign-in'
     | '/admin/users'
+    | '/api/artifacts'
     | '/profile/invites'
     | '/profile/password'
     | '/profile/'
@@ -116,6 +126,7 @@ export interface FileRouteTypes {
     | '/accept-invite'
     | '/sign-in'
     | '/admin/users'
+    | '/api/artifacts'
     | '/profile/invites'
     | '/profile/password'
     | '/profile'
@@ -127,6 +138,7 @@ export interface FileRouteTypes {
     | '/profile'
     | '/sign-in'
     | '/admin/users'
+    | '/api/artifacts'
     | '/profile/invites'
     | '/profile/password'
     | '/profile/'
@@ -139,6 +151,7 @@ export interface RootRouteChildren {
   ProfileRoute: typeof ProfileRouteWithChildren
   SignInRoute: typeof SignInRoute
   AdminUsersRoute: typeof AdminUsersRoute
+  ApiArtifactsRoute: typeof ApiArtifactsRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
 }
 
@@ -193,6 +206,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileInvitesRouteImport
       parentRoute: typeof ProfileRoute
     }
+    '/api/artifacts': {
+      id: '/api/artifacts'
+      path: '/api/artifacts'
+      fullPath: '/api/artifacts'
+      preLoaderRoute: typeof ApiArtifactsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/admin/users': {
       id: '/admin/users'
       path: '/admin/users'
@@ -231,6 +251,7 @@ const rootRouteChildren: RootRouteChildren = {
   ProfileRoute: ProfileRouteWithChildren,
   SignInRoute: SignInRoute,
   AdminUsersRoute: AdminUsersRoute,
+  ApiArtifactsRoute: ApiArtifactsRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
 }
 export const routeTree = rootRouteImport
