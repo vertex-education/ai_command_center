@@ -1,17 +1,12 @@
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
 	"account_id": "101ae2c39c8dda6574c201e123edf24f",
-	"name": "ai-command-center",
-	"main": "./dist/server/index.js",
-	"workers_dev": true,
-	"preview_urls": true,
+	"name": "document-ingestion-worker",
+	"main": "./src/document-ingestion-worker.ts",
 	"compatibility_date": "2026-05-22",
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"assets": {
-		"directory": "./dist/client"
-	},
 	"d1_databases": [
 		{
 			"binding": "DB",
@@ -25,11 +20,6 @@
 			"binding": "ARTIFACTS_BUCKET",
 			"bucket_name": "ai-command-center-artifacts",
 			"remote": true
-		},
-		{
-			"bucket_name": "ai-command-center-artifacts",
-			"binding": "ai_command_center_artifacts",
-			"remote": true
 		}
 	],
 	"vectorize": [
@@ -39,24 +29,20 @@
 			"remote": true
 		}
 	],
-	"queues": {
-		"producers": [
-			{
-				"binding": "DOCUMENT_INGESTION_QUEUE",
-				"queue": "document-ingestion-queue"
-			}
-		]
-	},
 	"ai": {
 		"binding": "AI",
 		"remote": true
 	},
-	"send_email": [
-		{
-			"name": "EMAIL",
-			"remote": true
-		}
-	],
+	"queues": {
+		"consumers": [
+			{
+				"queue": "document-ingestion-queue",
+				"max_batch_size": 5,
+				"max_batch_timeout": 30,
+				"max_retries": 3
+			}
+		]
+	},
 	"observability": {
 		"enabled": true
 	}

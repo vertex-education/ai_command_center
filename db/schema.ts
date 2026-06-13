@@ -308,6 +308,23 @@ export const artifacts = sqliteTable(
   }),
 );
 
+export const documentChunks = sqliteTable(
+  "document_chunks",
+  {
+    id: text("id").primaryKey(),
+    teamId: text("team_id").notNull(),
+    projectId: text("project_id").notNull(),
+    documentName: text("document_name").notNull(),
+    r2Key: text("r2_key").notNull(),
+    content: text("content").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => ({
+    scopeIdx: index("document_chunks_scope_idx").on(table.teamId, table.projectId, table.createdAt),
+    r2KeyIdx: index("document_chunks_r2_key_idx").on(table.r2Key),
+  }),
+);
+
 export const workspaceActions = sqliteTable(
   "workspace_actions",
   {

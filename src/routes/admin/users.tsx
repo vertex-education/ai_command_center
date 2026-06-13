@@ -4,6 +4,14 @@ import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Ban, Save, Trash2, UserPlus, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -35,6 +43,12 @@ export const Route = createFileRoute("/admin/users")({
 type ListedInvite = Awaited<ReturnType<typeof listUserInvites>>[number];
 type ListedUser = Awaited<ReturnType<typeof listManagedUsers>>[number];
 type ActiveTab = "users" | "invites";
+type AdminConfirmDialogState = {
+  title: string;
+  description: string;
+  actionLabel: string;
+  onConfirm: () => Promise<void> | void;
+} | null;
 
 const usersQueryKey = ["admin", "users"] as const;
 const invitesQueryKey = ["admin", "invites"] as const;
@@ -48,6 +62,7 @@ function AdminUsersPage() {
   const [userDrafts, setUserDrafts] = useState<Record<string, Pick<ListedUser, "name" | "role">>>({});
   const [message, setMessage] = useState("");
   const [inviteLink, setInviteLink] = useState("");
+  const [confirmDialog, setConfirmDialog] = useState<AdminConfirmDialogState>(null);
   const queryClient = useQueryClient();
 
   const usersQuery = useQuery({
@@ -137,11 +152,17 @@ function AdminUsersPage() {
     await saveUserMutation.mutateAsync({ userId: user.id, name: draft.name, role: draft.role as ManagedUserRole, email: user.email });
   }
 
-  async function handleDeleteUser(user: ListedUser) {
-    if (!window.confirm(`Delete ${user.email}? This removes their sessions and sign-in account.`)) return;
-    setMessage("");
-    setInviteLink("");
-    await deleteUserMutation.mutateAsync({ userId: user.id, email: user.email });
+  function handleDeleteUser(user: ListedUser) {
+    setConfirmDialog({
+      title: `Delete ${user.email}`,
+      description: "This removes the user's sessions and sign-in account.",
+      actionLabel: "Delete user",
+      onConfirm: async () => {
+        setMessage("");
+        setInviteLink("");
+        await deleteUserMutation.mutateAsync({ userId: user.id, email: user.email });
+      },
+    });
   }
 
   async function handleCreateInvite(event: FormEvent<HTMLFormElement>) {
@@ -346,6 +367,57 @@ function AdminUsersPage() {
           </div>
         )}
       </div>
+      <AdminConfirmDialog
+        state={confirmDialog}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDialog(null);
+        }}
+      />
     </main>
+  );
+}
+
+function AdminConfirmDialog({
+  state,
+  onOpenChange,
+}: {
+  state: AdminConfirmDialogState;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleConfirm() {
+    if (!state) return;
+    setIsPending(true);
+    setError("");
+    try {
+      await state.onConfirm();
+      onOpenChange(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "The action could not be completed.");
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(open) => !isPending && onOpenChange(open)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{state?.title ?? "Confirm action"}</DialogTitle>
+          <DialogDescription>{state?.description ?? "Confirm this action before continuing."}</DialogDescription>
+        </DialogHeader>
+        {error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={isPending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" variant="destructive" disabled={isPending} onClick={handleConfirm}>
+            {isPending ? "Working..." : state?.actionLabel ?? "Confirm"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

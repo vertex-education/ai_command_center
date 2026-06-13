@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEven
 import { useMutation, useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { useForm } from "@tanstack/react-form";
+import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import {
   type ColumnDef,
   type SortingState,
@@ -33,6 +36,8 @@ import {
   MessageCircle,
   MoreHorizontal,
   Paperclip,
+  PanelRightClose,
+  PanelRightOpen,
   Pencil,
   Plus,
   Search,
@@ -47,6 +52,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { ArtifactUploader } from "@/components/ArtifactUploader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -78,18 +84,29 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { getSessionSnapshot } from "@/lib/auth-workflow";
+import {
+  downloadChatExport,
+  downloadHtmlTable,
+  downloadRows,
+  exportFormatLabel,
+  parseChatExportRequest,
+  rowsFromHtmlTable,
+  type ChatExportFormat,
+} from "@/lib/chat-export";
 import { cn } from "@/lib/utils";
 import {
   type AddIdeaInput,
   type Approval,
   type Artifact,
   type ChatMessage,
+  type ChatReasoningLevel,
   type ChatSection,
   type ChatSummary,
   type Decision,
   type Idea,
   type IdeaStatus,
   type LlmDevTrace,
+  type PmoWorkspaceState,
   type ProjectSummary,
   type RailName,
   type ScopedWorkspaceState,
@@ -98,12 +115,16 @@ import {
   type WorkspaceMode,
   addIdea,
   avatarAlex,
+  chatReasoningLevels,
+  chatReasoningProfiles,
+  deleteArtifact,
   getConversationKey,
   initials,
   pmoWorkspaceQueryKey,
   pmoWorkspaceQueryOptions,
   promptTemplates,
   sendChatMessage,
+  saveTableArtifact,
   statusFilters,
   statusMeta,
   tabs,
@@ -182,6 +203,27 @@ type CreateChatDialogState = {
   projectName?: string;
 } | null;
 
+type ConfirmDialogState = {
+  title: string;
+  description: string;
+  actionLabel: string;
+  destructive?: boolean;
+  onConfirm: () => Promise<void> | void;
+} | null;
+
+type InputDialogState = {
+  title: string;
+  description: string;
+  label: string;
+  defaultValue?: string;
+  placeholder?: string;
+  actionLabel: string;
+  inputType?: "text" | "email";
+  onSubmit: (value: string) => Promise<void> | void;
+} | null;
+
+type PageScopeKind = "workspace" | "project";
+
 function createEmptyWorkspace(
   workspace: ScopedWorkspaceState,
   headings?: Partial<Pick<ScopedWorkspaceState, "projectsHeading" | "workspaceChatsHeading" | "unassignedProjectLabel">>,
@@ -192,7 +234,6 @@ function createEmptyWorkspace(
     projects: [],
     workspaceChats: [],
     ideas: [],
-    artifacts: [],
     decisions: [],
     approvals: [],
     tasks: [],
@@ -238,7 +279,7 @@ function getDetailMetrics({
       { icon: MessageCircle, label: "Messages", value: String(messages.length), detail: scopeContextLabel },
       { icon: Paperclip, label: "Artifacts", value: String(artifacts.length), detail: "Current scope" },
       { icon: Activity, label: "Query state", value: queryState, detail: updatedAt },
-      { icon: Folder, label: "Context", value: scopeContextLabel === "No project" ? "None" : "Scoped", detail: scopeContextLabel },
+      { icon: Folder, label: "Context", value: scopeContextLabel === "General" ? "General" : "Scoped", detail: scopeContextLabel },
     ];
   }
   if (activeTab === "Artifacts") {
@@ -277,7 +318,7 @@ function getDetailMetrics({
     return [
       { icon: Sparkles, label: "Prompts", value: String(promptTemplates.length), detail: scopeContextLabel },
       { icon: MessageCircle, label: "Target", value: "Chat", detail: "Use inserts into composer" },
-      { icon: Folder, label: "Context", value: scopeContextLabel === "No project" ? "None" : "Scoped", detail: scopeContextLabel },
+      { icon: Folder, label: "Context", value: scopeContextLabel === "General" ? "General" : "Scoped", detail: scopeContextLabel },
       { icon: Activity, label: "Query state", value: queryState, detail: updatedAt },
     ];
   }
@@ -325,8 +366,8 @@ function PMOCommandCenter() {
       return {
         ...createEmptyWorkspace(activeWorkspace, {
         projectsHeading: "Personal Projects",
-        workspaceChatsHeading: "Personal Chats",
-        unassignedProjectLabel: "Personal",
+        workspaceChatsHeading: "General Chats",
+        unassignedProjectLabel: "General",
         }),
         projects: scopedProjects,
         workspaceChats: scopedWorkspaceChats,
@@ -356,7 +397,7 @@ function PMOCommandCenter() {
       conversations: scopedConversations,
     };
   }, [activeMode, activeWorkspace, scopedConversations, scopedProjects, scopedWorkspaceChats, selectedTeam]);
-  const [activeProjectId, setActiveProjectId] = useState(visibleWorkspace.projects[0]?.id ?? "");
+  const [activeProjectId, setActiveProjectId] = useState("");
   const [activeChatSection, setActiveChatSection] = useState<ChatSection>("workspace");
   const [activeChatId, setActiveChatId] = useState(visibleWorkspace.workspaceChats[0]?.id ?? "");
   const [selectedIdeaId, setSelectedIdeaId] = useState(visibleWorkspace.ideas[0]?.id ?? "");
@@ -364,6 +405,11 @@ function PMOCommandCenter() {
   const [statusFilter, setStatusFilter] = useState<IdeaStatus | "All">("All");
   const [searchTerm, setSearchTerm] = useState("");
   const [chatInput, setChatInput] = useState("");
+  const [chatReasoningLevel, setChatReasoningLevel] = useState<ChatReasoningLevel>(() => {
+    if (typeof window === "undefined") return "off";
+    const saved = window.localStorage.getItem("vertex-chat-reasoning-level");
+    return saved && saved in chatReasoningProfiles ? saved as ChatReasoningLevel : "off";
+  });
   const [transientChats, setTransientChats] = useState<Record<string, ChatSummary>>({});
   const [optimisticMessages, setOptimisticMessages] = useState<Record<string, ChatMessage[]>>({});
   const chatFormRef = useRef<HTMLFormElement>(null);
@@ -372,6 +418,8 @@ function PMOCommandCenter() {
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
   const [createChatState, setCreateChatState] = useState<CreateChatDialogState>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
+  const [inputDialog, setInputDialog] = useState<InputDialogState>(null);
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
   const [rightOpen, setRightOpen] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -394,7 +442,7 @@ function PMOCommandCenter() {
     onSuccess: invalidateWorkspace,
   });
   const sendMessageMutation = useMutation({
-    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string }) =>
+    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel }) =>
       sendChatMessage({ data: input }),
     onSuccess: async (result) => {
       const llmTrace = (result as { llmTrace?: LlmDevTrace | null } | undefined)?.llmTrace;
@@ -420,8 +468,16 @@ function PMOCommandCenter() {
     onSuccess: invalidateWorkspace,
   });
   const toggleArtifactPinMutation = useMutation({
-    mutationFn: (input: { title: string; mode: WorkspaceMode }) => toggleArtifactPin({ data: input }),
-    onSuccess: invalidateWorkspace,
+    mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => toggleArtifactPin({ data: input }),
+    onSuccess: (workspace) => {
+      queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
+  });
+  const deleteArtifactMutation = useMutation({
+    mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => deleteArtifact({ data: input }),
+    onSuccess: (workspace) => {
+      queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+    },
   });
   const toggleDecisionMutation = useMutation({
     mutationFn: (id: string) => toggleDecisionStatus({ data: { id, mode: activeMode } }),
@@ -475,7 +531,7 @@ function PMOCommandCenter() {
     mutationFn: (input: { scope: "team" | "project"; targetId: string; targetName: string; email: string; targetTeamId?: string | null }) =>
       createScopedInvite({ data: input }),
   });
-  const activeProject = visibleWorkspace.projects.find((project) => project.id === activeProjectId) ?? visibleWorkspace.projects[0];
+  const activeProject = visibleWorkspace.projects.find((project) => project.id === activeProjectId);
   const projectChats = activeProject?.projectChats ?? [];
   const activeChat =
     activeChatSection === "project"
@@ -486,6 +542,18 @@ function PMOCommandCenter() {
   const workspaceTitle = `${workspaceModeLabel(activeMode)} workspace`;
   const isWorkspaceRail = activeRail === "Workspaces";
   const scopeContextLabel = activeProject && scopedProjectId ? activeProject.name : visibleWorkspace.unassignedProjectLabel;
+  const pageScopeKind: PageScopeKind = scopedProjectId ? "project" : "workspace";
+  const baseScopeName = activeMode === "Team" ? selectedTeam?.name ?? "Team" : workspaceModeLabel(activeMode);
+  const pageScopeDescription =
+    pageScopeKind === "project"
+      ? "Items tied to this project."
+      : "Items not tied to a project.";
+  const pageBreadcrumbLabel =
+    activeMode === "Personal" && pageScopeKind === "workspace"
+      ? "Personal / General"
+      : pageScopeKind === "project"
+        ? `${baseScopeName} / ${activeProject?.name ?? "Project"}`
+        : `${baseScopeName} / General`;
   const scopedIdeas = visibleWorkspace.ideas.filter((idea) => idea.projectId === scopedProjectId);
   const scopedArtifacts = visibleWorkspace.artifacts.filter((artifact) => artifact.projectId === scopedProjectId);
   const scopedDecisions = visibleWorkspace.decisions.filter((decision) => decision.projectId === scopedProjectId);
@@ -552,9 +620,12 @@ function PMOCommandCenter() {
   }, [scopedProjectId, scopedIdeas, scopedArtifacts]);
 
   useEffect(() => {
-    const activeProjectExists = visibleWorkspace.projects.some((project) => project.id === activeProjectId);
+    const activeProjectExists = activeProjectId
+      ? visibleWorkspace.projects.some((project) => project.id === activeProjectId)
+      : true;
     if (!activeProjectExists) {
-      setActiveProjectId(visibleWorkspace.projects[0]?.id ?? "");
+      setActiveProjectId("");
+      setActiveChatSection("workspace");
     }
 
     const workspaceChatExists = visibleWorkspace.workspaceChats.some((chat) => chat.id === activeChatId);
@@ -605,6 +676,10 @@ function PMOCommandCenter() {
   }, [showTokenUsage]);
 
   useEffect(() => {
+    window.localStorage.setItem("vertex-chat-reasoning-level", chatReasoningLevel);
+  }, [chatReasoningLevel]);
+
+  useEffect(() => {
     if (canEdit && activeTab === "Chat" && activeChatId) {
       focusChatComposer();
     }
@@ -636,6 +711,8 @@ function PMOCommandCenter() {
 
   function handleWorkspaceMode(mode: WorkspaceMode) {
     setActiveMode(mode);
+    setActiveProjectId("");
+    setActiveChatSection("workspace");
     setRightOpen(true);
   }
 
@@ -649,6 +726,7 @@ function PMOCommandCenter() {
 
   function handleChatSelect(section: ChatSection, chatId: string) {
     if (section === "workspace") {
+      setActiveProjectId("");
       setActiveChatSection(section);
       setActiveChatId(chatId);
       setActiveTab("Chat");
@@ -725,6 +803,8 @@ function PMOCommandCenter() {
     });
     await invalidateProjects();
     setActiveProjectId(project.id);
+    setActiveChatSection("project");
+    setActiveChatId("");
     setIsCreateProjectOpen(false);
     updateToast(`${project.name} project created`);
   }
@@ -770,6 +850,7 @@ function PMOCommandCenter() {
       updateToast("Create or select a team before adding a team chat.");
       return;
     }
+    setActiveProjectId("");
     await createFreshChat({
       contextLabel: workspaceModeLabel(activeMode),
       projectId: null,
@@ -794,7 +875,7 @@ function PMOCommandCenter() {
     });
   }
 
-  async function handleDeleteProject(project: ProjectSummary) {
+  function handleDeleteProject(project: ProjectSummary) {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
       return;
@@ -803,22 +884,29 @@ function PMOCommandCenter() {
       updateToast("Select a team before deleting a team project.");
       return;
     }
-    if (!window.confirm(`Delete ${project.name}? This removes its project chats and messages.`)) return;
-    await deleteProjectMutation.mutateAsync({
-      mode: activeMode,
-      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
-      projectId: project.id,
+    setConfirmDialog({
+      title: `Delete ${project.name}`,
+      description: "This removes the project, its project chats, and all messages in those chats.",
+      actionLabel: "Delete project",
+      destructive: true,
+      onConfirm: async () => {
+        await deleteProjectMutation.mutateAsync({
+          mode: activeMode,
+          teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+          projectId: project.id,
+        });
+        if (project.id === activeProjectId) {
+          setActiveProjectId("");
+          setActiveChatSection("workspace");
+          setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
+        }
+        setActiveTab("Chat");
+        updateToast(`${project.name} deleted`);
+      },
     });
-    if (project.id === activeProjectId) {
-      setActiveProjectId("");
-      setActiveChatSection("workspace");
-      setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
-    }
-    setActiveTab("Chat");
-    updateToast(`${project.name} deleted`);
   }
 
-  async function handleDeleteChat({
+  function handleDeleteChat({
     chat,
     project,
     section,
@@ -835,36 +923,63 @@ function PMOCommandCenter() {
       updateToast("Select a team before deleting a team chat.");
       return;
     }
-    if (!window.confirm(`Delete ${chat.title}? This removes its messages.`)) return;
-    await deleteChatMutation.mutateAsync({
-      mode: activeMode,
-      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
-      projectId: section === "project" ? project?.id ?? null : null,
-      section,
-      chatId: chat.id,
-    });
-    if (chat.id === activeChatId && section === activeChatSection) {
-      if (section === "project" && project) {
-        const nextChat = project.projectChats.find((item) => item.id !== chat.id);
-        setActiveProjectId(project.id);
-        if (nextChat) {
-          setActiveChatSection("project");
-          setActiveChatId(nextChat.id);
-        } else {
-          setActiveChatSection("workspace");
-          setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
+    setConfirmDialog({
+      title: `Delete ${chat.title}`,
+      description: "This removes the chat and all messages in it.",
+      actionLabel: "Delete chat",
+      destructive: true,
+      onConfirm: async () => {
+        await deleteChatMutation.mutateAsync({
+          mode: activeMode,
+          teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+          projectId: section === "project" ? project?.id ?? null : null,
+          section,
+          chatId: chat.id,
+        });
+        if (chat.id === activeChatId && section === activeChatSection) {
+          if (section === "project" && project) {
+            const nextChat = project.projectChats.find((item) => item.id !== chat.id);
+            setActiveProjectId(project.id);
+            if (nextChat) {
+              setActiveChatSection("project");
+              setActiveChatId(nextChat.id);
+            } else {
+              setActiveChatSection("workspace");
+              setActiveChatId(visibleWorkspace.workspaceChats[0]?.id ?? "");
+            }
+          } else {
+            const nextChat = visibleWorkspace.workspaceChats.find((item) => item.id !== chat.id);
+            setActiveChatSection("workspace");
+            setActiveChatId(nextChat?.id ?? "");
+          }
         }
-      } else {
-        const nextChat = visibleWorkspace.workspaceChats.find((item) => item.id !== chat.id);
-        setActiveChatSection("workspace");
-        setActiveChatId(nextChat?.id ?? "");
-      }
-    }
-    setActiveTab("Chat");
-    updateToast(`${chat.title} deleted`);
+        setActiveTab("Chat");
+        updateToast(`${chat.title} deleted`);
+      },
+    });
   }
 
-  async function handleRenameChat({
+  function handleDeleteArtifact(artifact: Artifact) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
+      return;
+    }
+    setConfirmDialog({
+      title: `Delete ${artifact.title}`,
+      description: "This removes the artifact from this workspace and deletes the saved file if it is stored in artifact storage.",
+      actionLabel: "Delete artifact",
+      destructive: true,
+      onConfirm: async () => {
+        await deleteArtifactMutation.mutateAsync({ mode: activeMode, r2Key: artifact.r2Key });
+        if (selectedArtifactTitle === artifact.title) {
+          setSelectedArtifactTitle(scopedArtifacts.find((item) => item.r2Key !== artifact.r2Key)?.title ?? "");
+        }
+        updateToast(`${artifact.title} deleted`);
+      },
+    });
+  }
+
+  function handleRenameChat({
     chat,
     project,
     section,
@@ -881,18 +996,28 @@ function PMOCommandCenter() {
       updateToast("Select a team before renaming a team chat.");
       return;
     }
-    const title = window.prompt("Rename chat", chat.title)?.trim();
-    if (!title || title === chat.title) return;
-    const renamed = await renameChatMutation.mutateAsync({
-      mode: activeMode,
-      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
-      projectId: section === "project" ? project?.id ?? null : null,
-      section,
-      chatId: chat.id,
-      title,
+    setInputDialog({
+      title: "Rename chat",
+      description: "Update the chat name shown in the sidebar.",
+      label: "Chat name",
+      defaultValue: chat.title,
+      placeholder: "Example: Launch planning assistant",
+      actionLabel: "Rename chat",
+      onSubmit: async (value) => {
+        const title = value.trim();
+        if (!title || title === chat.title) return;
+        const renamed = await renameChatMutation.mutateAsync({
+          mode: activeMode,
+          teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+          projectId: section === "project" ? project?.id ?? null : null,
+          section,
+          chatId: chat.id,
+          title,
+        });
+        updateToast(`${renamed.title} renamed`);
+        focusChatComposer();
+      },
     });
-    updateToast(`${renamed.title} renamed`);
-    focusChatComposer();
   }
 
   async function handleCreateChatSubmit(value: Omit<CreateChatInput, "mode" | "teamId" | "projectId" | "section">) {
@@ -928,37 +1053,57 @@ function PMOCommandCenter() {
     return { chat, projectId, section };
   }
 
-  async function handleInviteTeam(team: TeamSummary) {
+  function handleInviteTeam(team: TeamSummary) {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
       return;
     }
-    const email = window.prompt(`Invite user to ${team.name}`);
-    if (!email?.trim()) return;
-    await scopedInviteMutation.mutateAsync({
-      scope: "team",
-      targetId: team.id,
-      targetName: team.name,
-      email,
+    setInputDialog({
+      title: `Invite user to ${team.name}`,
+      description: "Send an invitation to this team workspace.",
+      label: "Email address",
+      placeholder: "name@example.com",
+      actionLabel: "Send invite",
+      inputType: "email",
+      onSubmit: async (value) => {
+        const email = value.trim();
+        if (!email) return;
+        await scopedInviteMutation.mutateAsync({
+          scope: "team",
+          targetId: team.id,
+          targetName: team.name,
+          email,
+        });
+        updateToast(`Invited ${email} to ${team.name}.`, { href: "/profile/invites", label: "Manage invites" });
+      },
     });
-    updateToast(`Invited ${email.trim()} to ${team.name}.`, { href: "/profile/invites", label: "Manage invites" });
   }
 
-  async function handleInviteProject(project: ProjectSummary) {
+  function handleInviteProject(project: ProjectSummary) {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
       return;
     }
-    const email = window.prompt(`Invite user to ${project.name}`);
-    if (!email?.trim()) return;
-    await scopedInviteMutation.mutateAsync({
-      scope: "project",
-      targetId: project.id,
-      targetTeamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
-      targetName: project.name,
-      email,
+    setInputDialog({
+      title: `Invite user to ${project.name}`,
+      description: "Send an invitation to this project workspace.",
+      label: "Email address",
+      placeholder: "name@example.com",
+      actionLabel: "Send invite",
+      inputType: "email",
+      onSubmit: async (value) => {
+        const email = value.trim();
+        if (!email) return;
+        await scopedInviteMutation.mutateAsync({
+          scope: "project",
+          targetId: project.id,
+          targetTeamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+          targetName: project.name,
+          email,
+        });
+        updateToast(`Invited ${email} to ${project.name}.`, { href: "/profile/invites", label: "Manage invites" });
+      },
     });
-    updateToast(`Invited ${email.trim()} to ${project.name}.`, { href: "/profile/invites", label: "Manage invites" });
   }
 
   async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
@@ -985,6 +1130,7 @@ function PMOCommandCenter() {
         chatTitle: target.chat.title,
         text,
         model: "Gemma 4 26B",
+        reasoningLevel: chatReasoningLevel,
       });
       clearOptimisticMessages(targetConversationKey);
       updateToast("VertexAI response added");
@@ -1024,6 +1170,14 @@ function PMOCommandCenter() {
 
   return (
     <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
+      <RenderedTableExportControls
+        activeMode={activeMode}
+        activeChatTitle={activeChat?.title}
+        canEdit={canEdit}
+        projectId={scopedProjectId}
+        onSaved={(title) => updateToast(`Saved "${title}" to Artifacts`)}
+        onError={(message) => updateToast(message)}
+      />
       <div className="workspace-shadow relative grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
         <PrimaryRail
           activeRail={activeRail}
@@ -1053,6 +1207,7 @@ function PMOCommandCenter() {
           <Contextbar
             activeMode={activeMode}
             activeTeamId={selectedTeam?.id ?? ""}
+            breadcrumbLabel={pageBreadcrumbLabel}
             canEdit={canEdit}
             showScopeTabs
             teams={teams}
@@ -1066,7 +1221,9 @@ function PMOCommandCenter() {
             className={cn(
               "grid min-h-0 flex-1 bg-card",
               isWorkspaceRail
-                ? "lg:grid-cols-[260px_minmax(430px,1fr)_minmax(320px,380px)] xl:grid-cols-[280px_minmax(520px,1fr)_390px]"
+                ? rightOpen
+                  ? "lg:grid-cols-[260px_minmax(430px,1fr)_minmax(320px,380px)] xl:grid-cols-[280px_minmax(520px,1fr)_390px]"
+                  : "lg:grid-cols-[260px_minmax(430px,1fr)_56px] xl:grid-cols-[280px_minmax(520px,1fr)_56px]"
                 : "lg:grid-cols-1",
             )}
           >
@@ -1092,14 +1249,12 @@ function PMOCommandCenter() {
 
                 <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r">
                   <PinnedStrip
-                    activeMode={activeMode}
                     artifacts={pinnedArtifacts}
                     ideas={pinnedIdeas}
                     onOpenPins={() => setActiveTab("Artifacts")}
                     onSelectArtifact={(artifact) => {
                       setSelectedArtifactTitle(artifact.title);
-                      setActiveTab("Artifacts");
-                      setRightOpen(true);
+                      setPreviewArtifact(artifact);
                     }}
                     onSelectIdea={(idea) => {
                       setSelectedIdeaId(idea.id);
@@ -1108,21 +1263,10 @@ function PMOCommandCenter() {
                     }}
                   />
 
-                  <div className="scrollbar-thin flex h-12 shrink-0 items-end gap-4 overflow-x-auto border-b px-4">
-                    {tabs.map((tab) => (
-                      <button
-                        className={cn(
-                          "h-12 whitespace-nowrap border-b-2 border-transparent text-sm font-medium text-muted-foreground",
-                          tab === activeTab && "border-primary text-primary",
-                        )}
-                        key={tab}
-                        type="button"
-                        onClick={() => setActiveTab(tab)}
-                      >
-                        {tab}
-                      </button>
-                    ))}
-                  </div>
+                  <ScopeTabs
+                    activeTab={activeTab}
+                    onTabChange={setActiveTab}
+                  />
 
                   <section
                     className={cn(
@@ -1132,7 +1276,7 @@ function PMOCommandCenter() {
                         : "scrollbar-thin overflow-auto p-4 pb-32",
                     )}
                   >
-                    {activeTab === "Chat" ? <ChatView isTyping={sendMessageMutation.isPending} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
+                    {activeTab === "Chat" ? <ChatView chatTitle={activeChat?.title} isTyping={sendMessageMutation.isPending} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
                     {activeTab === "Ideas" ? (
                       <IdeasView
                         canEdit={canEdit}
@@ -1157,6 +1301,7 @@ function PMOCommandCenter() {
                         canEdit={canEdit}
                         artifacts={scopedArtifacts}
                         selectedArtifactTitle={selectedArtifact?.title}
+                        onDelete={handleDeleteArtifact}
                         onPreview={setPreviewArtifact}
                         onSelectArtifact={(artifact) => {
                           setSelectedArtifactTitle(artifact.title);
@@ -1164,7 +1309,7 @@ function PMOCommandCenter() {
                         }}
                         onShare={() => updateToast("Share options prepared")}
                         onTogglePin={(artifact) =>
-                          toggleArtifactPinMutation.mutate({ title: artifact.title, mode: activeMode })
+                          toggleArtifactPinMutation.mutate({ r2Key: artifact.r2Key, mode: activeMode })
                         }
                       />
                     ) : null}
@@ -1192,9 +1337,42 @@ function PMOCommandCenter() {
                   {canEdit ? (
                     <form
                       ref={chatFormRef}
-                      className="fixed inset-x-3 bottom-3 z-50 grid grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur lg:left-92 lg:right-104 xl:left-97 xl:right-106.5"
+                      className={cn(
+                        "fixed inset-x-3 bottom-3 z-50 grid grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur lg:left-92 xl:left-97",
+                        rightOpen ? "lg:right-104 xl:right-106.5" : "lg:right-18 xl:right-18",
+                      )}
                       onSubmit={handleSendMessage}
                     >
+                      <div className="col-span-4 flex flex-wrap items-center gap-1.5">
+                        <span className="mr-1 inline-flex items-center gap-1 text-xs font-semibold text-muted-foreground">
+                          <Zap className="size-3.5" />
+                          Reasoning
+                        </span>
+                        {chatReasoningLevels.map((level) => {
+                          const profile = chatReasoningProfiles[level];
+                          const isSelected = chatReasoningLevel === level;
+                          return (
+                            <button
+                              key={level}
+                              type="button"
+                              aria-pressed={isSelected}
+                              className={cn(
+                                "h-7 rounded-md border px-2 text-xs font-semibold transition-colors",
+                                isSelected
+                                  ? "border-primary bg-primary text-primary-foreground"
+                                  : "border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+                              )}
+                              title={`${profile.label}: ${profile.maxCompletionTokens.toLocaleString()} tokens, ${Math.round(profile.timeoutMs / 1000)}s timeout`}
+                              onClick={() => setChatReasoningLevel(level)}
+                            >
+                              {profile.shortLabel}
+                            </button>
+                          );
+                        })}
+                        <span className="ml-auto text-xs text-muted-foreground">
+                          {chatReasoningProfiles[chatReasoningLevel].maxCompletionTokens.toLocaleString()} tokens / {Math.round(chatReasoningProfiles[chatReasoningLevel].timeoutMs / 1000)}s
+                        </span>
+                      </div>
                       <Input
                         aria-label="Ask the PMO assistant"
                         placeholder={`Message VertexAI about ${scopeContextLabel} / ${activeChat?.title ?? "new AI chat"}`}
@@ -1215,7 +1393,12 @@ function PMOCommandCenter() {
                       </Button>
                     </form>
                   ) : (
-                    <div className="fixed inset-x-3 bottom-3 z-50 rounded-xl border bg-card/95 p-3 text-sm text-muted-foreground shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur lg:left-92 lg:right-104 xl:left-97 xl:right-106.5">
+                    <div
+                      className={cn(
+                        "fixed inset-x-3 bottom-3 z-50 rounded-xl border bg-card/95 p-3 text-sm text-muted-foreground shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur lg:left-92 xl:left-97",
+                        rightOpen ? "lg:right-104 xl:right-106.5" : "lg:right-18 xl:right-18",
+                      )}
+                    >
                       Viewer access is read-only.
                     </div>
                   )}
@@ -1243,7 +1426,7 @@ function PMOCommandCenter() {
                     onShare={() => updateToast("Share link options ready")}
                     onStatusChange={(status) => selectedIdea && updateStatusMutation.mutate({ id: selectedIdea.id, status })}
                     onToggleArtifactPin={() =>
-                      selectedArtifact && toggleArtifactPinMutation.mutate({ title: selectedArtifact.title, mode: activeMode })
+                      selectedArtifact && toggleArtifactPinMutation.mutate({ r2Key: selectedArtifact.r2Key, mode: activeMode })
                     }
                     onToggleIdeaPin={() => selectedIdea && toggleIdeaPinMutation.mutate(selectedIdea.id)}
                     onUsePrompt={(prompt) => {
@@ -1256,10 +1439,11 @@ function PMOCommandCenter() {
                     onToggleTask={(id) => toggleTaskMutation.mutate(id)}
                   />
                 ) : (
-                  <Button className="m-4 hidden self-start lg:inline-flex" type="button" variant="outline" onClick={() => setRightOpen(true)}>
-                    <Eye />
-                    Open details
-                  </Button>
+                  <aside className="hidden min-h-0 border-l bg-muted/35 p-2 lg:flex lg:items-start lg:justify-center">
+                    <Button type="button" variant="outline" size="icon" aria-label="Open details flyout" title="Open details" onClick={() => setRightOpen(true)}>
+                      <PanelRightOpen />
+                    </Button>
+                  </aside>
                 )}
               </>
             ) : (
@@ -1323,6 +1507,18 @@ function PMOCommandCenter() {
           />
         </>
       ) : null}
+      <BrandedConfirmDialog
+        state={confirmDialog}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDialog(null);
+        }}
+      />
+      <BrandedInputDialog
+        state={inputDialog}
+        onOpenChange={(open) => {
+          if (!open) setInputDialog(null);
+        }}
+      />
       <ArtifactPreviewDialog artifact={previewArtifact} onOpenChange={(open) => !open && setPreviewArtifact(null)} />
       {import.meta.env.DEV ? <LlmDevtools traces={llmTraces} /> : null}
     </main>
@@ -1511,6 +1707,9 @@ function LlmDevtoolsPaneContent({ pane, trace }: { pane: LlmDevtoolsPane; trace:
         ))}
         <pre className="rounded-md border bg-muted/30 p-3 font-mono text-xs">{JSON.stringify({
           max_completion_tokens: trace.request.max_completion_tokens,
+          reasoningLevel: trace.request.reasoningLevel,
+          reasoning_effort: trace.request.reasoning_effort,
+          timeoutMs: trace.request.timeoutMs,
           temperature: trace.request.temperature,
         }, null, 2)}</pre>
       </div>
@@ -1849,6 +2048,7 @@ function AccountMenu({
 function Contextbar({
   activeMode,
   activeTeamId,
+  breadcrumbLabel,
   canEdit,
   showScopeTabs,
   teams,
@@ -1859,6 +2059,7 @@ function Contextbar({
 }: {
   activeMode: WorkspaceMode;
   activeTeamId: string;
+  breadcrumbLabel: string;
   canEdit: boolean;
   showScopeTabs: boolean;
   teams: TeamSummary[];
@@ -1872,7 +2073,7 @@ function Contextbar({
   return (
     <section className="shrink-0 border-b bg-card px-3 py-3 lg:px-5">
       <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
-        <div className="min-w-0">
+        <div className="min-w-0 space-y-2">
           {showScopeTabs ? (
             <div className="flex w-full overflow-hidden rounded-md border md:w-fit">
               {workspaceModes.map((mode) => (
@@ -1890,6 +2091,9 @@ function Contextbar({
               ))}
             </div>
           ) : null}
+          <div className="min-w-0 truncate text-xs font-medium text-muted-foreground">
+            Location / {breadcrumbLabel}
+          </div>
         </div>
         {activeMode === "Team" ? (
           <div className="flex min-w-0 flex-wrap items-center gap-2 md:justify-end">
@@ -2158,58 +2362,95 @@ function ProjectNav({
 }
 
 function PinnedStrip({
-  activeMode,
   artifacts,
   ideas,
   onOpenPins,
   onSelectArtifact,
   onSelectIdea,
 }: {
-  activeMode: WorkspaceMode;
   artifacts: Artifact[];
   ideas: Idea[];
   onOpenPins: () => void;
   onSelectArtifact: (artifact: Artifact) => void;
   onSelectIdea: (idea: Idea) => void;
 }) {
+  const hasPinnedItems = ideas.length > 0 || artifacts.length > 0;
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  function scrollPinnedItems(direction: -1 | 1) {
+    const container = scrollRef.current;
+    if (!container) return;
+    const card = container.querySelector<HTMLElement>("[data-pinned-card='true']");
+    const amount = (card?.offsetWidth ?? 224) + 8;
+    const maxScroll = container.scrollWidth - container.clientWidth;
+    const next = container.scrollLeft + direction * amount;
+    if (next < 0) {
+      container.scrollTo({ left: maxScroll, behavior: "smooth" });
+    } else if (next > maxScroll) {
+      container.scrollTo({ left: 0, behavior: "smooth" });
+    } else {
+      container.scrollBy({ left: direction * amount, behavior: "smooth" });
+    }
+  }
+
   return (
     <section className="shrink-0 border-b bg-card px-4 py-3">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <span className="text-xs font-semibold uppercase text-muted-foreground">Pinned workspace items</span>
-          <h2 className="text-base font-semibold">{workspaceModeLabel(activeMode)} context</h2>
-        </div>
-        <Button type="button" variant="outline" size="sm" onClick={onOpenPins}>
-          <Star />
-          Pins
-        </Button>
-      </div>
-      <div className="scrollbar-thin flex gap-2 overflow-x-auto pb-1">
+      <SectionHeader
+        eyebrow="Pinned Items"
+        description="Quick access for the current view."
+        size="sm"
+        actions={
+          <div className="flex items-center gap-1">
+            {hasPinnedItems ? (
+              <>
+                <Button type="button" variant="outline" size="icon" aria-label="Previous pinned item" title="Previous pinned item" onClick={() => scrollPinnedItems(-1)}>
+                  <PanelRightClose className="size-4" />
+                </Button>
+                <Button type="button" variant="outline" size="icon" aria-label="Next pinned item" title="Next pinned item" onClick={() => scrollPinnedItems(1)}>
+                  <PanelRightOpen className="size-4" />
+                </Button>
+              </>
+            ) : null}
+            <Button type="button" variant="outline" size="sm" onClick={onOpenPins}>
+              <Star />
+              Pins
+            </Button>
+          </div>
+        }
+      />
+      <div ref={scrollRef} className="scrollbar-thin flex snap-x snap-mandatory gap-2 overflow-x-auto scroll-smooth pb-1">
+        {!hasPinnedItems ? (
+          <div className="grid min-h-24 w-full place-items-center rounded-lg border border-dashed bg-background p-4 text-center text-sm text-muted-foreground">
+            No pinned items in this scope.
+          </div>
+        ) : null}
         {ideas.slice(0, 3).map((idea) => (
           <button
-            className="grid min-h-28 w-56 shrink-0 gap-2 rounded-lg border bg-background p-3 text-left hover:border-primary/40 hover:bg-accent/30"
+            data-pinned-card="true"
+            className="grid min-h-20 w-56 shrink-0 snap-start gap-1.5 rounded-md border bg-background p-2.5 text-left hover:border-primary/40 hover:bg-accent/30"
             key={idea.id}
             type="button"
             onClick={() => onSelectIdea(idea)}
           >
             <StatusBadge status={idea.status} />
-            <strong className="line-clamp-1 text-sm">{idea.title}</strong>
-            <span className="line-clamp-2 text-xs text-muted-foreground">{idea.summary}</span>
+            <strong className="line-clamp-2 text-sm leading-snug">{idea.title}</strong>
+            <span className="line-clamp-1 text-xs text-muted-foreground">{idea.summary}</span>
           </button>
         ))}
         {artifacts.slice(0, 2).map((artifact) => (
           <button
-            className="grid min-h-28 w-56 shrink-0 grid-cols-[32px_minmax(0,1fr)] gap-2 rounded-lg border bg-background p-3 text-left hover:border-primary/40 hover:bg-accent/30"
+            data-pinned-card="true"
+            className="grid min-h-20 w-56 shrink-0 snap-start grid-cols-[28px_minmax(0,1fr)] gap-2 rounded-md border bg-background p-2.5 text-left hover:border-primary/40 hover:bg-accent/30"
             key={artifact.title}
             type="button"
             onClick={() => onSelectArtifact(artifact)}
           >
-            <span className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground">
+            <span className="grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
               {artifactIcon(artifact.type)}
             </span>
             <span className="min-w-0">
-              <strong className="block truncate text-sm">{artifact.title}</strong>
-              <em className="mt-1 block text-xs not-italic text-muted-foreground">
+              <strong className="line-clamp-2 text-sm leading-snug">{artifact.title}</strong>
+              <em className="mt-0.5 block text-xs not-italic text-muted-foreground">
                 {artifact.type} / {artifact.status}
               </em>
             </span>
@@ -2220,12 +2461,71 @@ function PinnedStrip({
   );
 }
 
+function ScopeTabs({
+  activeTab,
+  onTabChange,
+}: {
+  activeTab: TabName;
+  onTabChange: (tab: TabName) => void;
+}) {
+  return (
+    <section className="shrink-0 border-b bg-background px-4">
+      <SectionHeader
+        eyebrow="Your Workspace"
+        description="Work across chats, ideas, artifacts, and actions in the selected scope."
+      />
+      <div className="scrollbar-thin flex h-12 items-end gap-4 overflow-x-auto">
+        {tabs.map((tab) => (
+          <button
+            className={cn(
+              "h-12 whitespace-nowrap border-b-2 border-transparent text-sm font-medium text-muted-foreground",
+              tab === activeTab && "border-primary text-primary",
+            )}
+            key={tab}
+            type="button"
+            onClick={() => onTabChange(tab)}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SectionHeader({
+  actions,
+  description,
+  eyebrow,
+  size = "default",
+  title,
+}: {
+  actions?: ReactNode;
+  description?: string;
+  eyebrow: string;
+  size?: "default" | "sm";
+  title?: string;
+}) {
+  return (
+    <div className={cn("mb-4 flex min-w-0 items-start justify-between gap-3", size === "sm" && "mb-3")}>
+      <div className="min-w-0">
+        <span className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</span>
+        {title ? <h2 className={cn("truncate font-semibold", size === "sm" ? "text-base" : "text-xl")}>{title}</h2> : null}
+        {description ? <p className={cn("mt-1 truncate text-muted-foreground", size === "sm" ? "text-xs" : "text-sm")}>{description}</p> : null}
+      </div>
+      {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+    </div>
+  );
+}
+
 function ChatView({
+  chatTitle,
   isTyping,
   llmTraces,
   messages,
   showTokenUsage,
 }: {
+  chatTitle?: string;
   isTyping: boolean;
   llmTraces: LlmDevTrace[];
   messages: ChatMessage[];
@@ -2280,7 +2580,15 @@ function ChatView({
                     : "rounded-bl-sm border bg-muted/60 text-foreground",
                 )}
               >
-                {isUser ? message.text : <AssistantResponseContent requestedJson={wasJsonRequested(previousUserMessage?.text ?? "")} text={message.text} />}
+                {isUser ? message.text : (
+                  <AssistantResponseContent
+                    chatTitle={chatTitle}
+                    requestedFormats={parseChatExportRequest(previousUserMessage?.text ?? "")}
+                    requestedJson={wasJsonRequested(previousUserMessage?.text ?? "")}
+                    title={previousUserMessage?.text ?? "Vertex AI chat export"}
+                    text={message.text}
+                  />
+                )}
               </div>
               {message.artifact ? (
                 <button className="mt-2 grid min-h-14 max-w-lg grid-cols-[34px_minmax(0,1fr)_24px] items-center gap-2 rounded-md border bg-card p-2 text-left">
@@ -2420,6 +2728,7 @@ function titleCase(value: string) {
 function looksLikeMarkdown(text: string) {
   return [
     /^#{1,6}\s+/m,
+    /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/m,
     /^\s*[-*+]\s+/m,
     /^\s*\d+\.\s+/m,
     /```[\s\S]*?```/,
@@ -2430,153 +2739,290 @@ function looksLikeMarkdown(text: string) {
   ].some((pattern) => pattern.test(text));
 }
 
-function AssistantResponseContent({ requestedJson, text }: { requestedJson: boolean; text: string }) {
+function AssistantResponseContent({
+  chatTitle,
+  requestedFormats,
+  requestedJson,
+  text,
+  title,
+}: {
+  chatTitle?: string;
+  requestedFormats: ChatExportFormat[];
+  requestedJson: boolean;
+  text: string;
+  title: string;
+}) {
   const parsed = parseAssistantResponse(text, requestedJson);
+  const exportActions = requestedFormats.length ? (
+    <div className="mb-3 flex flex-wrap items-center gap-1.5">
+      {requestedFormats.map((format) => (
+        <Button
+          key={format}
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-7 gap-1.5 px-2 text-xs"
+          onClick={() => downloadChatExport(format, parsed.content, title)}
+        >
+          <Download className="size-3.5" />
+          {exportFormatLabel(format)}
+        </Button>
+      ))}
+    </div>
+  ) : null;
   if (parsed.kind === "json") {
     return (
-      <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">
-        <code>{parsed.content}</code>
-      </pre>
+      <div data-source-chat-title={chatTitle ?? ""}>
+        {exportActions}
+        <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">
+          <code>{parsed.content}</code>
+        </pre>
+      </div>
     );
   }
   if (parsed.kind === "markdown") {
-    return <MarkdownContent text={parsed.content} />;
+    return (
+      <div data-source-chat-title={chatTitle ?? ""}>
+        {exportActions}
+        <MarkdownContent text={parsed.content} />
+      </div>
+    );
   }
-  return <p className="whitespace-pre-wrap">{parsed.content}</p>;
-}
-
-function MarkdownContent({ text }: { text: string }) {
-  const blocks = splitMarkdownBlocks(text);
   return (
-    <div className="space-y-3">
-      {blocks.map((block, index) => (
-        <MarkdownBlock block={block} key={`${block.type}-${index}`} />
-      ))}
+    <div data-source-chat-title={chatTitle ?? ""}>
+      {exportActions}
+      <p className="whitespace-pre-wrap">{parsed.content}</p>
     </div>
   );
 }
 
-type MarkdownBlockShape =
-  | { type: "code"; language: string; content: string }
-  | { type: "heading"; level: number; content: string }
-  | { type: "list"; ordered: boolean; items: string[] }
-  | { type: "paragraph"; content: string };
-
-function splitMarkdownBlocks(text: string): MarkdownBlockShape[] {
-  const lines = text.split(/\r?\n/);
-  const blocks: MarkdownBlockShape[] = [];
-  let paragraph: string[] = [];
-
-  const flushParagraph = () => {
-    if (!paragraph.length) return;
-    blocks.push({ type: "paragraph", content: paragraph.join("\n").trim() });
-    paragraph = [];
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const fence = line.match(/^```(\w+)?\s*$/);
-    if (fence) {
-      flushParagraph();
-      const codeLines: string[] = [];
-      index += 1;
-      while (index < lines.length && !/^```\s*$/.test(lines[index])) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-      blocks.push({ type: "code", language: fence[1] ?? "", content: codeLines.join("\n") });
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,6})\s+(.+)$/);
-    if (heading) {
-      flushParagraph();
-      blocks.push({ type: "heading", level: heading[1].length, content: heading[2] });
-      continue;
-    }
-
-    const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
-    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
-    if (unordered || ordered) {
-      flushParagraph();
-      const items = [(unordered ?? ordered)?.[1] ?? ""];
-      const isOrdered = Boolean(ordered);
-      while (index + 1 < lines.length) {
-        const nextMatch = isOrdered ? lines[index + 1].match(/^\s*\d+\.\s+(.+)$/) : lines[index + 1].match(/^\s*[-*+]\s+(.+)$/);
-        if (!nextMatch) break;
-        items.push(nextMatch[1]);
-        index += 1;
-      }
-      blocks.push({ type: "list", ordered: isOrdered, items });
-      continue;
-    }
-
-    if (!line.trim()) {
-      flushParagraph();
-      continue;
-    }
-
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  return blocks;
+function MarkdownContent({ text }: { text: string }) {
+  return (
+    <div className="space-y-3" data-rendered-markdown="true">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeSanitize]}
+        components={{
+          a: ({ children, href }) => (
+            <a className="font-medium text-primary underline-offset-4 hover:underline" href={href} rel="noreferrer" target="_blank">
+              {children}
+            </a>
+          ),
+          blockquote: ({ children }) => <blockquote className="border-l-2 border-border pl-3 text-muted-foreground">{children}</blockquote>,
+          code: ({ children, className }) => (
+            <code className={cn("rounded bg-background/80 px-1 py-0.5 font-mono text-xs", className)}>
+              {children}
+            </code>
+          ),
+          h1: ({ children }) => <p className="text-base font-semibold">{children}</p>,
+          h2: ({ children }) => <p className="text-base font-semibold">{children}</p>,
+          h3: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
+          h4: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
+          h5: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
+          h6: ({ children }) => <p className="text-sm font-semibold">{children}</p>,
+          hr: () => <hr className="my-3 border-border" />,
+          li: ({ children }) => <li className="pl-1">{children}</li>,
+          ol: ({ children }) => <ol className="space-y-1 pl-5 list-decimal">{children}</ol>,
+          p: ({ children }) => <p className="whitespace-pre-wrap">{children}</p>,
+          pre: ({ children }) => <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">{children}</pre>,
+          table: ({ children }) => (
+            <div className="max-w-full overflow-x-auto rounded-md border bg-background/80">
+              <table className="min-w-max border-collapse text-xs">{children}</table>
+            </div>
+          ),
+          tbody: ({ children }) => <tbody>{children}</tbody>,
+          td: ({ children }) => <td className="border-t px-3 py-2 align-top">{children}</td>,
+          th: ({ children }) => <th className="whitespace-nowrap px-3 py-2 text-left font-semibold text-muted-foreground">{children}</th>,
+          thead: ({ children }) => <thead className="bg-muted/70">{children}</thead>,
+          tr: ({ children }) => <tr>{children}</tr>,
+          ul: ({ children }) => <ul className="space-y-1 pl-5 list-disc">{children}</ul>,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
 }
 
-function MarkdownBlock({ block }: { block: MarkdownBlockShape }) {
-  if (block.type === "code") {
-    return (
-      <pre className="overflow-x-auto rounded-md bg-background/80 p-3 font-mono text-xs leading-relaxed">
-        <code>{block.content}</code>
-      </pre>
-    );
-  }
-  if (block.type === "heading") {
-    const className = block.level <= 2 ? "text-base font-semibold" : "text-sm font-semibold";
-    return <p className={className}>{renderInlineMarkdown(block.content)}</p>;
-  }
-  if (block.type === "list") {
-    const ListTag = block.ordered ? "ol" : "ul";
-    return (
-      <ListTag className={cn("space-y-1 pl-5", block.ordered ? "list-decimal" : "list-disc")}>
-        {block.items.map((item, index) => (
-          <li key={`${item}-${index}`}>{renderInlineMarkdown(item)}</li>
-        ))}
-      </ListTag>
-    );
-  }
-  return <p className="whitespace-pre-wrap">{renderInlineMarkdown(block.content)}</p>;
-}
+function RenderedTableExportControls({
+  activeMode,
+  activeChatTitle,
+  canEdit,
+  onError,
+  onSaved,
+  projectId,
+}: {
+  activeMode: WorkspaceMode;
+  activeChatTitle?: string;
+  canEdit: boolean;
+  onError: (message: string) => void;
+  onSaved: (title: string) => void;
+  projectId: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const savedTablesRef = useRef(new Set<string>());
+  const saveMutation = useMutation({
+    mutationFn: (formData: FormData) => saveTableArtifact({ data: formData }),
+    onSuccess: async (result, formData) => {
+      const tableKey = formData.get("table_key");
+      if (typeof tableKey === "string") savedTablesRef.current.add(tableKey);
+      const workspace = (result as { workspace?: PmoWorkspaceState } | undefined)?.workspace;
+      if (workspace) queryClient.setQueryData(pmoWorkspaceQueryKey, workspace);
+      const artifact = (result as { artifact?: Artifact } | undefined)?.artifact;
+      const title = artifact?.title ?? formData.get("title");
+      onSaved(typeof title === "string" ? title : "Table export");
+    },
+    onError: (error) => {
+      onError(error instanceof Error ? error.message : "Could not save artifact.");
+    },
+  });
+  const saveMutateRef = useRef(saveMutation.mutate);
 
-function renderInlineMarkdown(text: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)]+\))/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
+  useEffect(() => {
+    saveMutateRef.current = saveMutation.mutate;
+  }, [saveMutation.mutate]);
 
-  while ((match = pattern.exec(text))) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const token = match[0];
-    const key = `${token}-${match.index}`;
-    if (token.startsWith("`")) {
-      nodes.push(<code className="rounded bg-background/80 px-1 py-0.5 font-mono text-xs" key={key}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith("**")) {
-      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("*")) {
-      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
-    } else {
-      const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-      nodes.push(
-        <a className="font-medium text-primary underline-offset-4 hover:underline" href={link?.[2] ?? "#"} key={key} rel="noreferrer" target="_blank">
-          {link?.[1] ?? token}
-        </a>,
+  useEffect(() => {
+    const controlsClass = "rendered-table-export-controls";
+    const buttonClass = "rounded-md border bg-background px-2 py-1 text-xs font-semibold text-muted-foreground hover:bg-accent hover:text-foreground";
+
+    function tableTitle(table: HTMLTableElement) {
+      const container = table.closest("section, article, aside, div");
+      return container?.querySelector("h1,h2,h3,strong")?.textContent?.trim()
+        || table.getAttribute("aria-label")
+        || "table-export";
+    }
+
+    function sourceChatTitle(table: HTMLTableElement) {
+      const value = table.closest("[data-source-chat-title]")?.getAttribute("data-source-chat-title")?.trim();
+      return value || activeChatTitle || "";
+    }
+
+    function tableKey(table: HTMLTableElement) {
+      const content = `${activeMode}::${projectId ?? "general"}::${tableTitle(table)}::${table.textContent ?? ""}`;
+      let hash = 0;
+      for (let index = 0; index < content.length; index += 1) {
+        hash = Math.imul(31, hash) + content.charCodeAt(index) | 0;
+      }
+      return `table-${Math.abs(hash)}`;
+    }
+
+    function button(label: string, title: string, onClick: () => void) {
+      const control = document.createElement("button");
+      control.type = "button";
+      control.className = buttonClass;
+      control.textContent = label;
+      control.title = title;
+      control.setAttribute("aria-label", title);
+      control.addEventListener("click", onClick);
+      return control;
+    }
+
+    function hasSaveableRows(table: HTMLTableElement) {
+      const rows = Array.from(table.querySelectorAll("tbody tr"));
+      if (rows.length === 0) return false;
+      return rows.some((row) => {
+        const cells = Array.from(row.querySelectorAll("td,th"));
+        if (cells.length === 0) return false;
+        if (cells.length === 1 && cells[0].hasAttribute("colspan")) return false;
+        return cells.some((cell) => {
+          const text = cell.textContent?.trim() ?? "";
+          return text && text.toLowerCase() !== "no results.";
+        });
+      });
+    }
+
+    function populateControls(controls: HTMLElement, table: HTMLTableElement) {
+      controls.replaceChildren(
+        button("CSV", "Export table as CSV", () => downloadHtmlTable("csv", tableTitle(table), table)),
+        button("XLSX", "Export table as XLSX", () => downloadHtmlTable("xlsx", tableTitle(table), table)),
       );
-    }
-    lastIndex = pattern.lastIndex;
-  }
 
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
+      if (canEdit && hasSaveableRows(table)) {
+        const key = tableKey(table);
+        const saveButton = button("Save to Artifacts", "Save table as XLSX artifact", () => {
+          const title = tableTitle(table);
+          const formData = new FormData();
+          formData.set("mode", activeMode);
+          if (projectId) formData.set("project_id", projectId);
+          const sourceTitle = sourceChatTitle(table);
+          if (sourceTitle) formData.set("chat_title", sourceTitle);
+          formData.set("title", title);
+          formData.set("table_key", key);
+          formData.set("rows_json", JSON.stringify(rowsFromHtmlTable(table)));
+          saveButton.disabled = true;
+          saveButton.textContent = "Saving...";
+          saveButton.className = `${buttonClass} cursor-wait opacity-60`;
+          saveMutateRef.current(formData, {
+            onSuccess: () => {
+              saveButton.disabled = true;
+              saveButton.textContent = "Saved to Artifacts";
+              saveButton.className = `${buttonClass} cursor-not-allowed opacity-50`;
+            },
+            onError: () => {
+              saveButton.disabled = false;
+              saveButton.textContent = "Save to Artifacts";
+              saveButton.className = buttonClass;
+            },
+          });
+        });
+        if (savedTablesRef.current.has(key)) {
+          saveButton.disabled = true;
+          saveButton.textContent = "Saved to Artifacts";
+          saveButton.className = `${buttonClass} cursor-not-allowed opacity-50`;
+        }
+        controls.appendChild(saveButton);
+      }
+    }
+
+    function addControls() {
+      document.querySelectorAll<HTMLTableElement>("table").forEach((table) => {
+        if (!table.closest("[data-rendered-markdown='true']")) return;
+        if (table.closest(`.${controlsClass}`)) return;
+        const anchor = table.parentElement && !table.parentElement.classList.contains(controlsClass)
+          ? table.parentElement
+          : table;
+        const existingControls =
+          table.nextElementSibling instanceof HTMLElement && table.nextElementSibling.classList.contains(controlsClass)
+            ? table.nextElementSibling
+            : table.previousElementSibling instanceof HTMLElement && table.previousElementSibling.classList.contains(controlsClass)
+              ? table.previousElementSibling
+              : anchor.nextElementSibling instanceof HTMLElement && anchor.nextElementSibling.classList.contains(controlsClass)
+                ? anchor.nextElementSibling
+                : anchor.previousElementSibling instanceof HTMLElement && anchor.previousElementSibling.classList.contains(controlsClass)
+                  ? anchor.previousElementSibling
+                  : null;
+        if (existingControls) {
+          existingControls.className = `${controlsClass} mt-2 flex w-full justify-start gap-1`;
+          if (existingControls !== anchor.nextElementSibling) {
+            anchor.parentElement?.insertBefore(existingControls, anchor.nextSibling);
+          }
+          table.dataset.exportControls = "true";
+          return;
+        }
+        if (table.dataset.exportControls === "true") return;
+        table.dataset.exportControls = "true";
+
+        const controls = document.createElement("div");
+        controls.className = `${controlsClass} mt-2 flex w-full justify-start gap-1`;
+        populateControls(controls, table);
+        anchor.parentElement?.insertBefore(controls, anchor.nextSibling);
+      });
+    }
+
+    addControls();
+    const observer = new MutationObserver(addControls);
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => {
+      observer.disconnect();
+      document.querySelectorAll<HTMLElement>(`.${controlsClass}`).forEach((element) => element.remove());
+      document.querySelectorAll<HTMLTableElement>("table[data-export-controls='true']").forEach((table) => {
+        delete table.dataset.exportControls;
+      });
+    };
+  }, [activeMode, activeChatTitle, canEdit, projectId]);
+
+  return null;
 }
 
 function IdeasView({
@@ -2669,18 +3115,16 @@ function IdeasView({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
-        <div>
-          <span className="text-xs font-semibold uppercase text-muted-foreground">Improvement queue</span>
-          <h2 className="text-xl font-semibold">{ideas.length} PMO ideas in view</h2>
-        </div>
-        {canEdit ? (
+      <SectionHeader
+        eyebrow="Improvement queue"
+        title={`${ideas.length} PMO ideas in view`}
+        actions={canEdit ? (
           <Button type="button" onClick={onAddIdea} data-testid="open-add-idea">
             <Plus />
             Add idea
           </Button>
         ) : null}
-      </div>
+      />
       <div className="grid gap-2 xl:grid-cols-[280px_minmax(0,1fr)]">
         <label className="flex h-9 items-center gap-2 rounded-md border bg-background px-3 text-muted-foreground">
           <Search className="size-4" />
@@ -2721,6 +3165,7 @@ function ArtifactsView({
   canEdit,
   artifacts,
   selectedArtifactTitle,
+  onDelete,
   onPreview,
   onSelectArtifact,
   onShare,
@@ -2730,6 +3175,7 @@ function ArtifactsView({
   canEdit: boolean;
   artifacts: Artifact[];
   selectedArtifactTitle?: string;
+  onDelete: (artifact: Artifact) => void;
   onPreview: (artifact: Artifact) => void;
   onSelectArtifact: (artifact: Artifact) => void;
   onShare: () => void;
@@ -2773,18 +3219,34 @@ function ArtifactsView({
               <Eye />
             </Button>
             {canEdit ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label={`Pin ${row.original.title}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onTogglePin(row.original);
-                }}
-              >
-                <Star className={cn(row.original.pinnedTo.includes(activeMode) && "fill-warning text-warning")} />
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={row.original.pinnedTo.includes(activeMode) ? `Unpin ${row.original.title}` : `Pin ${row.original.title}`}
+                  title={row.original.pinnedTo.includes(activeMode) ? "Unpin artifact" : "Pin artifact"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onTogglePin(row.original);
+                  }}
+                >
+                  <Star className={cn("text-muted-foreground", row.original.pinnedTo.includes(activeMode) && "fill-warning text-warning")} />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Delete ${row.original.title}`}
+                  title="Delete artifact"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDelete(row.original);
+                  }}
+                >
+                  <Trash2 className="text-destructive" />
+                </Button>
+              </>
             ) : null}
             <Button asChild variant="ghost" size="icon" aria-label={`Download ${row.original.title}`}>
               <a href={row.original.href} download aria-label={`Download ${row.original.title}`} title={`Download ${row.original.title}`} onClick={(event) => event.stopPropagation()}>
@@ -2795,23 +3257,24 @@ function ArtifactsView({
         ),
       },
     ],
-    [activeMode, canEdit, onPreview, onTogglePin],
+    [activeMode, canEdit, onDelete, onPreview, onTogglePin],
   );
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <span className="text-xs font-semibold uppercase text-muted-foreground">Artifacts</span>
-          <h2 className="text-xl font-semibold">Pin artifacts to {workspaceModeLabel(activeMode)}</h2>
-        </div>
-        {canEdit ? (
-          <Button type="button" variant="outline" onClick={onShare}>
-            <Share2 />
-            Share
-          </Button>
+      <SectionHeader
+        eyebrow="Artifacts"
+        title={`Pin artifacts to ${workspaceModeLabel(activeMode)}`}
+        actions={canEdit ? (
+          <div className="flex shrink-0 items-center gap-2">
+            <ArtifactUploader />
+            <Button type="button" variant="outline" onClick={onShare}>
+              <Share2 />
+              Share
+            </Button>
+          </div>
         ) : null}
-      </div>
+      />
       <DataTable
         columns={columns}
         data={artifacts}
@@ -2928,11 +3391,7 @@ function ActionTable<TData extends object>({
 }) {
   return (
     <div className="space-y-4">
-      <div>
-        <span className="text-xs font-semibold uppercase text-muted-foreground">Workflow status</span>
-        <h2 className="text-xl font-semibold">{title}</h2>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
-      </div>
+      <SectionHeader eyebrow="Workflow status" title={title} description={subtitle} />
       <DataTable columns={columns} data={data} getRowId={getRowId} />
     </div>
   );
@@ -2941,10 +3400,7 @@ function ActionTable<TData extends object>({
 function PromptView({ canEdit, onUsePrompt, prompts }: { canEdit: boolean; onUsePrompt: (value: string) => void; prompts: string[] }) {
   return (
     <div className="space-y-4">
-      <div>
-        <span className="text-xs font-semibold uppercase text-muted-foreground">Prompts</span>
-        <h2 className="text-xl font-semibold">Scoped prompts</h2>
-      </div>
+      <SectionHeader eyebrow="Prompts" title="Scoped prompts" />
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {prompts.map((prompt) => (
           <button
@@ -2996,15 +3452,11 @@ function CategoryTablePage({
 
   return (
     <section className="scrollbar-thin min-h-0 overflow-auto p-4 lg:p-6">
-      <div className="mb-4">
-        <span className="text-xs font-semibold uppercase text-muted-foreground">{scopeLabel}</span>
-        <h2 className="text-xl font-semibold">{rail}</h2>
-        <p className="text-sm text-muted-foreground">
-          {rail === "Chats"
-            ? "Project chats and standalone workspace chats for this scope."
-            : `${rail} scoped to ${scopeLabel}.`}
-        </p>
-      </div>
+      <SectionHeader
+        eyebrow={scopeLabel}
+        title={rail}
+        description={rail === "Chats" ? "Project chats and general chats for this scope." : `${rail} scoped to ${scopeLabel}.`}
+      />
       {rail === "Chats" ? <ChatsTable workspace={workspace} scopeLabel={scopeLabel} /> : null}
       {rail === "Ideas" ? <IdeasTable ideas={workspace.ideas} /> : null}
       {rail === "Artifacts" ? <ArtifactsTable artifacts={workspace.artifacts} /> : null}
@@ -3233,10 +3685,11 @@ function DetailPanel({
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <span className="text-xs font-semibold uppercase text-muted-foreground">Workspace detail</span>
-          <h2 className="truncate text-lg font-semibold">{workspaceTitle}</h2>
+          <p className="mt-1 truncate text-xs text-muted-foreground">Focused context for the active tab.</p>
         </div>
-        <Button type="button" variant="ghost" size="icon" aria-label="Collapse details" onClick={onClose}>
-          <X />
+        <Button type="button" variant="outline" size="sm" aria-label="Close details flyout" onClick={onClose}>
+          <PanelRightClose />
+          Close
         </Button>
       </div>
 
@@ -3898,6 +4351,126 @@ function CreateChatDialog({
   );
 }
 
+function BrandedConfirmDialog({
+  state,
+  onOpenChange,
+}: {
+  state: ConfirmDialogState;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (state) setError("");
+  }, [state]);
+
+  async function handleConfirm() {
+    if (!state) return;
+    setIsPending(true);
+    setError("");
+    try {
+      await state.onConfirm();
+      onOpenChange(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "The action could not be completed.");
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(open) => !isPending && onOpenChange(open)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{state?.title ?? "Confirm action"}</DialogTitle>
+          <DialogDescription>{state?.description ?? "Confirm this action before continuing."}</DialogDescription>
+        </DialogHeader>
+        {error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={isPending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" variant={state?.destructive ? "destructive" : "default"} disabled={isPending} onClick={handleConfirm}>
+            {isPending ? "Working..." : state?.actionLabel ?? "Confirm"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BrandedInputDialog({
+  state,
+  onOpenChange,
+}: {
+  state: InputDialogState;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [value, setValue] = useState("");
+  const [isPending, setIsPending] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!state) return;
+    setValue(state.defaultValue ?? "");
+    setError("");
+  }, [state]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!state) return;
+    const trimmedValue = value.trim();
+    if (!trimmedValue) {
+      setError(`${state.label} is required.`);
+      return;
+    }
+    setIsPending(true);
+    setError("");
+    try {
+      await state.onSubmit(trimmedValue);
+      onOpenChange(false);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "The action could not be completed.");
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(open) => !isPending && onOpenChange(open)}>
+      <DialogContent>
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>{state?.title ?? "Enter value"}</DialogTitle>
+            <DialogDescription>{state?.description ?? "Provide the details below."}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="branded-input-dialog-value">{state?.label ?? "Value"}</Label>
+            <Input
+              id="branded-input-dialog-value"
+              autoFocus
+              type={state?.inputType ?? "text"}
+              value={value}
+              placeholder={state?.placeholder}
+              onChange={(event) => setValue(event.target.value)}
+            />
+          </div>
+          {error ? <p className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{error}</p> : null}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={isPending} onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={isPending}>
+              {isPending ? "Working..." : state?.actionLabel ?? "Save"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ArtifactPreviewDialog({
   artifact,
   onOpenChange,
@@ -3914,6 +4487,7 @@ function ArtifactPreviewDialog({
               <DialogTitle>{artifact.title}</DialogTitle>
               <DialogDescription>
                 {artifact.type} / {artifact.status} / {artifact.owner}
+                {artifact.sourceChatTitle ? ` / Chat: ${artifact.sourceChatTitle}` : ""}
               </DialogDescription>
             </DialogHeader>
             <div className="grid gap-4 sm:grid-cols-[150px_minmax(0,1fr)]">
@@ -3924,6 +4498,10 @@ function ArtifactPreviewDialog({
               </div>
               <div className="space-y-3">
                 <p className="text-sm leading-6 text-muted-foreground">{artifact.summary}</p>
+                <div className="rounded-md border bg-background px-3 py-2 text-sm">
+                  <span className="font-semibold text-foreground">Source chat</span>
+                  <p className="mt-1 text-muted-foreground">{artifact.sourceChatTitle ?? "Not captured for this artifact"}</p>
+                </div>
                 <ul className="space-y-2 text-sm text-muted-foreground">
                   {artifact.preview.map((item) => (
                     <li className="flex gap-2" key={item}>
@@ -4044,9 +4622,15 @@ function ScoreCell({ value }: { value: number }) {
 function ProgressMetric({ label, value }: { label: string; value: number }) {
   return (
     <div className="space-y-1">
-      <div className="flex justify-between text-xs text-muted-foreground">
+      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>{label}</span>
-        <strong className="text-foreground">{value}</strong>
+        <span className="flex items-center gap-1">
+          <strong className="text-foreground">{value}</strong>
+          <ChartExportButtons
+            rows={[{ metric: label, value }]}
+            title={label}
+          />
+        </span>
       </div>
       <Progress value={value} />
     </div>
@@ -4067,12 +4651,53 @@ function MetricCard({
   return (
     <Card>
       <CardContent className="space-y-1 p-3">
-        <Icon className="size-4 text-primary" />
+        <div className="flex items-center justify-between gap-2">
+          <Icon className="size-4 text-primary" />
+          <ChartExportButtons
+            rows={[{ metric: label, value, detail }]}
+            title={label}
+          />
+        </div>
         <span className="block text-xs text-muted-foreground">{label}</span>
         <strong className="block text-xl">{value}</strong>
         <em className="block truncate text-xs not-italic text-muted-foreground">{detail}</em>
       </CardContent>
     </Card>
+  );
+}
+
+function ChartExportButtons({
+  rows,
+  title,
+}: {
+  rows: Array<Record<string, string | number | boolean | null>>;
+  title: string;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        aria-label={`Export ${title} chart as CSV`}
+        title="Export CSV"
+        onClick={() => downloadRows("csv", title, rows)}
+      >
+        <Download className="size-3.5" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7"
+        aria-label={`Export ${title} chart as XLSX`}
+        title="Export XLSX"
+        onClick={() => downloadRows("xlsx", title, rows)}
+      >
+        <ClipboardList className="size-3.5" />
+      </Button>
+    </div>
   );
 }
 

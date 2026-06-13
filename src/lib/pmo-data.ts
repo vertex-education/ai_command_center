@@ -6,6 +6,10 @@ import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
 import { getAuth } from "@/lib/auth";
 import {
+  xlsxBlobFromRows,
+  type ExportTable,
+} from "@/lib/chat-export";
+import {
   aiUnavailableMessage,
   buildVertexAiSystemPrompt,
   emptyAiResponseMessage,
@@ -20,6 +24,7 @@ export type RailName = "Workspaces" | "Chats" | "Ideas" | "Artifacts" | "Decisio
 export type WorkspaceMode = "Personal" | "Team" | "Org";
 export type WorkspaceScope = "personal" | "team" | "org";
 export type ChatSection = "project" | "workspace";
+export type ChatReasoningLevel = "off" | "quick" | "deep" | "max";
 
 export type ChatSummary = {
   id: string;
@@ -71,6 +76,7 @@ export type ChatMessage = {
 
 export type Artifact = {
   projectId: string | null;
+  sourceChatTitle?: string;
   title: string;
   type: string;
   owner: string;
@@ -157,6 +163,9 @@ export type LlmDevTrace = {
   request: {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
     max_completion_tokens: number;
+    reasoningLevel: ChatReasoningLevel;
+    reasoning_effort?: "low" | "medium" | "high";
+    timeoutMs: number;
     temperature: number;
   };
   responseText: string;
@@ -267,7 +276,54 @@ const scopeByMode: Record<WorkspaceMode, WorkspaceScope> = {
 };
 
 const assistantName = "VertexAI";
-const gemmaMaxCompletionTokens = 16_384;
+type ChatReasoningProfile = {
+  label: string;
+  shortLabel: string;
+  maxCompletionTokens: number;
+  timeoutMs: number;
+  reasoningEffort?: "low" | "medium" | "high";
+  thinkingEnabled: boolean;
+};
+
+export const chatReasoningProfiles: Record<ChatReasoningLevel, ChatReasoningProfile> = {
+  off: {
+    label: "Standard",
+    shortLabel: "Std",
+    maxCompletionTokens: 2_400,
+    timeoutMs: 45_000,
+    thinkingEnabled: false,
+  },
+  quick: {
+    label: "Quick reasoning",
+    shortLabel: "Quick",
+    maxCompletionTokens: 8_192,
+    timeoutMs: 75_000,
+    reasoningEffort: "low",
+    thinkingEnabled: true,
+  },
+  deep: {
+    label: "Deep reasoning",
+    shortLabel: "Deep",
+    maxCompletionTokens: 16_384,
+    timeoutMs: 120_000,
+    reasoningEffort: "medium",
+    thinkingEnabled: true,
+  },
+  max: {
+    label: "Max reasoning",
+    shortLabel: "Max",
+    maxCompletionTokens: 32_768,
+    timeoutMs: 180_000,
+    reasoningEffort: "high",
+    thinkingEnabled: true,
+  },
+};
+
+export const chatReasoningLevels: ChatReasoningLevel[] = ["off", "quick", "deep", "max"];
+
+function normalizeReasoningLevel(value: unknown): ChatReasoningLevel {
+  return typeof value === "string" && value in chatReasoningProfiles ? value as ChatReasoningLevel : "off";
+}
 
 type CloudflareContext = {
   cloudflare?: {
@@ -415,13 +471,23 @@ function getDb() {
   return db;
 }
 
-async function withAiTimeout<T>(operation: Promise<T>, timeoutMs = 20_000): Promise<T> {
+function getArtifactsBucket() {
+  const bucket = (env as Env).ARTIFACTS_BUCKET;
+  if (!bucket) throw new Error("R2 binding ARTIFACTS_BUCKET is required.");
+  return bucket;
+}
+
+async function withAiTimeout<T>(operation: (signal: AbortSignal) => Promise<T>, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      operation,
+      operation(controller.signal),
       new Promise<T>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("Workers AI did not respond before the timeout.")), timeoutMs);
+        timeout = setTimeout(() => {
+          controller.abort();
+          reject(new Error("Workers AI did not respond before the timeout."));
+        }, timeoutMs);
       }),
     ]);
   } finally {
@@ -433,15 +499,15 @@ const workspaceSeed = {
   Personal: {
     projectsHeading: "Personal Projects",
     projectChatsHeading: "Project Chats",
-    workspaceChatsHeading: "Personal Chats",
-    unassignedProjectLabel: "No project",
+    workspaceChatsHeading: "General Chats",
+    unassignedProjectLabel: "General",
     projects: [
       { id: "personal-certification-plan", name: "Certification Plan", description: "Private credential and milestone tracking.", status: "Active" as const },
       { id: "personal-weekly-reset", name: "Weekly Reset", description: "Personal planning workspace for recurring follow-up.", status: "Planning" as const },
     ],
     workspaceChats: [
       { id: "personal-assistant", title: "Personal Command Chat", description: "Private planning and follow-up." },
-      { id: "personal-notes", title: "Personal Chats", description: "Notes that are not tied to a project." },
+      { id: "personal-notes", title: "General Chats", description: "Notes that are not tied to a project." },
       { id: "personal-ideas", title: "Idea Scratchpad", description: "Private improvement thinking." },
     ],
     artifacts: [
@@ -545,7 +611,7 @@ function buildIdea(
     confidence: Math.max(58, 88 - normalizedIndex * 4),
     summary: `${scopeName} scoped idea. This record is intentionally different from the other workspace and project scopes so switching views is obvious.`,
     nextStep: `Confirm the ${scopeName.toLowerCase()} owner, artifact evidence, and decision path.`,
-    tags: [workspaceModeLabel(mode), project?.name ?? "No project", category, status],
+    tags: [workspaceModeLabel(mode), project?.name ?? "General", category, status],
     metrics: [`${mode} metric ${index}`, "Scoped evidence only", "No lower-scope exposure"],
     thread: [
       `${workspaceModeLabel(mode)} idea captured in Vertex AI Command Center.`,
@@ -757,6 +823,85 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1000)}`;
 }
 
+function safeArtifactFileName(value: string) {
+  return value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 72) || "table-export";
+}
+
+function requiredFormString(formData: FormData, key: string, label: string) {
+  const value = formData.get(key);
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required.`);
+  return value.trim();
+}
+
+function optionalFormString(formData: FormData, key: string) {
+  const value = formData.get(key);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function rowsSample(rows: ExportTable["rows"]) {
+  return rows
+    .slice(0, 8)
+    .map((row) => Object.entries(row).map(([key, value]) => `${key}: ${value ?? ""}`).join("; "))
+    .join("\n")
+    .slice(0, 2200);
+}
+
+function fallbackArtifactTitle(seedTitle: string, rows: ExportTable["rows"]) {
+  const columns = Object.keys(rows[0] ?? {}).slice(0, 4).join(" ");
+  const source = `${seedTitle} ${columns}`.trim() || "Table Export";
+  return source
+    .replace(/\b(option|method|table|export|csv|xlsx)\b/gi, " ")
+    .replace(/[^a-z0-9\s-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 7)
+    .join(" ") || "Table Export";
+}
+
+async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"]) {
+  const ai = (env as Env).AI;
+  if (!ai) return fallbackArtifactTitle(seedTitle, rows);
+  const prompt = [
+    "Create a concise file name for an XLSX artifact based on this table.",
+    "Return only the file name text, no extension, no quotes, no punctuation except hyphens or spaces.",
+    "Use 3 to 7 words. Make it specific to the content.",
+    `Current heading: ${seedTitle}`,
+    "Rows:",
+    rowsSample(rows),
+  ].join("\n");
+  try {
+    const result = await withAiTimeout(
+      (signal) => ai.run(vertexAiModelId, {
+        messages: [
+          { role: "system", content: "You name files clearly and briefly." },
+          { role: "user", content: prompt },
+        ],
+        max_completion_tokens: 32,
+        temperature: 0.1,
+      }, { signal }),
+      4500,
+    );
+    const generated = extractAiResponse(result)
+      .replace(/\.[a-z0-9]+$/i, "")
+      .replace(/["'`]/g, "")
+      .replace(/[^a-z0-9\s-]/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .slice(0, 8)
+      .join(" ");
+    return generated || fallbackArtifactTitle(seedTitle, rows);
+  } catch {
+    return fallbackArtifactTitle(seedTitle, rows);
+  }
+}
+
 async function getChatWorkspaceId(chatId: string) {
   const chat = await getDb()
     .prepare("SELECT workspace_id as workspaceId FROM chats WHERE id = ? LIMIT 1")
@@ -832,10 +977,12 @@ async function runGemmaChat({
   workspace,
 }: {
   context: unknown;
-  data: { mode: WorkspaceMode; projectId: string | null; chatId: string; chatTitle: string; text: string };
+  data: { mode: WorkspaceMode; projectId: string | null; chatId: string; chatTitle: string; text: string; reasoningLevel?: ChatReasoningLevel };
   existingMessages: ChatMessage[];
   workspace: ScopedWorkspaceState;
 }): Promise<{ text: string; trace: LlmDevTrace }> {
+  const reasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
+  const reasoningProfile = chatReasoningProfiles[reasoningLevel];
   const project = data.projectId
     ? await getDb()
       .prepare("SELECT name, description FROM projects WHERE id = ? LIMIT 1")
@@ -856,7 +1003,12 @@ async function runGemmaChat({
     "Use this scoped context only when it is relevant to the user's request. Otherwise answer the user's request directly.",
   ].filter(Boolean).join("\n");
 
-  const requestPayload = {
+  const requestPayload: LlmDevTrace["request"] & {
+    chat_template_kwargs?: {
+      enable_thinking: boolean;
+      thinking?: boolean;
+    };
+  } = {
     messages: [
       {
         role: "system" as const,
@@ -872,7 +1024,14 @@ async function runGemmaChat({
         content: data.text,
       },
     ],
-    max_completion_tokens: gemmaMaxCompletionTokens,
+    max_completion_tokens: reasoningProfile.maxCompletionTokens,
+    reasoningLevel,
+    reasoning_effort: reasoningProfile.reasoningEffort,
+    timeoutMs: reasoningProfile.timeoutMs,
+    chat_template_kwargs: {
+      enable_thinking: reasoningProfile.thinkingEnabled,
+      thinking: reasoningProfile.thinkingEnabled,
+    },
     temperature: 0.3,
   };
   const traceBase = {
@@ -917,11 +1076,14 @@ async function runGemmaChat({
     projectId: data.projectId,
     messageCount: requestPayload.messages.length,
     model: vertexAiModelId,
+    reasoningLevel,
+    maxCompletionTokens: requestPayload.max_completion_tokens,
+    timeoutMs: requestPayload.timeoutMs,
   });
 
   const startedAt = Date.now();
   try {
-    const result = await withAiTimeout(ai.run(vertexAiModelId, requestPayload));
+    const result = await withAiTimeout((signal) => ai.run(vertexAiModelId, requestPayload, { signal }), reasoningProfile.timeoutMs);
 
     const responseText = extractAiResponse(result).trim();
     const thinkingText = extractThinkingFromResponse(result);
@@ -1021,8 +1183,87 @@ export function initials(name: string) {
     .toUpperCase();
 }
 
+async function mergePersistedArtifacts(root: PmoWorkspaceState) {
+  let rows: Array<{
+    workspaceId: string;
+    title: string;
+    type: string;
+    owner: string;
+    date: string;
+    status: Artifact["status"];
+    summary: string;
+    r2Key: string;
+    href: string;
+    previewJson: string;
+    pinned: boolean | number;
+  }>;
+  try {
+    const result = await getDb()
+      .prepare(
+        `SELECT workspace_id as workspaceId,
+                title,
+                file_type as type,
+                owner,
+                artifact_date as date,
+                status,
+                summary,
+                r2_key as r2Key,
+                href,
+                preview_json as previewJson,
+                pinned
+         FROM artifacts`,
+      )
+      .all<typeof rows[number]>();
+    rows = result.results ?? [];
+  } catch {
+    return root;
+  }
+
+  const modeByWorkspaceId = new Map(Object.entries(scopeByMode).map(([mode, scope]) => [`ws-${scope}`, mode as WorkspaceMode]));
+  for (const row of rows) {
+    const mode = modeByWorkspaceId.get(row.workspaceId);
+    if (!mode) continue;
+    let preview: string[] = [];
+    let projectId: string | null = null;
+    let sourceChatTitle: string | undefined;
+    try {
+      const parsed = JSON.parse(row.previewJson);
+      if (Array.isArray(parsed)) {
+        preview = parsed.map((item) => String(item));
+      } else if (parsed && typeof parsed === "object") {
+        const record = parsed as { preview?: unknown; projectId?: unknown; sourceChatTitle?: unknown };
+        preview = Array.isArray(record.preview) ? record.preview.map((item) => String(item)) : [];
+        projectId = typeof record.projectId === "string" && record.projectId ? record.projectId : null;
+        sourceChatTitle = typeof record.sourceChatTitle === "string" && record.sourceChatTitle ? record.sourceChatTitle : undefined;
+      }
+    } catch {
+      preview = [];
+    }
+    const artifact: Artifact = {
+      projectId,
+      sourceChatTitle,
+      title: row.title,
+      type: row.type,
+      owner: row.owner,
+      date: row.date,
+      status: row.status,
+      summary: row.summary,
+      href: row.href,
+      r2Key: row.r2Key,
+      preview,
+      pinnedTo: row.pinned ? [mode] : [],
+    };
+    const workspace = root.workspaces[mode];
+    workspace.artifacts = [
+      artifact,
+      ...workspace.artifacts.filter((item) => item.r2Key !== artifact.r2Key),
+    ];
+  }
+  return root;
+}
+
 export const fetchPmoWorkspace = createServerFn({ method: "GET" }).handler(async () => {
-  return clone(getMutableRoot());
+  return mergePersistedArtifacts(clone(getMutableRoot()));
 });
 
 async function requireWorkspaceEditor() {
@@ -1091,7 +1332,7 @@ async function requireChatContributor({
 }
 
 export const sendChatMessage = createServerFn({ method: "POST" })
-  .validator((data: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string }) => data)
+  .validator((data: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel?: ChatReasoningLevel }) => data)
   .handler(async ({ context, data }): Promise<SendChatMessageResult> => {
     const user = await requireWorkspaceEditor();
     await requireChatContributor({
@@ -1169,7 +1410,7 @@ export const addIdea = createServerFn({ method: "POST" })
       confidence: data.impact === "High" ? 78 : 66,
       summary: data.summary.trim() || `New ${project?.name ?? workspaceModeLabel(mode).toLowerCase()} improvement idea captured from the current scope.`,
       nextStep: "Confirm owner, evidence source, and governance fit.",
-      tags: [data.category, data.impact, workspaceModeLabel(mode), project?.name ?? "No project"],
+      tags: [data.category, data.impact, workspaceModeLabel(mode), project?.name ?? "General"],
       metrics: ["Owner confirmation needed", "Evidence source pending", "Governance review pending"],
       thread: ["Idea captured through Vertex AI Command Center.", "Assistant prepared initial impact and follow-up fields."],
     };
@@ -1215,17 +1456,137 @@ export const toggleIdeaPin = createServerFn({ method: "POST" })
   });
 
 export const toggleArtifactPin = createServerFn({ method: "POST" })
-  .validator((data: { mode: WorkspaceMode; title: string }) => data)
+  .validator((data: { mode: WorkspaceMode; r2Key: string }) => data)
   .handler(async ({ data }) => {
     await requireWorkspaceEditor();
     const workspace = getMutableWorkspace(data.mode);
+    const persistedArtifact = await getDb()
+      .prepare("SELECT pinned FROM artifacts WHERE r2_key = ? LIMIT 1")
+      .bind(data.r2Key)
+      .first<{ pinned: boolean | number }>();
+    const memoryArtifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key);
+    const isPinned = persistedArtifact
+      ? Boolean(persistedArtifact.pinned)
+      : Boolean(memoryArtifact?.pinnedTo.includes(data.mode));
+    const nextPinned = !isPinned;
+
     workspace.artifacts = workspace.artifacts.map((artifact) => {
-      if (artifact.title !== data.title) return artifact;
-      const isPinned = artifact.pinnedTo.includes(data.mode);
+      if (artifact.r2Key !== data.r2Key) return artifact;
       return { ...artifact, pinnedTo: isPinned ? artifact.pinnedTo.filter((mode) => mode !== data.mode) : [...artifact.pinnedTo, data.mode] };
     });
-    recordActivity(workspace, "Artifact pin changed", `${data.title} updated for ${workspaceModeLabel(data.mode)}.`);
-    return clone(getMutableRoot());
+    await getDb()
+      .prepare("UPDATE artifacts SET pinned = ? WHERE r2_key = ?")
+      .bind(nextPinned ? 1 : 0, data.r2Key)
+      .run();
+    const artifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key) ?? memoryArtifact;
+    recordActivity(workspace, "Artifact pin changed", `${artifact?.title ?? "Artifact"} updated for ${workspaceModeLabel(data.mode)}.`);
+    return mergePersistedArtifacts(clone(getMutableRoot()));
+  });
+
+export const deleteArtifact = createServerFn({ method: "POST" })
+  .validator((data: { mode: WorkspaceMode; r2Key: string }) => data)
+  .handler(async ({ data }) => {
+    await requireWorkspaceEditor();
+    const workspace = getMutableWorkspace(data.mode);
+    const artifact = workspace.artifacts.find((item) => item.r2Key === data.r2Key);
+    workspace.artifacts = workspace.artifacts.filter((item) => item.r2Key !== data.r2Key);
+    await getDb()
+      .prepare("DELETE FROM artifacts WHERE r2_key = ?")
+      .bind(data.r2Key)
+      .run();
+    await getArtifactsBucket().delete(data.r2Key).catch(() => undefined);
+    recordActivity(workspace, "Artifact deleted", `${artifact?.title ?? "Artifact"} removed from ${workspaceModeLabel(data.mode)}.`);
+    return mergePersistedArtifacts(clone(getMutableRoot()));
+  });
+
+export const saveTableArtifact = createServerFn({ method: "POST" })
+  .validator((data: FormData) => data)
+  .handler(async ({ data }) => {
+    await requireWorkspaceEditor();
+    const modeValue = requiredFormString(data, "mode", "Workspace mode");
+    if (!workspaceModes.includes(modeValue as WorkspaceMode)) throw new Error("Workspace mode is invalid.");
+    const mode = modeValue as WorkspaceMode;
+    const projectId = optionalFormString(data, "project_id");
+    const sourceChatTitle = optionalFormString(data, "chat_title") ?? undefined;
+    const seedTitle = requiredFormString(data, "title", "Artifact title").slice(0, 96);
+    const rowsJson = requiredFormString(data, "rows_json", "Table rows");
+    let rows: ExportTable["rows"];
+    try {
+      const parsed = JSON.parse(rowsJson);
+      if (!Array.isArray(parsed)) throw new Error("Rows must be an array.");
+      rows = parsed as ExportTable["rows"];
+    } catch {
+      throw new Error("Table rows are invalid.");
+    }
+    if (rows.length === 0) throw new Error("The table does not contain rows to save.");
+
+    const workspace = getMutableWorkspace(mode);
+    const workspaceId = `ws-${scopeByMode[mode]}`;
+    const title = (await generateArtifactTitle(seedTitle, rows)).slice(0, 96);
+    const fileName = `${safeArtifactFileName(title)}.xlsx`;
+    const xlsxBlob = await xlsxBlobFromRows(title, rows);
+    const r2Key = `${scopeByMode[mode]}/generated/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}-${fileName}`;
+    const href = `/artifacts/${fileName}`;
+    const artifactDate = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const artifact: Artifact = {
+      projectId,
+      sourceChatTitle,
+      title,
+      type: "XLSX",
+      owner: "You",
+      date: artifactDate,
+      status: "Draft",
+      summary: "XLSX artifact saved from a rendered table.",
+      href,
+      r2Key,
+      preview: ["Saved table export", fileName],
+      pinnedTo: [],
+    };
+
+    await getArtifactsBucket().put(r2Key, xlsxBlob, {
+      httpMetadata: {
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      },
+      customMetadata: {
+        title,
+        workspace_mode: mode,
+        project_id: projectId ?? "",
+        source_chat_title: sourceChatTitle ?? "",
+      },
+    });
+
+    await getDb()
+      .prepare(
+        `INSERT INTO artifacts (
+          id,
+          workspace_id,
+          title,
+          file_type,
+          owner,
+          artifact_date,
+          status,
+          summary,
+          r2_key,
+          href,
+          preview_json,
+          pinned
+        ) VALUES (?, ?, ?, 'XLSX', 'You', ?, 'Draft', ?, ?, ?, ?, 0)`,
+      )
+      .bind(
+        `artifact-${crypto.randomUUID()}`,
+        workspaceId,
+        title,
+        artifactDate,
+        artifact.summary,
+        r2Key,
+        href,
+        JSON.stringify({ preview: artifact.preview, projectId, sourceChatTitle }),
+      )
+      .run();
+
+    workspace.artifacts = [artifact, ...workspace.artifacts.filter((item) => item.r2Key !== r2Key)];
+    recordActivity(workspace, "Artifact saved", `${title} saved as XLSX.`);
+    return { workspace: clone(getMutableRoot()), artifact };
   });
 
 export const toggleDecisionStatus = createServerFn({ method: "POST" })
