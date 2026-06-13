@@ -146,6 +146,7 @@ import {
   tabs,
   toggleArtifactPin,
   toggleIdeaPin,
+  toggleWorkflowActionPin,
   updateApprovalStatus,
   updateDecisionStatus,
   updateIdeaStatus,
@@ -749,6 +750,12 @@ function PMOCommandCenter() {
     mutationFn: (id: string) => toggleIdeaPin({ data: { id, mode: activeMode } }),
     onSuccess: invalidateWorkspace,
   });
+  const toggleWorkflowActionPinMutation = useMutation({
+    mutationFn: (input: { kind: "approval" | "decision" | "task"; id: string }) =>
+      toggleWorkflowActionPin({ data: { ...input, mode: activeMode } }),
+    onSuccess: invalidateWorkspace,
+    onError: (error) => updateToast(error instanceof Error ? error.message : "Could not update pin."),
+  });
   const toggleArtifactPinMutation = useMutation({
     mutationFn: (input: { r2Key: string; mode: WorkspaceMode }) => toggleArtifactPin({ data: input }),
     onMutate: async (input) => {
@@ -1043,6 +1050,9 @@ function PMOCommandCenter() {
     .map((id) => scopedIdeas.find((idea) => idea.id === id))
     .filter((idea): idea is Idea => Boolean(idea));
   const pinnedArtifacts = scopedArtifacts.filter((artifact) => artifact.pinnedTo.includes(activeMode));
+  const pinnedApprovals = scopedApprovals.filter((approval) => approval.pinned);
+  const pinnedDecisions = scopedDecisions.filter((decision) => decision.pinned);
+  const pinnedTasks = scopedTasks.filter((task) => task.pinned);
 
   const filteredIdeas = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -2071,14 +2081,33 @@ function PMOCommandCenter() {
                     <>
                       <PinnedStrip
                         artifacts={pinnedArtifacts}
+                        approvals={pinnedApprovals}
+                        decisions={pinnedDecisions}
                         ideas={pinnedIdeas}
+                        tasks={pinnedTasks}
                         onSelectArtifact={(artifact) => {
                           setSelectedArtifactTitle(artifact.title);
+                          setActiveTab("Artifacts");
                           setPreviewArtifact(artifact);
+                        }}
+                        onSelectApproval={(approval) => {
+                          setSelectedApprovalId(approval.id);
+                          setActiveTab("Approvals");
+                          setRightOpen(true);
+                        }}
+                        onSelectDecision={(decision) => {
+                          setSelectedDecisionId(decision.id);
+                          setActiveTab("Decisions");
+                          setRightOpen(true);
                         }}
                         onSelectIdea={(idea) => {
                           setSelectedIdeaId(idea.id);
                           setActiveTab("Ideas");
+                          setRightOpen(true);
+                        }}
+                        onSelectTask={(task) => {
+                          setSelectedTaskId(task.id);
+                          setActiveTab("Tasks");
                           setRightOpen(true);
                         }}
                       />
@@ -2141,6 +2170,7 @@ function PMOCommandCenter() {
                         }}
                         onStatusChange={handleIdeaStatusChange}
                         onStatusFilter={setStatusFilter}
+                        onToggleIdeaPin={(id) => toggleIdeaPinMutation.mutate(id)}
                       />
                     ) : null}
                     {activeTab === "Artifacts" ? (
@@ -2171,6 +2201,7 @@ function PMOCommandCenter() {
                           setRightOpen(true);
                         }}
                         onStatusChange={(id, status) => updateDecisionStatusMutation.mutate({ id, status })}
+                        onTogglePin={(id) => toggleWorkflowActionPinMutation.mutate({ kind: "decision", id })}
                       />
                     ) : null}
                     {activeTab === "Approvals" ? (
@@ -2184,6 +2215,7 @@ function PMOCommandCenter() {
                           setRightOpen(true);
                         }}
                         onStatusChange={(id, status) => updateApprovalStatusMutation.mutate({ id, status })}
+                        onTogglePin={(id) => toggleWorkflowActionPinMutation.mutate({ kind: "approval", id })}
                       />
                     ) : null}
                     {activeTab === "Tasks" ? (
@@ -2197,6 +2229,7 @@ function PMOCommandCenter() {
                           setSelectedTaskId(task.id);
                           setRightOpen(true);
                         }}
+                        onTogglePin={(id) => toggleWorkflowActionPinMutation.mutate({ kind: "task", id })}
                       />
                     ) : null}
                         {activeTab === "Prompts" ? (
@@ -2387,6 +2420,7 @@ function PMOCommandCenter() {
                         selectedArtifact && toggleArtifactPinMutation.mutate({ r2Key: selectedArtifact.r2Key, mode: activeMode })
                       }
                       onToggleIdeaPin={() => selectedIdea && toggleIdeaPinMutation.mutate(selectedIdea.id)}
+                      onToggleWorkflowPin={(kind, id) => toggleWorkflowActionPinMutation.mutate({ kind, id })}
                       onDeleteApproval={(id) => removeApprovalMutation.mutate(id)}
                       onDeleteDecision={(id) => removeDecisionMutation.mutate(id)}
                       onDeleteIdea={(id) => removeIdeaMutation.mutate(id)}
@@ -3611,16 +3645,28 @@ function ProjectNav({
 
 function PinnedStrip({
   artifacts,
+  approvals,
+  decisions,
   ideas,
+  tasks,
   onSelectArtifact,
+  onSelectApproval,
+  onSelectDecision,
   onSelectIdea,
+  onSelectTask,
 }: {
   artifacts: Artifact[];
+  approvals: Approval[];
+  decisions: Decision[];
   ideas: Idea[];
+  tasks: Task[];
   onSelectArtifact: (artifact: Artifact) => void;
+  onSelectApproval: (approval: Approval) => void;
+  onSelectDecision: (decision: Decision) => void;
   onSelectIdea: (idea: Idea) => void;
+  onSelectTask: (task: Task) => void;
 }) {
-  const hasPinnedItems = ideas.length > 0 || artifacts.length > 0;
+  const hasPinnedItems = ideas.length > 0 || artifacts.length > 0 || approvals.length > 0 || decisions.length > 0 || tasks.length > 0;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollControls, setScrollControls] = useState({
     canScrollLeft: false,
@@ -3652,7 +3698,7 @@ function PinnedStrip({
       container.removeEventListener("scroll", updateScrollControls);
       window.removeEventListener("resize", updateScrollControls);
     };
-  }, [ideas.length, artifacts.length]);
+  }, [approvals.length, artifacts.length, decisions.length, ideas.length, tasks.length]);
 
   function scrollPinnedItems(direction: -1 | 1) {
     const container = scrollRef.current;
@@ -3708,6 +3754,57 @@ function PinnedStrip({
               <StatusBadge status={idea.status} />
               <strong className="line-clamp-2 text-sm leading-snug">{idea.title}</strong>
               <span className="line-clamp-1 text-xs text-muted-foreground">{idea.summary}</span>
+            </button>
+          ))}
+          {approvals.map((approval) => (
+            <button
+              data-pinned-card="true"
+              className="grid min-h-20 w-56 shrink-0 snap-start grid-cols-[28px_minmax(0,1fr)] gap-2 rounded-md border bg-background p-2.5 text-left hover:border-primary/40 hover:bg-accent/30"
+              key={approval.id}
+              type="button"
+              onClick={() => onSelectApproval(approval)}
+            >
+              <span className="grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
+                <ShieldCheck className="size-4" />
+              </span>
+              <span className="min-w-0">
+                <strong className="line-clamp-2 text-sm leading-snug">{approval.title}</strong>
+                <em className="mt-0.5 block text-xs not-italic text-muted-foreground">Approval / {approval.status}</em>
+              </span>
+            </button>
+          ))}
+          {decisions.map((decision) => (
+            <button
+              data-pinned-card="true"
+              className="grid min-h-20 w-56 shrink-0 snap-start grid-cols-[28px_minmax(0,1fr)] gap-2 rounded-md border bg-background p-2.5 text-left hover:border-primary/40 hover:bg-accent/30"
+              key={decision.id}
+              type="button"
+              onClick={() => onSelectDecision(decision)}
+            >
+              <span className="grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
+                <ClipboardList className="size-4" />
+              </span>
+              <span className="min-w-0">
+                <strong className="line-clamp-2 text-sm leading-snug">{decision.title}</strong>
+                <em className="mt-0.5 block text-xs not-italic text-muted-foreground">Decision / {decision.status}</em>
+              </span>
+            </button>
+          ))}
+          {tasks.map((task) => (
+            <button
+              data-pinned-card="true"
+              className="grid min-h-20 w-56 shrink-0 snap-start grid-cols-[28px_minmax(0,1fr)] gap-2 rounded-md border bg-background p-2.5 text-left hover:border-primary/40 hover:bg-accent/30"
+              key={task.id}
+              type="button"
+              onClick={() => onSelectTask(task)}
+            >
+              <span className="grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
+                <CheckCircle2 className="size-4" />
+              </span>
+              <span className="min-w-0">
+                <strong className="line-clamp-2 text-sm leading-snug">{task.title}</strong>
+                <em className="mt-0.5 block text-xs not-italic text-muted-foreground">Task / {task.status}</em>
+              </span>
             </button>
           ))}
           {artifacts.map((artifact) => (
@@ -3925,6 +4022,7 @@ function ChatView({
                     pendingTaskRemovalId={pendingTaskRemovalId}
                     pendingTaskTitle={pendingTaskTitle}
                     requestedFormats={parseChatExportRequest(previousUserMessage?.text ?? "")}
+                    requestedIdeas={wasIdeaRequest(previousUserMessage?.text ?? "")}
                     requestedJson={wasJsonRequested(previousUserMessage?.text ?? "")}
                     tasks={tasks}
                     title={previousUserMessage?.text ?? "Vertex AI chat export"}
@@ -4146,6 +4244,11 @@ function wasJsonRequested(prompt: string) {
   return /\b(json|schema|object|array)\b/i.test(prompt) && /\b(return|respond|output|format|give|as|in)\b/i.test(prompt);
 }
 
+function wasIdeaRequest(prompt: string) {
+  return /\b(idea|ideas|opportunit(?:y|ies)|suggestion|suggestions|brainstorm|recommendations?|improvements?|enhancements?)\b/i.test(prompt)
+    && /\b(give|suggest|recommend|brainstorm|identify|surface|list|propose|what|how|ways)\b/i.test(prompt);
+}
+
 function parseAssistantResponse(text: string, requestedJson: boolean): ParsedAssistantResponse {
   const trimmed = text.trim();
   const jsonCandidate = extractJsonCandidate(trimmed);
@@ -4275,6 +4378,7 @@ function AssistantResponseContent({
   pendingTaskRemovalId,
   pendingTaskTitle,
   requestedFormats,
+  requestedIdeas,
   requestedJson,
   tasks,
   text,
@@ -4298,6 +4402,7 @@ function AssistantResponseContent({
   pendingTaskRemovalId: string | null;
   pendingTaskTitle: string | null;
   requestedFormats: ChatExportFormat[];
+  requestedIdeas: boolean;
   requestedJson: boolean;
   tasks: Task[];
   text: string;
@@ -4320,6 +4425,7 @@ function AssistantResponseContent({
     pendingTask,
     pendingTaskRemovalId: pendingTaskRemovalId ?? undefined,
     pendingTaskTitle: pendingTaskTitle ?? undefined,
+    preferredSuggestionKind: requestedIdeas ? "idea" as const : undefined,
     activeMode,
     activeProjectId,
     sourceTitle: chatTitle,
@@ -4665,6 +4771,7 @@ type WorkflowLineItem = {
   meta: string;
   statusControl?: ReactNode;
   complete?: "success" | "destructive";
+  pinned?: boolean;
 };
 
 const approvalStatusOptions: Approval["status"][] = ["Not Reviewed", "Reviewing", "Approved", "Not Approved"];
@@ -4709,6 +4816,7 @@ function WorkflowLineList({
   onDelete,
   onPreview,
   onSelect,
+  onTogglePin,
 }: {
   canEdit: boolean;
   emptyLabel: string;
@@ -4716,6 +4824,7 @@ function WorkflowLineList({
   onDelete: (id: string) => void;
   onPreview: (item: WorkflowLineItem) => void;
   onSelect: (item: WorkflowLineItem) => void;
+  onTogglePin?: (id: string) => void;
 }) {
   if (items.length === 0) {
     return (
@@ -4753,6 +4862,19 @@ function WorkflowLineList({
             <span className="mt-0.5 block truncate text-xs text-muted-foreground">{item.meta}</span>
           </span>
           <div className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+            {canEdit && onTogglePin ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                aria-label={item.pinned ? `Unpin ${item.title}` : `Pin ${item.title}`}
+                title={item.pinned ? "Unpin" : "Pin"}
+                onClick={() => onTogglePin(item.id)}
+              >
+                <Star className={cn(item.pinned && "fill-warning text-warning")} />
+                {item.pinned ? "Pinned" : "Pin"}
+              </Button>
+            ) : null}
             {item.statusControl}
             <Button type="button" variant="outline" size="sm" onClick={() => onPreview(item)}>
               <Eye />
@@ -4784,6 +4906,7 @@ function IdeasView({
   onSelectIdea,
   onStatusChange,
   onStatusFilter,
+  onToggleIdeaPin,
 }: {
   canEdit: boolean;
   ideas: Idea[];
@@ -4797,6 +4920,7 @@ function IdeasView({
   onSelectIdea: (idea: Idea) => void;
   onStatusChange: (idea: Idea, status: IdeaStatus) => void;
   onStatusFilter: (value: IdeaStatus | "All") => void;
+  onToggleIdeaPin: (id: string) => void;
 }) {
   const lineItems = useMemo<WorkflowLineItem[]>(
     () => ideas.map((idea) => ({
@@ -4805,6 +4929,7 @@ function IdeasView({
       originalText: idea.originalText,
       meta: `${idea.owner} / ${idea.category} / ${idea.votes} votes${pinnedIdeaIds.includes(idea.id) ? " / Pinned" : ""}`,
       complete: idea.status === "Convert to Project" ? "success" : idea.status === "Dismiss" ? "destructive" : undefined,
+      pinned: pinnedIdeaIds.includes(idea.id),
       statusControl: (
         <WorkflowStatusSelect
           disabled={!canEdit}
@@ -4868,6 +4993,7 @@ function IdeasView({
           const idea = ideasById.get(item.id);
           if (idea) onSelectIdea(idea);
         }}
+        onTogglePin={onToggleIdeaPin}
       />
     </div>
   );
@@ -5026,6 +5152,7 @@ function DecisionView({
   onPreview,
   onSelect,
   onStatusChange,
+  onTogglePin,
 }: {
   canEdit: boolean;
   decisions: Decision[];
@@ -5033,6 +5160,7 @@ function DecisionView({
   onPreview: (decision: Decision) => void;
   onSelect: (decision: Decision) => void;
   onStatusChange: (id: string, status: Decision["status"]) => void;
+  onTogglePin: (id: string) => void;
 }) {
   const decisionsById = useMemo(() => new Map(decisions.map((decision) => [decision.id, decision])), [decisions]);
   const items = useMemo<WorkflowLineItem[]>(
@@ -5042,6 +5170,7 @@ function DecisionView({
       originalText: decision.originalText,
       meta: `${decision.owner} / ${decision.due}`,
       complete: decision.status === "Completed" ? "success" : undefined,
+      pinned: decision.pinned,
       statusControl: (
         <WorkflowStatusSelect
           disabled={!canEdit}
@@ -5071,6 +5200,7 @@ function DecisionView({
           const decision = decisionsById.get(item.id);
           if (decision) onSelect(decision);
         }}
+        onTogglePin={onTogglePin}
       />
     </div>
   );
@@ -5083,6 +5213,7 @@ function ApprovalView({
   onPreview,
   onSelect,
   onStatusChange,
+  onTogglePin,
 }: {
   approvals: Approval[];
   canEdit: boolean;
@@ -5090,6 +5221,7 @@ function ApprovalView({
   onPreview: (approval: Approval) => void;
   onSelect: (approval: Approval) => void;
   onStatusChange: (id: string, status: Approval["status"]) => void;
+  onTogglePin: (id: string) => void;
 }) {
   const approvalsById = useMemo(() => new Map(approvals.map((approval) => [approval.id, approval])), [approvals]);
   const items = useMemo<WorkflowLineItem[]>(
@@ -5099,6 +5231,7 @@ function ApprovalView({
       originalText: approval.originalText,
       meta: `${approval.owner} / ${approval.due}`,
       complete: approval.status === "Approved" ? "success" : approval.status === "Not Approved" ? "destructive" : undefined,
+      pinned: approval.pinned,
       statusControl: (
         <WorkflowStatusSelect
           disabled={!canEdit}
@@ -5128,6 +5261,7 @@ function ApprovalView({
           const approval = approvalsById.get(item.id);
           if (approval) onSelect(approval);
         }}
+        onTogglePin={onTogglePin}
       />
     </div>
   );
@@ -5140,6 +5274,7 @@ function TaskView({
   onDelete,
   onPreview,
   onSelect,
+  onTogglePin,
 }: {
   canEdit: boolean;
   tasks: Task[];
@@ -5147,6 +5282,7 @@ function TaskView({
   onDelete: (id: string) => void;
   onPreview: (task: Task) => void;
   onSelect: (task: Task) => void;
+  onTogglePin: (id: string) => void;
 }) {
   const tasksById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const items = useMemo<WorkflowLineItem[]>(
@@ -5156,6 +5292,7 @@ function TaskView({
       originalText: task.originalText,
       meta: `${task.owner} / ${task.source}`,
       complete: task.status === "Completed" ? "success" : undefined,
+      pinned: task.pinned,
       statusControl: task.status === "Completed" ? (
         canEdit ? (
           <Button type="button" variant="outline" size="sm" onClick={() => onStatusChange(task.id, "Open")}>
@@ -5193,6 +5330,7 @@ function TaskView({
           const task = tasksById.get(item.id);
           if (task) onSelect(task);
         }}
+        onTogglePin={onTogglePin}
       />
     </div>
   );
@@ -5486,6 +5624,7 @@ function DetailPanel({
   onStatusChange,
   onToggleArtifactPin,
   onToggleIdeaPin,
+  onToggleWorkflowPin,
   onDeleteApproval,
   onDeleteDecision,
   onDeleteIdea,
@@ -5516,6 +5655,7 @@ function DetailPanel({
   onStatusChange: (status: IdeaStatus) => void;
   onToggleArtifactPin: () => void;
   onToggleIdeaPin: () => void;
+  onToggleWorkflowPin: (kind: "approval" | "decision" | "task", id: string) => void;
   onDeleteApproval: (id: string) => void;
   onDeleteDecision: (id: string) => void;
   onDeleteIdea: (id: string) => void;
@@ -5579,9 +5719,11 @@ function DetailPanel({
           title={decision.title}
           detail={`${decision.owner} / ${decision.status} / ${decision.due}`}
           originalText={decision.originalText}
+          isPinned={Boolean(decision.pinned)}
           canEdit={canEdit}
           onDelete={() => onDeleteDecision(decision.id)}
           onPreview={() => onPreviewWorkflow(workflowPreviewFromDecision(decision))}
+          onTogglePin={() => onToggleWorkflowPin("decision", decision.id)}
         />
       ) : null}
       {activeTab === "Approvals" && approval ? (
@@ -5591,9 +5733,11 @@ function DetailPanel({
           title={approval.title}
           detail={`${approval.owner} / ${approval.status} / ${approval.due}`}
           originalText={approval.originalText}
+          isPinned={Boolean(approval.pinned)}
           canEdit={canEdit}
           onDelete={() => onDeleteApproval(approval.id)}
           onPreview={() => onPreviewWorkflow(workflowPreviewFromApproval(approval))}
+          onTogglePin={() => onToggleWorkflowPin("approval", approval.id)}
         />
       ) : null}
       {activeTab === "Tasks" && task ? (
@@ -5603,9 +5747,11 @@ function DetailPanel({
           title={task.title}
           detail={`${task.owner} / ${task.status} / ${task.source}`}
           originalText={task.originalText}
+          isPinned={Boolean(task.pinned)}
           canEdit={canEdit}
           onDelete={() => onDeleteTask(task.id)}
           onPreview={() => onPreviewWorkflow(workflowPreviewFromTask(task))}
+          onTogglePin={() => onToggleWorkflowPin("task", task.id)}
         />
       ) : null}
       {activeTab === "Prompts" ? <PromptMetadata canEdit={canEdit} prompts={prompts} scopeContextLabel={scopeContextLabel} onUsePrompt={onUsePrompt} /> : null}
@@ -5651,18 +5797,22 @@ function WorkflowMetadata({
   canEdit,
   detail,
   icon: Icon,
+  isPinned,
   label,
   onDelete,
   onPreview,
+  onTogglePin,
   originalText,
   title,
 }: {
   canEdit: boolean;
   detail: string;
   icon: ComponentType<{ className?: string }>;
+  isPinned: boolean;
   label: string;
   onDelete: () => void;
   onPreview: () => void;
+  onTogglePin: () => void;
   originalText?: string;
   title: string;
 }) {
@@ -5689,10 +5839,16 @@ function WorkflowMetadata({
           Preview
         </Button>
         {canEdit ? (
-          <Button type="button" variant="outline" className="ml-2 text-destructive hover:text-destructive" onClick={onDelete}>
-            <Trash2 />
-            Delete
-          </Button>
+          <>
+            <Button type="button" variant="outline" className="ml-2" onClick={onTogglePin}>
+              <Star className={cn(isPinned && "fill-warning text-warning")} />
+              {isPinned ? "Unpin" : "Pin"}
+            </Button>
+            <Button type="button" variant="outline" className="ml-2 text-destructive hover:text-destructive" onClick={onDelete}>
+              <Trash2 />
+              Delete
+            </Button>
+          </>
         ) : null}
       </CardContent>
     </Card>

@@ -84,6 +84,7 @@ export type WorkflowActionContext = {
   pendingTask?: boolean;
   pendingTaskTitle?: string;
   pendingTaskRemovalId?: string;
+  preferredSuggestionKind?: WorkflowActionKind;
   activeMode?: "Personal" | "Team" | "Org";
   activeProjectId?: string | null;
   sourceTitle?: string;
@@ -360,6 +361,9 @@ function resolveMarkdownWorkflowAction(text: string, workflowActions: WorkflowAc
   if (/\b(decision|decide|choice|blocked row|trade[- ]?off)\b/i.test(normalizedText)) return { kind: "decision", title: normalizedText };
   if (hasIdeaLanguage(normalizedText)) return { kind: "idea", title: normalizedText };
   if (hasFollowThroughLanguage(normalizedText)) return { kind: "task", title: normalizedText };
+  if (workflowActions?.preferredSuggestionKind === "idea" && isSuggestionSizedText(normalizedText)) {
+    return { kind: "idea", title: normalizedText };
+  }
   return null;
 }
 
@@ -713,6 +717,7 @@ function titleMatches(left: string, right: string) {
 function cleanActionTitle(value: string) {
   return value
     .replace(/\b(?:approval|decision|idea|task)\s*[:#]\s*[a-z0-9][\w:-]*/gi, "")
+    .replace(/^\s*(?:approval|decision|idea|task|opportunity|suggestion|improvement|enhancement)\s*:\s*/i, "")
     .replace(/\s+/g, " ")
     .replace(/^[\s:;-]+|[\s:;-]+$/g, "")
     .trim();
@@ -724,6 +729,11 @@ function hasIdeaLanguage(value: string) {
 
 function hasFollowThroughLanguage(value: string) {
   return /\b(task|todo|to do|follow[- ]?up|action item|next step|assign(?:ed)? to|owner\s*:|due\s*:|deadline|needs follow[- ]?up|requires follow[- ]?through|send|schedule|update|prepare|confirm|publish|deliver|resolve)\b/i.test(value);
+}
+
+function isSuggestionSizedText(value: string) {
+  const words = value.split(/\s+/).filter(Boolean);
+  return words.length >= 3 && words.length <= 40 && value.length <= 260;
 }
 
 function normalizeActionText(value: string) {

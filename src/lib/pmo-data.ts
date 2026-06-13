@@ -128,6 +128,7 @@ export type Decision = {
   status: "Not Completed" | "Completed";
   owner: string;
   due: string;
+  pinned?: boolean;
 };
 
 export type Approval = {
@@ -138,6 +139,7 @@ export type Approval = {
   owner: string;
   due: string;
   status: "Not Reviewed" | "Reviewing" | "Approved" | "Not Approved";
+  pinned?: boolean;
   clientStatus?: "pending";
 };
 
@@ -149,6 +151,7 @@ export type Task = {
   owner: string;
   source: string;
   status: "Open" | "Completed";
+  pinned?: boolean;
   clientStatus?: "pending";
 };
 
@@ -1658,6 +1661,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
     due: string;
     source: string | null;
     status: string;
+    pinned: boolean | number;
   }>;
   try {
     const result = await getDb()
@@ -1671,7 +1675,8 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
                 owner,
                 due,
                 source,
-                status
+                status,
+                pinned
          FROM workspace_actions`,
       )
       .all<typeof rows[number]>();
@@ -1694,6 +1699,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
         owner: row.owner,
         source: row.source || "VertexAI suggestion",
         status: row.status === "Completed" ? "Completed" : "Open",
+        pinned: Boolean(row.pinned),
       };
       workspace.tasks = [task, ...workspace.tasks.filter((item) => item.id !== task.id)];
     } else if (row.kind === "approval") {
@@ -1708,6 +1714,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
         owner: row.owner,
         due: row.due,
         status,
+        pinned: Boolean(row.pinned),
       };
       workspace.approvals = [approval, ...workspace.approvals.filter((item) => item.id !== approval.id)];
     } else {
@@ -1719,6 +1726,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
         owner: row.owner,
         due: row.due,
         status: row.status === "Completed" ? "Completed" : "Not Completed",
+        pinned: Boolean(row.pinned),
       };
       workspace.decisions = [decision, ...workspace.decisions.filter((item) => item.id !== decision.id)];
     }
@@ -1856,8 +1864,8 @@ async function persistWorkflowAction(
   await getDb()
     .prepare(
       `INSERT OR REPLACE INTO workspace_actions (
-         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       item.id,
@@ -1870,6 +1878,7 @@ async function persistWorkflowAction(
       kind === "task" ? "" : (item as Approval | Decision).due,
       kind === "task" ? (item as Task).source : null,
       item.status,
+      item.pinned ? 1 : 0,
     )
     .run();
 }
@@ -1890,6 +1899,18 @@ async function deletePersistedWorkflowAction(mode: WorkspaceMode, kind: "approva
   await getDb()
     .prepare("DELETE FROM workspace_actions WHERE id = ? AND workspace_id = ? AND kind = ?")
     .bind(id, workspaceIdForMode(mode), kind)
+    .run();
+}
+
+async function updatePersistedWorkflowActionPinned(
+  mode: WorkspaceMode,
+  kind: "approval" | "decision" | "task",
+  id: string,
+  pinned: boolean,
+) {
+  await getDb()
+    .prepare("UPDATE workspace_actions SET pinned = ? WHERE id = ? AND workspace_id = ? AND kind = ?")
+    .bind(pinned ? 1 : 0, id, workspaceIdForMode(mode), kind)
     .run();
 }
 
@@ -2140,8 +2161,7 @@ export const addIdea = createServerFn({ method: "POST" })
     };
 
     workspace.ideas = [nextIdea, ...workspace.ideas];
-    workspace.pinnedIdeaIds = [nextIdea.id, ...workspace.pinnedIdeaIds];
-    await persistIdea(mode, nextIdea, true);
+    await persistIdea(mode, nextIdea, false);
     recordActivity(workspace, "Idea added", `${nextIdea.title} entered ${workspaceModeLabel(mode)}.`);
     await recordWorkspaceMutation({
       entity: "idea",
@@ -2226,6 +2246,43 @@ export const toggleIdeaPin = createServerFn({ method: "POST" })
       mode: data.mode,
       operation: isPinned ? "unpin" : "pin",
       projectId: idea?.projectId ?? null,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
+    return mergePersistedWorkspace(clone(getMutableRoot()));
+  });
+
+export const toggleWorkflowActionPin = createServerFn({ method: "POST" })
+  .validator((data: { mode: WorkspaceMode; kind: "approval" | "decision" | "task"; id: string }) => data)
+  .handler(async ({ data }) => {
+    const user = await requireWorkspaceEditor();
+    const workspace = getMutableWorkspace(data.mode);
+    const collection = data.kind === "task"
+      ? workspace.tasks
+      : data.kind === "approval"
+        ? workspace.approvals
+        : workspace.decisions;
+    const item = collection.find((entry) => entry.id === data.id);
+    const nextPinned = !item?.pinned;
+
+    if (data.kind === "task") {
+      workspace.tasks = workspace.tasks.map((task) => task.id === data.id ? { ...task, pinned: nextPinned } : task);
+    } else if (data.kind === "approval") {
+      workspace.approvals = workspace.approvals.map((approval) => approval.id === data.id ? { ...approval, pinned: nextPinned } : approval);
+    } else {
+      workspace.decisions = workspace.decisions.map((decision) => decision.id === data.id ? { ...decision, pinned: nextPinned } : decision);
+    }
+
+    await updatePersistedWorkflowActionPinned(data.mode, data.kind, data.id, nextPinned);
+    const label = data.kind === "task" ? "Task" : data.kind === "approval" ? "Approval" : "Decision";
+    recordActivity(workspace, nextPinned ? `${label} pinned` : `${label} unpinned`, `${item?.title ?? label} workspace pin changed.`);
+    await recordWorkspaceMutation({
+      entity: data.kind,
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: nextPinned ? "pin" : "unpin",
+      projectId: item?.projectId ?? null,
       sourceClientId: user.clientId,
       sourceUserId: user.id,
     });
@@ -2859,8 +2916,7 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       thread: ["Idea captured through Vertex AI Command Center.", "Assistant prepared initial impact and follow-up fields."],
     };
     workspace.ideas = [idea, ...workspace.ideas];
-    workspace.pinnedIdeaIds = [idea.id, ...workspace.pinnedIdeaIds];
-    await persistIdea(data.mode, idea, true);
+    await persistIdea(data.mode, idea, false);
     recordActivity(workspace, "Idea created", `${idea.title} was added from VertexAI suggestions.`);
     await recordWorkspaceMutation({
       entity: "idea",

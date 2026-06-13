@@ -374,6 +374,7 @@ export const workspaceActions = sqliteTable(
     due: text("due").notNull(),
     source: text("source"),
     status: text("status").notNull(),
+    pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
   },
   (table) => ({
     workspaceKindIdx: index("workspace_actions_workspace_kind_idx").on(table.workspaceId, table.kind),
