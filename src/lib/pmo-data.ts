@@ -5,6 +5,7 @@ import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
 import { getAuth } from "@/lib/auth";
+import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import {
   xlsxBlobFromRows,
   type ExportTable,
@@ -17,6 +18,7 @@ import {
   promptTemplates,
   vertexAiModelId,
 } from "@/lib/prompts";
+import { fetchConsolidatedWebSearch } from "@/lib/rag";
 
 export type IdeaStatus = "New" | "Review" | "Pilot" | "Approved" | "Implemented" | "Blocked";
 export type TabName = "Chat" | "Ideas" | "Artifacts" | "Decisions" | "Approvals" | "Tasks" | "Prompts";
@@ -24,7 +26,7 @@ export type RailName = "Workspaces" | "Chats" | "Ideas" | "Artifacts" | "Decisio
 export type WorkspaceMode = "Personal" | "Team" | "Org";
 export type WorkspaceScope = "personal" | "team" | "org";
 export type ChatSection = "project" | "workspace";
-export type ChatReasoningLevel = "off" | "quick" | "deep" | "max";
+export type ChatReasoningLevel = "low" | "medium" | "high";
 
 export type ChatSummary = {
   id: string;
@@ -151,6 +153,21 @@ export type PmoWorkspaceState = {
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+type WebSearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+};
+
+type WebSearchTrace = {
+  enabled: boolean;
+  query: string;
+  provider: string;
+  results: WebSearchResult[];
+  error?: string;
+};
+
 export type LlmDevTrace = {
   id: string;
   timestamp: string;
@@ -160,6 +177,7 @@ export type LlmDevTrace = {
   chatTitle: string;
   mode: WorkspaceMode;
   projectId: string | null;
+  webSearch?: WebSearchTrace;
   request: {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
     max_completion_tokens: number;
@@ -286,32 +304,24 @@ type ChatReasoningProfile = {
 };
 
 export const chatReasoningProfiles: Record<ChatReasoningLevel, ChatReasoningProfile> = {
-  off: {
-    label: "Standard",
-    shortLabel: "Std",
-    maxCompletionTokens: 2_400,
+  low: {
+    label: "Low reasoning",
+    shortLabel: "Low",
+    maxCompletionTokens: 4_096,
     timeoutMs: 45_000,
     thinkingEnabled: false,
   },
-  quick: {
-    label: "Quick reasoning",
-    shortLabel: "Quick",
-    maxCompletionTokens: 8_192,
-    timeoutMs: 75_000,
-    reasoningEffort: "low",
-    thinkingEnabled: true,
-  },
-  deep: {
-    label: "Deep reasoning",
-    shortLabel: "Deep",
+  medium: {
+    label: "Medium reasoning",
+    shortLabel: "Med",
     maxCompletionTokens: 16_384,
     timeoutMs: 120_000,
     reasoningEffort: "medium",
     thinkingEnabled: true,
   },
-  max: {
-    label: "Max reasoning",
-    shortLabel: "Max",
+  high: {
+    label: "High reasoning",
+    shortLabel: "High",
     maxCompletionTokens: 32_768,
     timeoutMs: 180_000,
     reasoningEffort: "high",
@@ -319,16 +329,47 @@ export const chatReasoningProfiles: Record<ChatReasoningLevel, ChatReasoningProf
   },
 };
 
-export const chatReasoningLevels: ChatReasoningLevel[] = ["off", "quick", "deep", "max"];
+export const chatReasoningLevels: ChatReasoningLevel[] = ["low", "medium", "high"];
 
 function normalizeReasoningLevel(value: unknown): ChatReasoningLevel {
-  return typeof value === "string" && value in chatReasoningProfiles ? value as ChatReasoningLevel : "off";
+  if (value === "off" || value === "quick") return "low";
+  if (value === "deep") return "medium";
+  if (value === "max") return "high";
+  return typeof value === "string" && value in chatReasoningProfiles ? value as ChatReasoningLevel : "low";
+}
+
+function buildReasoningInstruction(level: ChatReasoningLevel) {
+  if (level === "high") {
+    return [
+      "Reasoning depth: High.",
+      "Use comprehensive analysis for non-trivial requests.",
+      "Include assumptions, relevant evidence, tradeoffs, alternatives, risks, edge cases, a recommendation, and confidence when those elements are useful.",
+      "If required information is missing, state what is missing instead of guessing.",
+    ].join(" ");
+  }
+
+  if (level === "medium") {
+    return [
+      "Reasoning depth: Medium.",
+      "Use balanced analysis for non-trivial requests.",
+      "Include key assumptions, main tradeoffs, and a practical recommendation when useful.",
+      "Keep the answer focused and avoid exhaustive coverage unless the user asks for it.",
+    ].join(" ");
+  }
+
+  return [
+    "Reasoning depth: Low.",
+    "Thinking mode is off for quicker responses.",
+    "Answer directly and concisely unless the user asks for detail.",
+  ].join(" ");
 }
 
 type CloudflareContext = {
   cloudflare?: {
     env?: {
       AI?: Ai;
+      FIRECRAWL_API_KEY?: string;
+      TAVILY_API_KEY?: string;
     };
   };
 };
@@ -922,7 +963,19 @@ async function getChatWorkspaceId(chatId: string) {
   return chat.workspaceId;
 }
 
-async function persistChatMessage(chatId: string, workspaceId: string, message: ChatMessage) {
+async function persistChatMessage({
+  chatId,
+  message,
+  mode,
+  projectId,
+  workspaceId,
+}: {
+  chatId: string;
+  workspaceId: string;
+  projectId: string | null;
+  mode: WorkspaceMode;
+  message: ChatMessage;
+}): Promise<ChatMessageInsertEvent> {
   await getDb()
     .prepare(
       "INSERT INTO chat_messages (id, chat_id, workspace_id, author, role, avatar, message_time, body, artifact_title, artifact_type, artifact_meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -942,6 +995,15 @@ async function persistChatMessage(chatId: string, workspaceId: string, message: 
       new Date().toISOString(),
     )
     .run();
+
+  return {
+    id: message.id,
+    chatId,
+    workspaceId,
+    projectId,
+    mode,
+    message,
+  };
 }
 
 async function listPersistedChatMessages(chatId: string) {
@@ -981,6 +1043,77 @@ function extractAiResponse(result: unknown) {
   return "";
 }
 
+function truncateForPrompt(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1).trim()}...` : normalized;
+}
+
+async function searchWebForPrompt(context: unknown, query: string, enabled?: boolean): Promise<WebSearchTrace> {
+  if (!enabled) {
+    return {
+      enabled: false,
+      query,
+      provider: "none",
+      results: [],
+    };
+  }
+
+  const env = (context as CloudflareContext).cloudflare?.env;
+  const firecrawlApiKey = env?.FIRECRAWL_API_KEY;
+  const tavilyApiKey = env?.TAVILY_API_KEY;
+  if (!tavilyApiKey && !firecrawlApiKey) {
+    return {
+      enabled: true,
+      query,
+      provider: "Tavily + Firecrawl",
+      results: [],
+      error: "No web search provider is configured. Set TAVILY_API_KEY and FIRECRAWL_API_KEY.",
+    };
+  }
+
+  try {
+    const consolidatedContext = await fetchConsolidatedWebSearch(query, env as unknown as Parameters<typeof fetchConsolidatedWebSearch>[1]);
+    return {
+      enabled: true,
+      query,
+      provider: "Tavily + Firecrawl",
+      results: [{
+        title: "Consolidated web context",
+        url: "",
+        snippet: truncateForPrompt(consolidatedContext, 12_000),
+        source: "Tavily + Firecrawl",
+      }],
+    };
+  } catch (error) {
+    return {
+      enabled: true,
+      query,
+      provider: "Tavily + Firecrawl",
+      results: [],
+      error: error instanceof Error ? error.message : "Hybrid web search failed.",
+    };
+  }
+}
+
+function buildWebSearchPromptContext(search: WebSearchTrace) {
+  if (!search.enabled) return null;
+  const lines = [
+    `Web search: enabled`,
+    `Provider: ${search.provider}`,
+    `Query: ${search.query}`,
+  ];
+  if (search.error) lines.push(`Search issue: ${search.error}`);
+  if (search.results.length) {
+    lines.push("Use the following consolidated web context only when it is relevant. Cite source URLs when the context includes them.");
+    search.results.forEach((result, index) => {
+      lines.push(`[${index + 1}] ${result.title}${result.url ? `\nURL: ${result.url}` : ""}\n${result.snippet}`);
+    });
+  } else {
+    lines.push("No usable web results were available. Say that live web search did not return useful results if current information is required.");
+  }
+  return lines.join("\n");
+}
+
 async function runGemmaChat({
   context,
   data,
@@ -988,12 +1121,14 @@ async function runGemmaChat({
   workspace,
 }: {
   context: unknown;
-  data: { mode: WorkspaceMode; projectId: string | null; chatId: string; chatTitle: string; text: string; reasoningLevel?: ChatReasoningLevel };
+  data: { mode: WorkspaceMode; projectId: string | null; chatId: string; chatTitle: string; text: string; reasoningLevel?: ChatReasoningLevel; webSearchEnabled?: boolean };
   existingMessages: ChatMessage[];
   workspace: ScopedWorkspaceState;
 }): Promise<{ text: string; trace: LlmDevTrace }> {
   const reasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
   const reasoningProfile = chatReasoningProfiles[reasoningLevel];
+  const webSearch = await searchWebForPrompt(context, data.text, data.webSearchEnabled);
+  const webSearchContext = buildWebSearchPromptContext(webSearch);
   const project = data.projectId
     ? await getDb()
       .prepare("SELECT name, description FROM projects WHERE id = ? LIMIT 1")
@@ -1023,12 +1158,18 @@ async function runGemmaChat({
     messages: [
       {
         role: "system" as const,
-        content: buildVertexAiSystemPrompt(),
+        content: `${buildVertexAiSystemPrompt()} ${buildReasoningInstruction(reasoningLevel)}`,
       },
       {
         role: "user" as const,
         content: `Current scoped context:\n${scopeContext}`,
       },
+      ...(webSearchContext
+        ? [{
+          role: "user" as const,
+          content: `Current web context:\n${webSearchContext}`,
+        }]
+        : []),
       ...recentMessages,
       {
         role: "user" as const,
@@ -1053,6 +1194,7 @@ async function runGemmaChat({
     chatTitle: data.chatTitle,
     mode: data.mode,
     projectId: data.projectId,
+    webSearch,
     request: requestPayload,
   };
   const ai = (context as CloudflareContext).cloudflare?.env?.AI;
@@ -1342,8 +1484,24 @@ async function requireChatContributor({
   if (!membership) throw new Error("You are not a member of this chat.");
 }
 
+function chatSyncScopeKey({
+  mode,
+  teamId,
+  userId,
+  workspaceId,
+}: {
+  mode: WorkspaceMode;
+  teamId: string | null;
+  userId: string;
+  workspaceId: string;
+}) {
+  if (mode === "Team") return `${workspaceId}:team:${teamId ?? ""}`;
+  if (mode === "Org") return `${workspaceId}:org`;
+  return `${workspaceId}:user:${userId}`;
+}
+
 export const sendChatMessage = createServerFn({ method: "POST" })
-  .validator((data: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel?: ChatReasoningLevel }) => data)
+  .validator((data: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel?: ChatReasoningLevel; webSearchEnabled?: boolean }) => data)
   .handler(async ({ context, data }): Promise<SendChatMessageResult> => {
     const user = await requireWorkspaceEditor();
     await requireChatContributor({
@@ -1389,8 +1547,32 @@ export const sendChatMessage = createServerFn({ method: "POST" })
         .bind(chatTitle, data.chatId)
         .run();
     }
-    await persistChatMessage(data.chatId, workspaceId, userMessage);
-    await persistChatMessage(data.chatId, workspaceId, response);
+    const insertedMessages = [
+      await persistChatMessage({
+        chatId: data.chatId,
+        workspaceId,
+        projectId: data.projectId,
+        mode: data.mode,
+        message: userMessage,
+      }),
+      await persistChatMessage({
+        chatId: data.chatId,
+        workspaceId,
+        projectId: data.projectId,
+        mode: data.mode,
+        message: response,
+      }),
+    ];
+    await publishChatMessageInserts(
+      (env as Env).CHAT_SYNC,
+      chatSyncScopeKey({
+        mode: data.mode,
+        teamId: data.teamId ?? null,
+        userId: user.id,
+        workspaceId,
+      }),
+      insertedMessages,
+    );
     workspace.conversations[conversationKey] = [...existingMessages, userMessage, response];
     recordActivity(workspace, "Chat response generated", `${chatTitle} updated in ${workspaceModeLabel(data.mode)}.`);
     return { workspace: clone(getMutableRoot()), llmTrace: aiResult.trace };

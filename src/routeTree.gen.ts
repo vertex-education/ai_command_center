@@ -16,6 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProfileIndexRouteImport } from './routes/profile/index'
 import { Route as ProfilePasswordRouteImport } from './routes/profile/password'
 import { Route as ProfileInvitesRouteImport } from './routes/profile/invites'
+import { Route as ApiChatEventsRouteImport } from './routes/api/chat-events'
 import { Route as ApiArtifactsRouteImport } from './routes/api/artifacts'
 import { Route as AdminUsersRouteImport } from './routes/admin/users'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
@@ -55,6 +56,11 @@ const ProfileInvitesRoute = ProfileInvitesRouteImport.update({
   path: '/invites',
   getParentRoute: () => ProfileRoute,
 } as any)
+const ApiChatEventsRoute = ApiChatEventsRouteImport.update({
+  id: '/api/chat-events',
+  path: '/api/chat-events',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiArtifactsRoute = ApiArtifactsRouteImport.update({
   id: '/api/artifacts',
   path: '/api/artifacts',
@@ -78,6 +84,7 @@ export interface FileRoutesByFullPath {
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
+  '/api/chat-events': typeof ApiChatEventsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile/': typeof ProfileIndexRoute
@@ -89,6 +96,7 @@ export interface FileRoutesByTo {
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
+  '/api/chat-events': typeof ApiChatEventsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile': typeof ProfileIndexRoute
@@ -102,6 +110,7 @@ export interface FileRoutesById {
   '/sign-in': typeof SignInRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
+  '/api/chat-events': typeof ApiChatEventsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/profile/': typeof ProfileIndexRoute
@@ -116,6 +125,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/admin/users'
     | '/api/artifacts'
+    | '/api/chat-events'
     | '/profile/invites'
     | '/profile/password'
     | '/profile/'
@@ -127,6 +137,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/admin/users'
     | '/api/artifacts'
+    | '/api/chat-events'
     | '/profile/invites'
     | '/profile/password'
     | '/profile'
@@ -139,6 +150,7 @@ export interface FileRouteTypes {
     | '/sign-in'
     | '/admin/users'
     | '/api/artifacts'
+    | '/api/chat-events'
     | '/profile/invites'
     | '/profile/password'
     | '/profile/'
@@ -152,6 +164,7 @@ export interface RootRouteChildren {
   SignInRoute: typeof SignInRoute
   AdminUsersRoute: typeof AdminUsersRoute
   ApiArtifactsRoute: typeof ApiArtifactsRoute
+  ApiChatEventsRoute: typeof ApiChatEventsRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
 }
 
@@ -206,6 +219,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileInvitesRouteImport
       parentRoute: typeof ProfileRoute
     }
+    '/api/chat-events': {
+      id: '/api/chat-events'
+      path: '/api/chat-events'
+      fullPath: '/api/chat-events'
+      preLoaderRoute: typeof ApiChatEventsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/artifacts': {
       id: '/api/artifacts'
       path: '/api/artifacts'
@@ -252,6 +272,7 @@ const rootRouteChildren: RootRouteChildren = {
   SignInRoute: SignInRoute,
   AdminUsersRoute: AdminUsersRoute,
   ApiArtifactsRoute: ApiArtifactsRoute,
+  ApiChatEventsRoute: ApiChatEventsRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
 }
 export const routeTree = rootRouteImport

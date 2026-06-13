@@ -4,26 +4,14 @@ import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
 import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
+import type { DocumentIngestionJob, ScopeLevel } from "@/lib/document-ingestion-queue";
 
-export type ScopeLevel = "org" | "team" | "personal";
+export type { ScopeLevel } from "@/lib/document-ingestion-queue";
 
 export type ArtifactUploadResult = {
   artifactId: string;
   r2Key: string;
   status: "pending";
-};
-
-export type DocumentIngestionJob = {
-  artifactId: string;
-  r2Key: string;
-  originalFilename: string;
-  mimeType: string;
-  fileSize: number;
-  scopeLevel: ScopeLevel;
-  scopeId: string;
-  projectId: string | null;
-  documentType: string;
-  customTags: string[];
 };
 
 type UploadEnv = Env & {

@@ -1,0 +1,17 @@
+- main [ref=e2]:
+  - generic [ref=e3]:
+    - generic [ref=e4]:
+      - img "Vertex Education" [ref=e5]
+      - generic [ref=e6]: Vertex AI Command Center
+      - generic [ref=e7]: Sign in with your invited account.
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - text: Email
+        - textbox "Email" [ref=e11]
+      - generic [ref=e12]:
+        - text: Password
+        - generic [ref=e13]:
+          - textbox "Password" [ref=e14]
+          - button "Show password" [ref=e15] [cursor=pointer]:
+            - img
+      - button "Sign in" [ref=e16] [cursor=pointer]

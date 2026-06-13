@@ -84,6 +84,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { authClient } from "@/lib/auth-client";
 import { getSessionSnapshot } from "@/lib/auth-workflow";
+import type { ChatMessageInsertEvent, WorkspacePresenceUser } from "@/lib/chat-sync";
 import {
   downloadChatExport,
   downloadHtmlTable,
@@ -139,6 +140,10 @@ import {
   workspaceModes,
 } from "@/lib/pmo-data";
 import {
+  chatWithScopedRag,
+  type ChatWithScopedRagCitation,
+} from "@/lib/rag";
+import {
   deleteScopedChat,
   deleteScopedProject,
   createScopedProject,
@@ -164,6 +169,7 @@ export const Route = createFileRoute("/")({
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },
+  pendingComponent: CommandCenterPageSkeleton,
   head: () => ({
     meta: [{ title: "Vertex AI Command Center" }],
   }),
@@ -196,6 +202,21 @@ const emptyScopedChatsResult: ScopedChatsResult = {
 
 const emptyChatImageSrc =
   "data:image/svg+xml,%3Csvg width='192' height='144' viewBox='0 0 192 144' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect x='18' y='25' width='156' height='94' rx='20' fill='%23F8FAFC'/%3E%3Crect x='34' y='42' width='87' height='12' rx='6' fill='%23215A96' fill-opacity='.18'/%3E%3Crect x='34' y='64' width='124' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Crect x='34' y='82' width='73' height='10' rx='5' fill='%23215A96' fill-opacity='.12'/%3E%3Ccircle cx='139' cy='51' r='17' fill='%23215A96'/%3E%3Cpath d='M139 41v20M129 51h20' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3Cpath d='M61 119l-13 17-3-22' fill='%23F8FAFC'/%3E%3Crect x='18' y='25' width='156' height='94' rx='20' stroke='%23215A96' stroke-opacity='.16' stroke-width='2'/%3E%3C/svg%3E";
+
+function appendChatMessageToScopedChats(current: ScopedChatsResult | undefined, event: ChatMessageInsertEvent) {
+  if (!current) return current;
+  const conversationKey = getConversationKey(event.mode, event.projectId, event.chatId);
+  const messages = current.conversations[conversationKey] ?? [];
+  if (messages.some((message) => message.id === event.message.id)) return current;
+
+  return {
+    ...current,
+    conversations: {
+      ...current.conversations,
+      [conversationKey]: [...messages, event.message],
+    },
+  } satisfies ScopedChatsResult;
+}
 
 type CreateChatDialogState = {
   section: ChatSection;
@@ -347,18 +368,27 @@ function PMOCommandCenter() {
   const [activeTeamId, setActiveTeamId] = useState("");
   const activeWorkspace = workspace.workspaces[activeMode];
   const selectedTeam = teams.find((team) => team.id === activeTeamId) ?? teams[0];
+  const scopedChatsQueryKey = useMemo(
+    () => ["scoped-chats", activeMode, selectedTeam?.id ?? ""] as const,
+    [activeMode, selectedTeam?.id],
+  );
   const scopedProjectsQuery = useQuery({
     queryKey: ["scoped-projects", activeMode, selectedTeam?.id ?? ""],
     queryFn: () => listMyScopedProjects({ data: { mode: activeMode, teamId: selectedTeam?.id ?? null } }),
     placeholderData: [],
   });
   const scopedChatsQuery = useQuery({
-    queryKey: ["scoped-chats", activeMode, selectedTeam?.id ?? ""],
+    queryKey: scopedChatsQueryKey,
     queryFn: () => listMyScopedChats({ data: { mode: activeMode, teamId: selectedTeam?.id ?? null } }),
     placeholderData: emptyScopedChatsResult,
   });
   const scopedProjects: ProjectSummary[] = scopedProjectsQuery.data ?? [];
   const scopedChatsData = scopedChatsQuery.data ?? emptyScopedChatsResult;
+  const isScopedWorkspaceLoading =
+    scopedProjectsQuery.isPending ||
+    scopedChatsQuery.isPending ||
+    scopedProjectsQuery.isPlaceholderData ||
+    scopedChatsQuery.isPlaceholderData;
   const scopedWorkspaceChats = scopedChatsData.workspaceChats;
   const scopedConversations = scopedChatsData.conversations;
   const visibleWorkspace = useMemo(() => {
@@ -406,14 +436,29 @@ function PMOCommandCenter() {
   const [searchTerm, setSearchTerm] = useState("");
   const [chatInput, setChatInput] = useState("");
   const [chatReasoningLevel, setChatReasoningLevel] = useState<ChatReasoningLevel>(() => {
-    if (typeof window === "undefined") return "off";
+    if (typeof window === "undefined") return "low";
     const saved = window.localStorage.getItem("vertex-chat-reasoning-level");
-    return saved && saved in chatReasoningProfiles ? saved as ChatReasoningLevel : "off";
+    if (saved === "off" || saved === "quick") return "low";
+    if (saved === "deep") return "medium";
+    if (saved === "max") return "high";
+    return saved && saved in chatReasoningProfiles ? saved as ChatReasoningLevel : "low";
   });
+  const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("vertex-chat-web-search") === "1";
+  });
+  const [presenceUsers, setPresenceUsers] = useState<WorkspacePresenceUser[]>(() => [{
+    id: session.user.id,
+    name: session.user.name || session.user.email || "You",
+    email: session.user.email,
+  }]);
   const [transientChats, setTransientChats] = useState<Record<string, ChatSummary>>({});
   const [optimisticMessages, setOptimisticMessages] = useState<Record<string, ChatMessage[]>>({});
+  const [isScopedRagStreaming, setIsScopedRagStreaming] = useState(false);
   const chatFormRef = useRef<HTMLFormElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
+  const composerHighlightTimeoutRef = useRef<number | null>(null);
+  const [isComposerHighlighted, setIsComposerHighlighted] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
@@ -442,7 +487,7 @@ function PMOCommandCenter() {
     onSuccess: invalidateWorkspace,
   });
   const sendMessageMutation = useMutation({
-    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel }) =>
+    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel; webSearchEnabled?: boolean }) =>
       sendChatMessage({ data: input }),
     onSuccess: async (result) => {
       const llmTrace = (result as { llmTrace?: LlmDevTrace | null } | undefined)?.llmTrace;
@@ -654,7 +699,8 @@ function PMOCommandCenter() {
     );
     const activeChatExists =
       (activeChatSection === "workspace" && workspaceChatExists) ||
-      (activeChatSection === "project" && Boolean(projectWithActiveChat));
+      (activeChatSection === "project" && Boolean(projectWithActiveChat)) ||
+      Boolean(transientChats[activeChatId]);
 
     if (!activeChatExists) {
       const nextWorkspaceChat = visibleWorkspace.workspaceChats[0];
@@ -677,7 +723,7 @@ function PMOCommandCenter() {
       setActiveProjectId(projectWithActiveChat.id);
     }
 
-  }, [activeChatId, activeChatSection, activeProjectId, visibleWorkspace]);
+  }, [activeChatId, activeChatSection, activeProjectId, transientChats, visibleWorkspace]);
 
   useEffect(() => {
     if (activeMode === "Team" && teams.length > 0 && !teams.some((team) => team.id === activeTeamId)) {
@@ -692,6 +738,52 @@ function PMOCommandCenter() {
   useEffect(() => {
     window.localStorage.setItem("vertex-chat-reasoning-level", chatReasoningLevel);
   }, [chatReasoningLevel]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vertex-chat-web-search", webSearchEnabled ? "1" : "0");
+  }, [webSearchEnabled]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (activeMode === "Team" && !selectedTeam) return;
+
+    setPresenceUsers([{
+      id: session.user.id,
+      name: session.user.name || session.user.email || "You",
+      email: session.user.email,
+    }]);
+    const params = new URLSearchParams({ mode: activeMode });
+    if (activeMode === "Team" && selectedTeam?.id) params.set("teamId", selectedTeam.id);
+    const events = new EventSource(`/api/chat-events?${params.toString()}`);
+
+    events.addEventListener("chat-message", (messageEvent) => {
+      try {
+        const event = JSON.parse(messageEvent.data) as ChatMessageInsertEvent;
+        queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
+          appendChatMessageToScopedChats(current, event),
+        );
+      } catch (error) {
+        console.warn("Could not apply chat sync event.", error);
+      }
+    });
+
+    events.addEventListener("presence", (presenceEvent) => {
+      try {
+        const users = JSON.parse(presenceEvent.data) as WorkspacePresenceUser[];
+        setPresenceUsers(users);
+      } catch (error) {
+        console.warn("Could not apply workspace presence event.", error);
+      }
+    });
+
+    events.addEventListener("error", () => {
+      if (events.readyState === EventSource.CLOSED) {
+        void queryClient.invalidateQueries({ queryKey: scopedChatsQueryKey });
+      }
+    });
+
+    return () => events.close();
+  }, [activeMode, queryClient, scopedChatsQueryKey, selectedTeam, session.user.email, session.user.id, session.user.name]);
 
   useEffect(() => {
     if (canEdit && activeTab === "Chat" && activeChatId) {
@@ -772,6 +864,22 @@ function PMOCommandCenter() {
     }));
   }
 
+  function appendOptimisticMessages(key: string, nextMessages: ChatMessage[]) {
+    setOptimisticMessages((messages) => ({
+      ...messages,
+      [key]: [...(messages[key] ?? []), ...nextMessages],
+    }));
+  }
+
+  function updateOptimisticMessage(key: string, messageId: string, text: string) {
+    setOptimisticMessages((messages) => ({
+      ...messages,
+      [key]: (messages[key] ?? []).map((message) =>
+        message.id === messageId ? { ...message, text } : message,
+      ),
+    }));
+  }
+
   function clearOptimisticMessages(key: string) {
     setOptimisticMessages((messages) => {
       if (!messages[key]) return messages;
@@ -823,7 +931,25 @@ function PMOCommandCenter() {
     updateToast(`${project.name} project created`);
   }
 
-  function focusChatComposer() {
+  useEffect(() => {
+    return () => {
+      if (composerHighlightTimeoutRef.current !== null) {
+        window.clearTimeout(composerHighlightTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  function focusChatComposer({ highlight = false }: { highlight?: boolean } = {}) {
+    if (highlight) {
+      setIsComposerHighlighted(true);
+      if (composerHighlightTimeoutRef.current !== null) {
+        window.clearTimeout(composerHighlightTimeoutRef.current);
+      }
+      composerHighlightTimeoutRef.current = window.setTimeout(() => {
+        setIsComposerHighlighted(false);
+        composerHighlightTimeoutRef.current = null;
+      }, 1800);
+    }
     window.setTimeout(() => chatInputRef.current?.focus(), 0);
   }
 
@@ -845,12 +971,16 @@ function PMOCommandCenter() {
       description: `AI chatbot scoped to ${contextLabel}.`,
     });
     setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
+    setOptimisticMessages((messages) => ({
+      ...messages,
+      [getConversationKey(activeMode, projectId, chat.id)]: [],
+    }));
     setActiveChatSection(section);
     setActiveChatId(chat.id);
     setActiveTab("Chat");
     setRightOpen(true);
     setChatInput("");
-    focusChatComposer();
+    focusChatComposer({ highlight: true });
     updateToast(`${chat.title} started`);
     return chat;
   }
@@ -870,6 +1000,68 @@ function PMOCommandCenter() {
       projectId: null,
       section: "workspace",
     });
+  }
+
+  async function runScopedRagStream({
+    key,
+    projectId,
+    prompt,
+    teamId,
+  }: {
+    key: string;
+    projectId: string;
+    prompt: string;
+    teamId: string;
+  }) {
+    const userMessage: ChatMessage = {
+      id: `optimistic-user-${Date.now()}`,
+      author: "You",
+      role: "user",
+      avatar: avatarAlex,
+      time: clientTimeLabel(),
+      text: prompt,
+    };
+    const assistantMessageId = `streaming-assistant-${Date.now()}`;
+    const assistantMessage: ChatMessage = {
+      id: assistantMessageId,
+      author: "VertexAI",
+      role: "assistant",
+      time: clientTimeLabel(),
+      text: "",
+    };
+    let tokenText = "";
+    let citations: ChatWithScopedRagCitation[] = [];
+    const renderStreamingText = () => {
+      const citationText = formatScopedRagCitations(citations);
+      return `${tokenText}${citationText ? `\n\n${citationText}` : ""}`.trimStart();
+    };
+
+    appendOptimisticMessages(key, [userMessage, assistantMessage]);
+    setIsScopedRagStreaming(true);
+    try {
+      const response = await chatWithScopedRag({ data: { prompt, teamId, projectId } });
+      if (!(response instanceof Response)) throw new Error("Scoped RAG did not return a streaming response.");
+      if (!response.ok) throw new Error(`Scoped RAG stream failed (${response.status}).`);
+      if (!response.body) throw new Error("Scoped RAG stream did not include a body.");
+
+      await readScopedRagSse(response.body, {
+        onCitations: (nextCitations) => {
+          citations = nextCitations;
+          updateOptimisticMessage(key, assistantMessageId, renderStreamingText());
+        },
+        onToken: (token) => {
+          tokenText += token;
+          updateOptimisticMessage(key, assistantMessageId, renderStreamingText());
+        },
+        onError: (message) => {
+          throw new Error(message);
+        },
+      });
+
+      updateOptimisticMessage(key, assistantMessageId, renderStreamingText() || "The model did not return a response.");
+    } finally {
+      setIsScopedRagStreaming(false);
+    }
   }
 
   async function handleAddProjectChat(project: ProjectSummary) {
@@ -1044,11 +1236,17 @@ function PMOCommandCenter() {
       section: createChatState.section,
     });
     setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
+    setOptimisticMessages((messages) => ({
+      ...messages,
+      [getConversationKey(activeMode, createChatState.projectId, chat.id)]: [],
+    }));
     setActiveChatSection(createChatState.section);
     setActiveChatId(chat.id);
     setCreateChatState(null);
     setActiveTab("Chat");
-    focusChatComposer();
+    setRightOpen(true);
+    setChatInput("");
+    focusChatComposer({ highlight: true });
     updateToast(`${chat.title} chat created`);
   }
 
@@ -1132,10 +1330,22 @@ function PMOCommandCenter() {
     try {
       const target = await ensureActiveChatForSubmit();
       targetConversationKey = getConversationKey(activeMode, target.projectId, target.chat.id);
-      appendOptimisticMessage(targetConversationKey, text);
       setChatInput("");
       setActiveTab("Chat");
       setRightOpen(true);
+      const teamId = activeMode === "Team" ? selectedTeam?.id ?? "" : "";
+      if (teamId && target.projectId && !webSearchEnabled) {
+        await runScopedRagStream({
+          key: targetConversationKey,
+          projectId: target.projectId,
+          prompt: text,
+          teamId,
+        });
+        updateToast("Scoped RAG response streamed");
+        return;
+      }
+
+      appendOptimisticMessage(targetConversationKey, text);
       await sendMessageMutation.mutateAsync({
         mode: activeMode,
         teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
@@ -1145,6 +1355,7 @@ function PMOCommandCenter() {
         text,
         model: "Gemma 4 26B",
         reasoningLevel: chatReasoningLevel,
+        webSearchEnabled,
       });
       clearOptimisticMessages(targetConversationKey);
       updateToast("VertexAI response added");
@@ -1207,6 +1418,7 @@ function PMOCommandCenter() {
         <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
           <Topbar
             canAdmin={session.user.role === "admin"}
+            presenceUsers={presenceUsers}
             searchTerm={searchTerm}
             userEmail={session.user.email}
             userName={session.user.name}
@@ -1243,54 +1455,62 @@ function PMOCommandCenter() {
           >
             {isWorkspaceRail ? (
               <>
-                <ProjectNav
-                  activeChatId={activeChat?.id ?? ""}
-                  activeChatSection={activeChatSection}
-                  activeMode={activeMode}
-                  activeProjectId={activeProject?.id ?? ""}
-                  canEdit={canEdit}
-                  workspace={visibleWorkspace}
-                  onAddProjectChat={handleAddProjectChat}
-                  onChatSelect={handleChatSelect}
-                  onCreateProject={handleCreateProject}
-                  onDeleteChat={handleDeleteChat}
-                  onDeleteProject={handleDeleteProject}
-                  onOpenWorkspaceChat={handleOpenWorkspaceChat}
-                  onInviteProject={handleInviteProject}
-                  onProjectSelect={handleProjectSelect}
-                  onRenameChat={handleRenameChat}
-                />
+                {isScopedWorkspaceLoading ? (
+                  <ProjectNavSkeleton />
+                ) : (
+                  <ProjectNav
+                    activeChatId={activeChat?.id ?? ""}
+                    activeChatSection={activeChatSection}
+                    activeMode={activeMode}
+                    activeProjectId={activeProject?.id ?? ""}
+                    canEdit={canEdit}
+                    workspace={visibleWorkspace}
+                    onAddProjectChat={handleAddProjectChat}
+                    onChatSelect={handleChatSelect}
+                    onCreateProject={handleCreateProject}
+                    onDeleteChat={handleDeleteChat}
+                    onDeleteProject={handleDeleteProject}
+                    onOpenWorkspaceChat={handleOpenWorkspaceChat}
+                    onInviteProject={handleInviteProject}
+                    onProjectSelect={handleProjectSelect}
+                    onRenameChat={handleRenameChat}
+                  />
+                )}
 
                 <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r">
-                  <PinnedStrip
-                    artifacts={pinnedArtifacts}
-                    ideas={pinnedIdeas}
-                    onOpenPins={() => setActiveTab("Artifacts")}
-                    onSelectArtifact={(artifact) => {
-                      setSelectedArtifactTitle(artifact.title);
-                      setPreviewArtifact(artifact);
-                    }}
-                    onSelectIdea={(idea) => {
-                      setSelectedIdeaId(idea.id);
-                      setActiveTab("Ideas");
-                      setRightOpen(true);
-                    }}
-                  />
+                  {isScopedWorkspaceLoading ? (
+                    <WorkspaceMainSkeleton />
+                  ) : (
+                    <>
+                      <PinnedStrip
+                        artifacts={pinnedArtifacts}
+                        ideas={pinnedIdeas}
+                        onOpenPins={() => setActiveTab("Artifacts")}
+                        onSelectArtifact={(artifact) => {
+                          setSelectedArtifactTitle(artifact.title);
+                          setPreviewArtifact(artifact);
+                        }}
+                        onSelectIdea={(idea) => {
+                          setSelectedIdeaId(idea.id);
+                          setActiveTab("Ideas");
+                          setRightOpen(true);
+                        }}
+                      />
 
-                  <ScopeTabs
-                    activeTab={activeTab}
-                    onTabChange={setActiveTab}
-                  />
+                      <ScopeTabs
+                        activeTab={activeTab}
+                        onTabChange={setActiveTab}
+                      />
 
-                  <section
-                    className={cn(
-                      "min-h-0 flex-1",
-                      activeTab === "Chat"
-                        ? "flex flex-col overflow-hidden"
-                        : "scrollbar-thin overflow-auto p-4 pb-32",
-                    )}
-                  >
-                    {activeTab === "Chat" ? <ChatView chatTitle={activeChat?.title} isTyping={sendMessageMutation.isPending} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
+                      <section
+                        className={cn(
+                          "min-h-0 flex-1",
+                          activeTab === "Chat"
+                            ? "flex flex-col overflow-hidden"
+                            : "scrollbar-thin overflow-auto p-4 pb-32",
+                        )}
+                      >
+                        {activeTab === "Chat" ? <ChatView chatTitle={activeChat?.title} isTyping={sendMessageMutation.isPending || isScopedRagStreaming} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
                     {activeTab === "Ideas" ? (
                       <IdeasView
                         canEdit={canEdit}
@@ -1336,23 +1556,26 @@ function PMOCommandCenter() {
                     {activeTab === "Tasks" ? (
                       <TaskView canEdit={canEdit} tasks={scopedTasks} onToggle={(id) => toggleTaskMutation.mutate(id)} />
                     ) : null}
-                    {activeTab === "Prompts" ? (
-                      <PromptView
-                        canEdit={canEdit}
-                        prompts={scopedPrompts}
-                        onUsePrompt={(prompt) => {
-                          setChatInput(prompt);
-                          setActiveTab("Chat");
-                        }}
-                      />
-                    ) : null}
-                  </section>
+                        {activeTab === "Prompts" ? (
+                          <PromptView
+                            canEdit={canEdit}
+                            prompts={scopedPrompts}
+                            onUsePrompt={(prompt) => {
+                              setChatInput(prompt);
+                              setActiveTab("Chat");
+                            }}
+                          />
+                        ) : null}
+                      </section>
+                    </>
+                  )}
 
-                  {canEdit ? (
+                  {isScopedWorkspaceLoading ? null : canEdit ? (
                     <form
                       ref={chatFormRef}
                       className={cn(
-                        "fixed inset-x-3 bottom-3 z-50 grid grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur lg:left-92 xl:left-97",
+                        "fixed inset-x-3 bottom-3 z-50 grid grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42/0.22)] backdrop-blur transition-[border-color,box-shadow] lg:left-92 xl:left-97",
+                        isComposerHighlighted && "border-primary/70 shadow-[0_18px_70px_rgb(0_56_101/0.28),0_0_0_3px_rgb(0_56_101/0.18)]",
                         rightOpen ? "lg:right-104 xl:right-106.5" : "lg:right-18 xl:right-18",
                       )}
                       onSubmit={handleSendMessage}
@@ -1383,6 +1606,35 @@ function PMOCommandCenter() {
                             </button>
                           );
                         })}
+                        <button
+                          type="button"
+                          aria-pressed={webSearchEnabled}
+                          className={cn(
+                            "ml-2 inline-flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs font-semibold transition-colors",
+                            webSearchEnabled
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+                          )}
+                          title={webSearchEnabled ? "Web search on: fetch current web context before asking VertexAI" : "Web search off: use workspace context and model knowledge only"}
+                          onClick={() => setWebSearchEnabled((enabled) => !enabled)}
+                        >
+                          <span>Web</span>
+                          <span
+                            aria-hidden="true"
+                            className={cn(
+                              "relative inline-flex h-4 w-7 items-center rounded-full transition-colors",
+                              webSearchEnabled ? "bg-primary-foreground/25" : "bg-muted",
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "block size-3 rounded-full bg-current transition-transform",
+                                webSearchEnabled ? "translate-x-3.5" : "translate-x-0.5",
+                              )}
+                            />
+                          </span>
+                          <span className="w-5 text-left">{webSearchEnabled ? "On" : "Off"}</span>
+                        </button>
                         <span className="ml-auto text-xs text-muted-foreground">
                           {chatReasoningProfiles[chatReasoningLevel].maxCompletionTokens.toLocaleString()} tokens / {Math.round(chatReasoningProfiles[chatReasoningLevel].timeoutMs / 1000)}s
                         </span>
@@ -1391,7 +1643,11 @@ function PMOCommandCenter() {
                         aria-label="Ask the PMO assistant"
                         placeholder={`Message VertexAI about ${scopeContextLabel} / ${activeChat?.title ?? "new AI chat"}`}
                         ref={chatInputRef}
-                        disabled={sendMessageMutation.isPending}
+                        className={cn(
+                          "transition-[background-color,border-color,box-shadow]",
+                          isComposerHighlighted && "border-primary bg-primary/5 shadow-[0_0_0_3px_rgb(0_56_101/0.18)]",
+                        )}
+                        disabled={sendMessageMutation.isPending || isScopedRagStreaming}
                         value={chatInput}
                         onKeyDown={handleChatInputKeyDown}
                         onChange={(event) => setChatInput(event.target.value)}
@@ -1402,7 +1658,7 @@ function PMOCommandCenter() {
                       <Button type="button" variant="outline" size="icon" aria-label="Add workspace context" onClick={() => updateToast("Workspace context added")}>
                         <Folder />
                       </Button>
-                      <Button type="button" size="icon" aria-label="Send message" disabled={sendMessageMutation.isPending || !chatInput.trim()} onClick={handleChatSubmitButton}>
+                      <Button type="button" size="icon" aria-label="Send message" disabled={sendMessageMutation.isPending || isScopedRagStreaming || !chatInput.trim()} onClick={handleChatSubmitButton}>
                         <Send />
                       </Button>
                     </form>
@@ -1419,39 +1675,43 @@ function PMOCommandCenter() {
                 </section>
 
                 {rightOpen ? (
-                  <DetailPanel
-                    activeMode={activeMode}
-                    activeTab={activeTab}
-                    activeChat={activeChat}
-                    artifact={selectedArtifact}
-                    approval={selectedApproval}
-                    canEdit={canEdit}
-                    decision={selectedDecision}
-                    idea={selectedIdea}
-                    isPinned={selectedIdea ? visibleWorkspace.pinnedIdeaIds.includes(selectedIdea.id) : false}
-                    messages={currentMessages}
-                    metrics={metrics}
-                    prompts={scopedPrompts}
-                    scopeContextLabel={scopeContextLabel}
-                    task={selectedTask}
-                    workspaceTitle={workspaceTitle}
-                    onClose={() => setRightOpen(false)}
-                    onPreviewArtifact={() => selectedArtifact && setPreviewArtifact(selectedArtifact)}
-                    onShare={() => updateToast("Share link options ready")}
-                    onStatusChange={(status) => selectedIdea && updateStatusMutation.mutate({ id: selectedIdea.id, status })}
-                    onToggleArtifactPin={() =>
-                      selectedArtifact && toggleArtifactPinMutation.mutate({ r2Key: selectedArtifact.r2Key, mode: activeMode })
-                    }
-                    onToggleIdeaPin={() => selectedIdea && toggleIdeaPinMutation.mutate(selectedIdea.id)}
-                    onUsePrompt={(prompt) => {
-                      setChatInput(prompt);
-                      setActiveTab("Chat");
-                    }}
-                    onVoteIdea={() => selectedIdea && voteIdeaMutation.mutate(selectedIdea.id)}
-                    onToggleDecision={(id) => toggleDecisionMutation.mutate(id)}
-                    onToggleApproval={(id) => toggleApprovalMutation.mutate(id)}
-                    onToggleTask={(id) => toggleTaskMutation.mutate(id)}
-                  />
+                  isScopedWorkspaceLoading ? (
+                    <DetailPanelSkeleton />
+                  ) : (
+                    <DetailPanel
+                      activeMode={activeMode}
+                      activeTab={activeTab}
+                      activeChat={activeChat}
+                      artifact={selectedArtifact}
+                      approval={selectedApproval}
+                      canEdit={canEdit}
+                      decision={selectedDecision}
+                      idea={selectedIdea}
+                      isPinned={selectedIdea ? visibleWorkspace.pinnedIdeaIds.includes(selectedIdea.id) : false}
+                      messages={currentMessages}
+                      metrics={metrics}
+                      prompts={scopedPrompts}
+                      scopeContextLabel={scopeContextLabel}
+                      task={selectedTask}
+                      workspaceTitle={workspaceTitle}
+                      onClose={() => setRightOpen(false)}
+                      onPreviewArtifact={() => selectedArtifact && setPreviewArtifact(selectedArtifact)}
+                      onShare={() => updateToast("Share link options ready")}
+                      onStatusChange={(status) => selectedIdea && updateStatusMutation.mutate({ id: selectedIdea.id, status })}
+                      onToggleArtifactPin={() =>
+                        selectedArtifact && toggleArtifactPinMutation.mutate({ r2Key: selectedArtifact.r2Key, mode: activeMode })
+                      }
+                      onToggleIdeaPin={() => selectedIdea && toggleIdeaPinMutation.mutate(selectedIdea.id)}
+                      onUsePrompt={(prompt) => {
+                        setChatInput(prompt);
+                        setActiveTab("Chat");
+                      }}
+                      onVoteIdea={() => selectedIdea && voteIdeaMutation.mutate(selectedIdea.id)}
+                      onToggleDecision={(id) => toggleDecisionMutation.mutate(id)}
+                      onToggleApproval={(id) => toggleApprovalMutation.mutate(id)}
+                      onToggleTask={(id) => toggleTaskMutation.mutate(id)}
+                    />
+                  )
                 ) : (
                   <aside className="hidden min-h-0 border-l bg-muted/35 p-2 lg:flex lg:items-start lg:justify-center">
                     <Button type="button" variant="outline" size="icon" aria-label="Open details flyout" title="Open details" onClick={() => setRightOpen(true)}>
@@ -1461,17 +1721,21 @@ function PMOCommandCenter() {
                 )}
               </>
             ) : (
+              isScopedWorkspaceLoading ? (
+                <CategoryTablePageSkeleton />
+              ) : (
                 <CategoryTablePage
                   activeMode={activeMode}
                   canEdit={canEdit}
                   rail={activeRail}
-                workspace={visibleWorkspace}
-                onUsePrompt={(prompt) => {
-                  setChatInput(prompt);
-                  setActiveRail("Workspaces");
-                  setActiveTab("Chat");
-                }}
-              />
+                  workspace={visibleWorkspace}
+                  onUsePrompt={(prompt) => {
+                    setChatInput(prompt);
+                    setActiveRail("Workspaces");
+                    setActiveTab("Chat");
+                  }}
+                />
+              )
             )}
           </div>
         </section>
@@ -1536,6 +1800,199 @@ function PMOCommandCenter() {
       <ArtifactPreviewDialog artifact={previewArtifact} onOpenChange={(open) => !open && setPreviewArtifact(null)} />
       {import.meta.env.DEV ? <LlmDevtools traces={llmTraces} /> : null}
     </main>
+  );
+}
+
+function SkeletonBlock({ className }: { className?: string }) {
+  return <div aria-hidden="true" className={cn("animate-pulse rounded-md bg-muted", className)} />;
+}
+
+function SkeletonRows({ count, className }: { count: number; className?: string }) {
+  return (
+    <>
+      {Array.from({ length: count }, (_, index) => (
+        <SkeletonBlock key={index} className={className} />
+      ))}
+    </>
+  );
+}
+
+function CommandCenterPageSkeleton() {
+  return (
+    <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
+      <div className="workspace-shadow relative grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
+        <aside className="hidden min-h-0 flex-col items-center gap-3 bg-sidebar px-2 py-5 lg:flex">
+          <SkeletonBlock className="mb-4 size-10 bg-white/80" />
+          <SkeletonRows count={4} className="size-12 bg-white/15" />
+          <div className="flex-1" />
+          <SkeletonBlock className="size-10 rounded-full bg-white/15" />
+        </aside>
+        <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
+          <header className="grid min-h-16 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(220px,1fr)_minmax(260px,360px)_auto] lg:px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <SkeletonBlock className="size-10 lg:hidden" />
+              <SkeletonBlock className="hidden h-7 w-40 sm:block" />
+              <SkeletonBlock className="h-6 w-52" />
+            </div>
+            <SkeletonBlock className="hidden h-9 lg:block" />
+            <div className="flex items-center gap-2">
+              <SkeletonBlock className="size-9" />
+              <SkeletonBlock className="hidden h-9 w-24 md:block" />
+            </div>
+          </header>
+          <section className="shrink-0 border-b bg-card px-3 py-3 lg:px-5">
+            <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <div className="space-y-2">
+                <div className="flex overflow-hidden rounded-md border">
+                  <SkeletonRows count={3} className="h-9 w-28 rounded-none" />
+                </div>
+                <SkeletonBlock className="h-4 w-48" />
+              </div>
+              <SkeletonBlock className="h-9 w-64" />
+            </div>
+          </section>
+          <div className="grid min-h-0 flex-1 bg-card lg:grid-cols-[260px_minmax(430px,1fr)_minmax(320px,380px)] xl:grid-cols-[280px_minmax(520px,1fr)_390px]">
+            <ProjectNavSkeleton />
+            <WorkspaceMainSkeleton />
+            <DetailPanelSkeleton />
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function ProjectNavSkeleton() {
+  return (
+    <aside className="scrollbar-thin hidden min-h-0 overflow-auto border-r bg-muted/40 p-3 lg:block">
+      <div className="mb-3 flex items-center justify-between px-2">
+        <SkeletonBlock className="h-4 w-32" />
+        <SkeletonBlock className="size-7" />
+      </div>
+      <div className="space-y-3">
+        {Array.from({ length: 3 }, (_, index) => (
+          <div key={index} className="space-y-2">
+            <SkeletonBlock className="h-9 w-full" />
+            <div className="ml-4 space-y-1 border-l pl-3">
+              <SkeletonBlock className="h-8 w-11/12" />
+              <SkeletonBlock className="h-8 w-9/12" />
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-5 flex items-center justify-between px-2">
+        <SkeletonBlock className="h-4 w-28" />
+        <SkeletonBlock className="size-7" />
+      </div>
+      <div className="mt-2 space-y-1">
+        <SkeletonRows count={3} className="h-9 w-full" />
+      </div>
+    </aside>
+  );
+}
+
+function WorkspaceMainSkeleton() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <section className="shrink-0 border-b bg-card px-4 py-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="space-y-2">
+            <SkeletonBlock className="h-3 w-24" />
+            <SkeletonBlock className="h-4 w-48" />
+          </div>
+          <SkeletonBlock className="h-9 w-20" />
+        </div>
+        <div className="flex gap-2 overflow-hidden">
+          <SkeletonRows count={3} className="h-24 min-w-56 flex-1" />
+        </div>
+      </section>
+      <div className="flex shrink-0 gap-1 border-b bg-card px-3 py-2">
+        <SkeletonRows count={6} className="h-9 w-24" />
+      </div>
+      <section className="min-h-0 flex-1 overflow-hidden p-4">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="space-y-2">
+            <SkeletonBlock className="h-3 w-28" />
+            <SkeletonBlock className="h-7 w-64" />
+          </div>
+          <SkeletonBlock className="h-9 w-28" />
+        </div>
+        <div className="space-y-3">
+          <SkeletonBlock className="h-11 w-full" />
+          <div className="overflow-hidden rounded-lg border bg-card">
+            <div className="grid grid-cols-4 gap-3 border-b p-3">
+              <SkeletonRows count={4} className="h-4" />
+            </div>
+            <div className="space-y-3 p-3">
+              <SkeletonRows count={6} className="h-12" />
+            </div>
+          </div>
+        </div>
+      </section>
+      <div className="mx-3 mb-3 grid shrink-0 grid-cols-[minmax(0,1fr)_38px_38px_44px] gap-2 rounded-xl border bg-card/95 p-3 shadow-[0_18px_60px_rgb(15_23_42/0.22)] lg:mx-4">
+        <SkeletonBlock className="col-span-4 h-7" />
+        <SkeletonBlock className="h-9" />
+        <SkeletonBlock className="size-9" />
+        <SkeletonBlock className="size-9" />
+        <SkeletonBlock className="size-9" />
+      </div>
+    </div>
+  );
+}
+
+function DetailPanelSkeleton() {
+  return (
+    <aside className="scrollbar-thin hidden min-h-0 overflow-auto bg-muted/35 p-4 lg:block">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="space-y-2">
+          <SkeletonBlock className="h-3 w-32" />
+          <SkeletonBlock className="h-4 w-44" />
+        </div>
+        <SkeletonBlock className="h-9 w-20" />
+      </div>
+      <div className="mb-4 grid grid-cols-2 gap-2">
+        <SkeletonRows count={4} className="h-28" />
+      </div>
+      <div className="rounded-lg border bg-card p-4">
+        <div className="mb-4 flex items-start gap-3">
+          <SkeletonBlock className="size-10" />
+          <div className="flex-1 space-y-2">
+            <SkeletonBlock className="h-4 w-24" />
+            <SkeletonBlock className="h-6 w-full" />
+          </div>
+        </div>
+        <div className="space-y-3">
+          <SkeletonBlock className="h-4 w-full" />
+          <SkeletonBlock className="h-4 w-10/12" />
+          <SkeletonBlock className="h-20 w-full" />
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+function CategoryTablePageSkeleton() {
+  return (
+    <section className="scrollbar-thin min-h-0 overflow-auto bg-background p-4">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="space-y-2">
+          <SkeletonBlock className="h-3 w-28" />
+          <SkeletonBlock className="h-7 w-72" />
+        </div>
+        <SkeletonBlock className="h-9 w-28" />
+      </div>
+      <div className="grid gap-4 lg:grid-cols-4">
+        <SkeletonRows count={4} className="h-28" />
+      </div>
+      <div className="mt-4 overflow-hidden rounded-lg border bg-card">
+        <div className="grid grid-cols-5 gap-3 border-b p-3">
+          <SkeletonRows count={5} className="h-4" />
+        </div>
+        <div className="space-y-3 p-3">
+          <SkeletonRows count={8} className="h-12" />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1723,6 +2180,7 @@ function LlmDevtoolsPaneContent({ pane, trace }: { pane: LlmDevtoolsPane; trace:
           max_completion_tokens: trace.request.max_completion_tokens,
           reasoningLevel: trace.request.reasoningLevel,
           reasoning_effort: trace.request.reasoning_effort,
+          webSearch: trace.webSearch,
           timeoutMs: trace.request.timeoutMs,
           temperature: trace.request.temperature,
         }, null, 2)}</pre>
@@ -1778,6 +2236,10 @@ function LlmTraceDiagnostics({ trace }: { trace: LlmDevTrace }) {
       <span>
         <strong className="block text-muted-foreground">Thinking chars</strong>
         {trace.diagnostics.thinkingTextChars.toLocaleString()}
+      </span>
+      <span className="sm:col-span-2">
+        <strong className="block text-muted-foreground">Web search</strong>
+        {trace.webSearch?.enabled ? `${trace.webSearch.provider}: ${trace.webSearch.results.length} result${trace.webSearch.results.length === 1 ? "" : "s"}${trace.webSearch.error ? ` (${trace.webSearch.error})` : ""}` : "Off"}
       </span>
       <span className="sm:col-span-2">
         <strong className="block text-muted-foreground">Usage</strong>
@@ -1862,6 +2324,7 @@ function PrimaryRail({
 
 function Topbar({
   canAdmin,
+  presenceUsers,
   searchTerm,
   showTokenUsage,
   userEmail,
@@ -1873,6 +2336,7 @@ function Topbar({
   onSignOut,
 }: {
   canAdmin: boolean;
+  presenceUsers: WorkspacePresenceUser[];
   searchTerm: string;
   showTokenUsage: boolean;
   userEmail: string;
@@ -1884,7 +2348,7 @@ function Topbar({
   onSignOut: () => void;
 }) {
   return (
-    <header className="grid min-h-16 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(220px,1fr)_minmax(260px,360px)_auto] lg:px-5">
+    <header className="grid min-h-16 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b bg-card px-3 lg:min-h-19.5 lg:grid-cols-[minmax(200px,1fr)_minmax(340px,460px)_auto] lg:px-5">
       <div className="flex min-w-0 items-center gap-3">
         <Button className="lg:hidden" type="button" variant="outline" size="icon" aria-label="Open menu" onClick={onMobileMenu}>
           <Menu />
@@ -1894,15 +2358,18 @@ function Topbar({
           <h1 className="truncate text-base font-semibold lg:text-xl">AI Command Center</h1>
         </div>
       </div>
-      <label className="hidden h-9 items-center gap-2 rounded-md border bg-background px-3 text-muted-foreground lg:flex">
-        <Search className="size-4" />
-        <Input
-          className="h-7 border-0 px-0 shadow-none focus-visible:ring-0"
-          placeholder="Search ideas, artifacts, owners"
-          value={searchTerm}
-          onChange={(event) => onSearchTerm(event.target.value)}
-        />
-      </label>
+      <div className="hidden min-w-0 items-center justify-end gap-3 lg:flex">
+        <WorkspacePresence users={presenceUsers} />
+        <label className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-md border bg-background px-3 text-muted-foreground">
+          <Search className="size-4" />
+          <Input
+            className="h-7 border-0 px-0 shadow-none focus-visible:ring-0"
+            placeholder="Search ideas, artifacts, owners"
+            value={searchTerm}
+            onChange={(event) => onSearchTerm(event.target.value)}
+          />
+        </label>
+      </div>
       <div className="flex items-center gap-2">
         <Button type="button" variant="outline" size="icon" aria-label="Notifications" onClick={onNotify}>
           <Bell />
@@ -1924,6 +2391,80 @@ function Topbar({
         </div>
       </div>
     </header>
+  );
+}
+
+const presenceSwatches = [
+  "border-primary/25 bg-primary text-primary-foreground",
+  "border-success/25 bg-success text-success-foreground",
+  "border-warning/25 bg-warning text-warning-foreground",
+  "border-accent-foreground/15 bg-accent text-accent-foreground",
+];
+
+function WorkspacePresence({ users }: { users: WorkspacePresenceUser[] }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const visibleUsers = users.slice(0, 3);
+  const overflowUsers = users.slice(3);
+
+  if (users.length === 0) {
+    return (
+      <div className="flex h-9 items-center gap-1" aria-label="No active workspace users">
+        <span className="size-2 rounded-full bg-muted-foreground/40" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative flex h-9 shrink-0 items-center gap-1.5" aria-label={`${users.length} active workspace user${users.length === 1 ? "" : "s"}`}>
+      <div className="flex -space-x-2">
+        {visibleUsers.map((user, index) => (
+          <WorkspacePresenceAvatar key={user.id} user={user} swatch={presenceSwatches[index % presenceSwatches.length]} />
+        ))}
+      </div>
+      {overflowUsers.length > 0 ? (
+        <>
+          <button
+            type="button"
+            className="grid h-7 min-w-7 place-items-center rounded-full border bg-background px-1.5 text-xs font-semibold text-muted-foreground shadow-xs hover:bg-accent hover:text-foreground"
+            aria-expanded={isOpen}
+            aria-haspopup="menu"
+            aria-label={`Show ${overflowUsers.length} more active user${overflowUsers.length === 1 ? "" : "s"}`}
+            onClick={() => setIsOpen((open) => !open)}
+          >
+            +{overflowUsers.length}
+          </button>
+          {isOpen ? (
+            <div className="absolute right-0 top-[calc(100%+8px)] z-50 w-64 rounded-md border bg-popover p-2 text-popover-foreground shadow-lg" role="menu">
+              <p className="px-2 pb-2 text-xs font-semibold text-muted-foreground">Also active now</p>
+              <div className="space-y-1">
+                {overflowUsers.map((user, index) => (
+                  <div key={user.id} className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm" role="menuitem">
+                    <WorkspacePresenceAvatar user={user} swatch={presenceSwatches[(index + 3) % presenceSwatches.length]} />
+                    <div className="min-w-0">
+                      <p className="truncate font-medium">{user.name}</p>
+                      {user.email ? <p className="truncate text-xs text-muted-foreground">{user.email}</p> : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function WorkspacePresenceAvatar({ user, swatch }: { user: WorkspacePresenceUser; swatch: string }) {
+  return (
+    <span className="group relative inline-grid size-7 place-items-center rounded-full border-2 border-card">
+      <span className={cn("grid size-7 place-items-center rounded-full text-[10px] font-bold shadow-xs", swatch)}>
+        {initials(user.name || user.email || "User")}
+      </span>
+      <span className="pointer-events-none absolute top-[calc(100%+8px)] z-50 max-w-48 truncate rounded-md border bg-popover px-2 py-1 text-xs font-medium text-popover-foreground opacity-0 shadow-lg transition-opacity group-hover:opacity-100">
+        {user.name}
+      </span>
+    </span>
   );
 }
 
@@ -2664,6 +3205,89 @@ function TokenUsageBadge({ usage }: { usage: MessageTokenUsage }) {
       <span>total {total}</span>
     </span>
   );
+}
+
+type ScopedRagSseHandlers = {
+  onCitations: (citations: ChatWithScopedRagCitation[]) => void;
+  onError: (message: string) => void;
+  onToken: (token: string) => void;
+};
+
+async function readScopedRagSse(stream: ReadableStream<Uint8Array>, handlers: ScopedRagSseHandlers) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const eventText of events) {
+        handleScopedRagSseEvent(eventText, handlers);
+      }
+    }
+
+    const tail = decoder.decode();
+    if (tail) buffer += tail;
+    if (buffer.trim()) handleScopedRagSseEvent(buffer, handlers);
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function handleScopedRagSseEvent(eventText: string, handlers: ScopedRagSseHandlers) {
+  const event = eventText.match(/^event:\s*(.+)$/m)?.[1]?.trim() ?? "message";
+  const data = eventText
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .join("\n");
+  if (!data) return;
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(data);
+  } catch {
+    payload = data;
+  }
+
+  if (event === "token") {
+    const token = typeof payload === "object" && payload ? (payload as { token?: unknown }).token : payload;
+    if (typeof token === "string") handlers.onToken(token);
+    return;
+  }
+
+  if (event === "citations") {
+    const citations = typeof payload === "object" && payload ? (payload as { citations?: unknown }).citations : null;
+    if (Array.isArray(citations)) handlers.onCitations(citations.filter(isScopedRagCitation));
+    return;
+  }
+
+  if (event === "error") {
+    const message = typeof payload === "object" && payload ? (payload as { message?: unknown }).message : payload;
+    handlers.onError(typeof message === "string" ? message : "Scoped RAG stream failed.");
+  }
+}
+
+function isScopedRagCitation(value: unknown): value is ChatWithScopedRagCitation {
+  if (!value || typeof value !== "object") return false;
+  const citation = value as Partial<ChatWithScopedRagCitation>;
+  return typeof citation.id === "string" && typeof citation.documentName === "string" && typeof citation.r2Key === "string";
+}
+
+function formatScopedRagCitations(citations: ChatWithScopedRagCitation[]) {
+  if (!citations.length) return "";
+  const uniqueCitations = citations.filter(
+    (citation, index, list) => list.findIndex((item) => item.r2Key === citation.r2Key) === index,
+  );
+  const rows = uniqueCitations.map((citation) => {
+    const score = citation.score === null ? "" : `, score ${citation.score.toFixed(3)}`;
+    return `- ${citation.documentName} ([r2_key: ${citation.r2Key}]${score})`;
+  });
+  return ["**Sources**", ...rows].join("\n");
 }
 
 type ParsedAssistantResponse =

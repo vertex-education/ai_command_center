@@ -39,11 +39,35 @@
 			"remote": true
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CHAT_SYNC",
+				"class_name": "ChatSyncDurableObject"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"ChatSyncDurableObject"
+			]
+		}
+	],
 	"queues": {
 		"producers": [
 			{
 				"binding": "DOCUMENT_INGESTION_QUEUE",
 				"queue": "document-ingestion-queue"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "document-ingestion-queue",
+				"max_batch_size": 5,
+				"max_batch_timeout": 30,
+				"max_retries": 3
 			}
 		]
 	},

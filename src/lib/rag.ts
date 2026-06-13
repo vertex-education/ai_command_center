@@ -2,17 +2,20 @@
 
 import { env } from "cloudflare:workers";
 import { createServerFn } from "@tanstack/react-start";
+import { setResponseStatus } from "@tanstack/react-start/server";
 import { getRequest } from "@tanstack/start-server-core";
 import { getAuth } from "@/lib/auth";
+import type { DocumentIngestionJob } from "@/lib/document-ingestion-queue";
 
 const embeddingModelId = "@cf/baai/bge-large-en-v1.5";
 const generationModelId = "@cf/google/gemma-4-26b-a4b-it";
-const maxChunkChars = 1_600;
-const chunkOverlapChars = 180;
 const embeddingBatchSize = 50;
 
 type RagEnv = Env & {
   VECTORIZE?: Vectorize;
+  DOCUMENT_INGESTION_QUEUE?: Queue<DocumentIngestionJob>;
+  FIRECRAWL_API_KEY?: string;
+  TAVILY_API_KEY?: string;
 };
 
 type AuthSession = {
@@ -32,8 +35,7 @@ export type IngestGeneratedArtifactInput = {
 export type IngestGeneratedArtifactResult = {
   r2Key: string;
   documentName: string;
-  chunkIds: string[];
-  chunkCount: number;
+  status: "queued";
 };
 
 export type ChatWithScopedRagInput = {
@@ -52,6 +54,8 @@ export type ChatWithScopedRagResult = {
   }>;
 };
 
+export type ChatWithScopedRagCitation = ChatWithScopedRagResult["citations"][number];
+
 type EmbeddingResponse = {
   data?: number[][];
 };
@@ -61,6 +65,15 @@ type DocumentChunkRow = {
   documentName: string;
   r2Key: string;
   content: string;
+};
+
+type TavilySearchPayload = {
+  answer?: unknown;
+  results?: unknown;
+};
+
+type FirecrawlSearchPayload = {
+  data?: unknown;
 };
 
 function getRuntimeEnv() {
@@ -83,6 +96,12 @@ function getVectorize() {
   const vectorize = getRuntimeEnv().VECTORIZE;
   if (!vectorize) throw new Error("Vectorize binding VECTORIZE is required for scoped RAG.");
   return vectorize;
+}
+
+function getQueue() {
+  const queue = getRuntimeEnv().DOCUMENT_INGESTION_QUEUE;
+  if (!queue) throw new Error("Queue binding DOCUMENT_INGESTION_QUEUE is required for scoped RAG.");
+  return queue;
 }
 
 function getAi() {
@@ -143,25 +162,6 @@ function contentTypeFor(fileName: string) {
   return "application/octet-stream";
 }
 
-function chunkText(rawText: string) {
-  const text = rawText.replace(/\r\n/g, "\n").trim();
-  if (!text) return [];
-
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    const hardEnd = Math.min(start + maxChunkChars, text.length);
-    const softBreak = text.lastIndexOf("\n\n", hardEnd);
-    const sentenceBreak = text.lastIndexOf(". ", hardEnd);
-    const end = softBreak > start + 500 ? softBreak : sentenceBreak > start + 500 ? sentenceBreak + 1 : hardEnd;
-    chunks.push(text.slice(start, end).trim());
-    if (end >= text.length) break;
-    start = Math.max(0, end - chunkOverlapChars);
-  }
-
-  return chunks.filter(Boolean);
-}
-
 function createR2Key(teamId: string, projectId: string, fileName: string) {
   return `rag/${teamId}/${projectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName(fileName)}`;
 }
@@ -214,6 +214,40 @@ function extractGeneratedText(result: unknown) {
   return "";
 }
 
+function extractStreamToken(payload: unknown) {
+  if (typeof payload === "string") return payload;
+  if (!payload || typeof payload !== "object") return "";
+
+  const record = payload as Record<string, unknown>;
+  for (const key of ["response", "text", "content", "output_text"]) {
+    const value = record[key];
+    if (typeof value === "string") return value;
+  }
+
+  const choices = record.choices;
+  if (Array.isArray(choices)) {
+    return choices
+      .map((choice) => {
+        if (!choice || typeof choice !== "object") return "";
+        const item = choice as Record<string, unknown>;
+        const delta = item.delta;
+        if (delta && typeof delta === "object") {
+          const content = (delta as Record<string, unknown>).content;
+          return typeof content === "string" ? content : "";
+        }
+        const message = item.message;
+        if (message && typeof message === "object") {
+          const content = (message as Record<string, unknown>).content;
+          return typeof content === "string" ? content : "";
+        }
+        return typeof item.text === "string" ? item.text : "";
+      })
+      .join("");
+  }
+
+  return "";
+}
+
 function buildContext(chunks: DocumentChunkRow[]) {
   if (chunks.length === 0) return "No scoped historical chunks were found.";
 
@@ -241,6 +275,157 @@ async function fetchChunksByIds(ids: string[]) {
   return ids.map((id) => rowsById.get(id)).filter((row): row is DocumentChunkRow => Boolean(row));
 }
 
+function sseEncode(event: string, data: unknown) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function truncateForRagPrompt(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1).trim()}...` : normalized;
+}
+
+function requiresExternalWebKnowledge(prompt: string) {
+  const normalized = prompt.toLowerCase();
+  const liveWebPatterns = [
+    /\b(today|yesterday|this week|this month|this year|currently|current|latest|recent|recently|newest|now|as of)\b/,
+    /\b(web|internet|online|search|look up|lookup|browse|google|source|sources|cite|citation)\b/,
+    /\b(news|announcement|release|released|pricing|price|stock|weather|schedule|score|law|regulation|policy)\b/,
+    /\b(202[5-9]|203\d)\b/,
+    /https?:\/\//,
+  ];
+  return liveWebPatterns.some((pattern) => pattern.test(normalized));
+}
+
+async function fetchTavilySearch(query: string, apiKey: string) {
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      search_depth: "advanced",
+      include_answer: true,
+      include_raw_content: false,
+      max_results: 5,
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Tavily search failed with HTTP ${response.status}.`);
+  return await response.json() as TavilySearchPayload;
+}
+
+async function fetchFirecrawlSearch(query: string, apiKey: string) {
+  const response = await fetch("https://api.firecrawl.dev/v1/search", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      limit: 5,
+      scrapeOptions: {
+        formats: [{ type: "markdown" }],
+      },
+    }),
+  });
+
+  if (!response.ok) throw new Error(`Firecrawl search failed with HTTP ${response.status}.`);
+  return await response.json() as FirecrawlSearchPayload;
+}
+
+function tavilySummaryFromPayload(payload: TavilySearchPayload) {
+  if (typeof payload.answer === "string" && payload.answer.trim()) return payload.answer.trim();
+  if (!Array.isArray(payload.results)) return "Tavily did not return an AI-generated summary.";
+
+  const snippets = payload.results
+    .map((item) => {
+      if (!isRecord(item)) return "";
+      const title = typeof item.title === "string" ? item.title : "";
+      const content = typeof item.content === "string" ? item.content : "";
+      const url = typeof item.url === "string" ? item.url : "";
+      return [title, url, content].filter(Boolean).join(" - ");
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+
+  return snippets.length ? snippets.join("\n") : "Tavily did not return an AI-generated summary.";
+}
+
+function firecrawlMarkdownFromPayload(payload: FirecrawlSearchPayload) {
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  const sections = rows
+    .map((item, index) => {
+      if (!isRecord(item)) return "";
+      const title = typeof item.title === "string" ? item.title : `Result ${index + 1}`;
+      const url = typeof item.url === "string" ? item.url : "";
+      const markdown = typeof item.markdown === "string"
+        ? item.markdown
+        : typeof item.content === "string"
+          ? item.content
+          : typeof item.description === "string"
+            ? item.description
+            : "";
+      if (!markdown.trim()) return "";
+      return [`### ${title}`, url ? `URL: ${url}` : "", truncateForRagPrompt(markdown, 2_400)].filter(Boolean).join("\n");
+    })
+    .filter(Boolean)
+    .slice(0, 5);
+
+  return sections.length ? sections.join("\n\n") : "Firecrawl did not return markdown content.";
+}
+
+export async function fetchConsolidatedWebSearch(query: string, env: RagEnv) {
+  const tasks: Array<Promise<{ provider: "tavily" | "firecrawl"; payload: TavilySearchPayload | FirecrawlSearchPayload }>> = [];
+
+  if (env.TAVILY_API_KEY) {
+    tasks.push(fetchTavilySearch(query, env.TAVILY_API_KEY).then((payload) => ({ provider: "tavily" as const, payload })));
+  }
+
+  if (env.FIRECRAWL_API_KEY) {
+    tasks.push(fetchFirecrawlSearch(query, env.FIRECRAWL_API_KEY).then((payload) => ({ provider: "firecrawl" as const, payload })));
+  }
+
+  if (tasks.length === 0) {
+    return "Tavily summary unavailable: TAVILY_API_KEY is not configured.\n\nDeep Dive Content\nFirecrawl markdown unavailable: FIRECRAWL_API_KEY is not configured.";
+  }
+
+  const settled = await Promise.allSettled(tasks);
+  let tavilySummary = env.TAVILY_API_KEY ? "Tavily search failed or returned no usable summary." : "Tavily summary unavailable: TAVILY_API_KEY is not configured.";
+  let firecrawlMarkdown = env.FIRECRAWL_API_KEY ? "Firecrawl search failed or returned no markdown content." : "Firecrawl markdown unavailable: FIRECRAWL_API_KEY is not configured.";
+  const issues: string[] = [];
+
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      issues.push(result.reason instanceof Error ? result.reason.message : "A web search provider failed.");
+      continue;
+    }
+
+    if (result.value.provider === "tavily") {
+      tavilySummary = tavilySummaryFromPayload(result.value.payload as TavilySearchPayload);
+    } else {
+      firecrawlMarkdown = firecrawlMarkdownFromPayload(result.value.payload as FirecrawlSearchPayload);
+    }
+  }
+
+  return [
+    "Tavily AI-Generated Summary",
+    truncateForRagPrompt(tavilySummary, 2_000),
+    "",
+    "Deep Dive Content",
+    firecrawlMarkdown,
+    issues.length ? `\nProvider issues:\n${issues.map((issue) => `- ${issue}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
   .validator((data: IngestGeneratedArtifactInput) => data)
   .handler(async ({ data }): Promise<IngestGeneratedArtifactResult> => {
@@ -263,59 +448,36 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
       },
     });
 
-    const chunks = chunkText(rawText);
-    if (chunks.length === 0) throw new Error("No text chunks were created.");
+    await getQueue().send({
+      kind: "scoped-rag-generated-artifact",
+      r2Key,
+      documentName,
+      teamId,
+      projectId,
+    });
 
-    const embeddings = await embedTexts(chunks);
-    const createdAt = new Date().toISOString();
-    const rows = chunks.map((content, index) => ({
-      id: `chunk-${crypto.randomUUID()}`,
-      content,
-      embedding: embeddings[index],
-      chunkIndex: index,
-    }));
-
-    await getVectorize().upsert(
-      rows.map((row) => ({
-        id: row.id,
-        values: row.embedding,
-        metadata: {
-          team_id: teamId,
-          project_id: projectId,
-          document_name: documentName,
-          r2_key: r2Key,
-          chunk_index: row.chunkIndex,
-        },
-      })),
-    );
-
-    await getDb().batch(
-      rows.map((row) =>
-        getDb()
-          .prepare(
-            `INSERT INTO document_chunks (id, team_id, project_id, document_name, r2_key, content, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(row.id, teamId, projectId, documentName, r2Key, row.content, createdAt),
-      ),
-    );
+    setResponseStatus(202);
 
     return {
       r2Key,
       documentName,
-      chunkIds: rows.map((row) => row.id),
-      chunkCount: rows.length,
+      status: "queued",
     };
   });
 
 export const chatWithScopedRag = createServerFn({ method: "POST" })
   .validator((data: ChatWithScopedRagInput) => data)
-  .handler(async ({ data }): Promise<ChatWithScopedRagResult> => {
+  .handler(async ({ data }): Promise<Response> => {
     const teamId = assertRequiredString(data.teamId, "Team ID");
     const projectId = assertRequiredString(data.projectId, "Project ID");
     const prompt = assertRequiredString(data.prompt, "Prompt");
 
     await requireScopedProjectAccess(teamId, projectId);
+
+    const runtimeEnv = getRuntimeEnv();
+    const webContext = requiresExternalWebKnowledge(prompt)
+      ? await fetchConsolidatedWebSearch(prompt, runtimeEnv)
+      : "";
 
     const [promptEmbedding] = await embedTexts([prompt]);
     const matches = await getVectorize().query(promptEmbedding, {
@@ -330,37 +492,97 @@ export const chatWithScopedRag = createServerFn({ method: "POST" })
     const vectorIds = matches.matches.map((match) => match.id);
     const chunks = await fetchChunksByIds(vectorIds);
     const context = buildContext(chunks);
+    const scoresById = new Map(matches.matches.map((match) => [match.id, typeof match.score === "number" ? match.score : null]));
+    const citations: ChatWithScopedRagCitation[] = chunks.map((chunk) => ({
+      id: chunk.id,
+      documentName: chunk.documentName,
+      r2Key: chunk.r2Key,
+      score: scoresById.get(chunk.id) ?? null,
+    }));
 
     const systemPrompt = [
       "You are a scoped team-project assistant.",
-      "Use only the historical chunks included below when answering questions about prior generated artifacts.",
+      webContext
+        ? "Use the real-time web context for external current facts, and use the historical chunks for prior generated artifacts."
+        : "Use only the historical chunks included below when answering questions about prior generated artifacts.",
       "Cite supporting artifact keys inline using the format [r2_key: path].",
       "If the chunks do not contain enough evidence, say that the scoped artifact history does not contain enough information.",
       "Do not invent citations, file names, paths, dates, or facts.",
       "",
+      ...(webContext ? ["Real-Time Web Context:", webContext, ""] : []),
       "Scoped historical chunks:",
       context,
     ].join("\n");
 
-    const result = await getAi().run(generationModelId, {
+    const aiStream = (await getAi().run(generationModelId, {
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: prompt },
       ],
       max_completion_tokens: 1_200,
+      stream: true,
       temperature: 0.2,
+    })) as unknown as ReadableStream<Uint8Array>;
+
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enqueue = (event: string, payload: unknown) => controller.enqueue(encoder.encode(sseEncode(event, payload)));
+        const reader = aiStream.getReader();
+        let buffer = "";
+        let fullResponse = "";
+
+        enqueue("citations", { citations });
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split("\n\n");
+            buffer = events.pop() ?? "";
+
+            for (const rawEvent of events) {
+              for (const line of rawEvent.split("\n")) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith("data:")) continue;
+                const dataLine = trimmed.slice(5).trim();
+                if (!dataLine || dataLine === "[DONE]") continue;
+
+                try {
+                  const token = extractStreamToken(JSON.parse(dataLine));
+                  if (!token) continue;
+                  fullResponse += token;
+                  enqueue("token", { token });
+                } catch {
+                  fullResponse += dataLine;
+                  enqueue("token", { token: dataLine });
+                }
+              }
+            }
+          }
+
+          const tail = decoder.decode();
+          if (tail) buffer += tail;
+          if (!fullResponse.trim()) enqueue("token", { token: "The model did not return a response." });
+          enqueue("done", { response: fullResponse.trim(), citations });
+        } catch (error) {
+          enqueue("error", { message: error instanceof Error ? error.message : "Scoped RAG stream failed." });
+        } finally {
+          reader.releaseLock();
+          controller.close();
+        }
+      },
     });
 
-    const response = extractGeneratedText(result).trim();
-    const scoresById = new Map(matches.matches.map((match) => [match.id, typeof match.score === "number" ? match.score : null]));
-
-    return {
-      response: response || "The model did not return a response.",
-      citations: chunks.map((chunk) => ({
-        id: chunk.id,
-        documentName: chunk.documentName,
-        r2Key: chunk.r2Key,
-        score: scoresById.get(chunk.id) ?? null,
-      })),
-    };
+    return new Response(stream, {
+      headers: {
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+      },
+    });
   });
