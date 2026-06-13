@@ -1,4 +1,5 @@
 export const vertexAiModelId = "@cf/google/gemma-4-26b-a4b-it";
+export const lightweightChatTitleModelId = "@cf/meta/llama-3.2-1b-instruct";
 
 export const modelOptions = ["Gemma 4 26B"];
 

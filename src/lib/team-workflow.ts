@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
+import { lightweightChatTitleModelId } from "@/lib/prompts";
 import { getConversationKey, type ChatMessage, type ChatSection, type ChatSummary, type ProjectSummary, type WorkspaceMode } from "@/lib/pmo-data";
 import { getRequest } from "@tanstack/start-server-core";
 
@@ -12,6 +13,14 @@ type SessionUser = {
 
 type AuthSession = {
   user: SessionUser;
+};
+
+type CloudflareContext = {
+  cloudflare?: {
+    env?: {
+      AI?: Ai;
+    };
+  };
 };
 
 export type ScopedInviteScope = "team" | "project";
@@ -63,6 +72,15 @@ export type RenameChatInput = DeleteChatInput & {
   title: string;
 };
 
+export type BranchChatInput = DeleteChatInput & {
+  messageId: string;
+};
+
+export type BranchChatResult = {
+  chat: ChatSummary;
+  rootMessage: ChatMessage;
+};
+
 function getDb() {
   const db = (env as Env).DB;
   if (!db) throw new Error("D1 binding DB is required.");
@@ -106,6 +124,104 @@ function chatId(title: string) {
 function normalizeChatTitle(title: string) {
   const trimmed = title.trim().replace(/\s+/g, " ").slice(0, 60);
   return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
+}
+
+function branchContextTitle(messageText: string) {
+  const cleaned = messageText
+    .replace(/[`*_#>\[\](){}]/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[^a-z0-9\s&/+-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = cleaned
+    .split(" ")
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .filter((word) => word.length > 2)
+    .slice(0, 8);
+  return words.join(" ");
+}
+
+function fallbackBranchChatTitle(sourceChatTitle: string, messageText: string) {
+  const contextualTitle = branchContextTitle(messageText) || sourceChatTitle;
+  return normalizeChatTitle(`Branch: ${contextualTitle}`) || "Branch Chat";
+}
+
+function extractGeneratedText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const candidates = [
+    record.response,
+    record.text,
+    record.output_text,
+    (record.result as Record<string, unknown> | undefined)?.response,
+    (record.result as Record<string, unknown> | undefined)?.text,
+    (record.result as Record<string, unknown> | undefined)?.output_text,
+  ];
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const firstChoice = choices[0] as { message?: { content?: unknown; text?: unknown }; delta?: { content?: unknown } } | undefined;
+  candidates.push(firstChoice?.message?.content, firstChoice?.message?.text, firstChoice?.delta?.content);
+  return candidates.find((candidate): candidate is string => typeof candidate === "string" && Boolean(candidate.trim()))?.trim() ?? "";
+}
+
+function normalizeBranchGeneratedTitle(title: string, fallback: string) {
+  const cleaned = title
+    .split("\n")[0]
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/^branch\s*:\s*/i, "")
+    .replace(/^["'`]+|["'`.]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const usable = cleaned && cleaned.length >= 3 ? cleaned : fallback.replace(/^Branch:\s*/i, "");
+  return normalizeChatTitle(`Branch: ${usable}`) || fallback;
+}
+
+async function generateBranchChatTitle(context: unknown, sourceChatTitle: string, messageText: string) {
+  const fallback = fallbackBranchChatTitle(sourceChatTitle, messageText);
+  const ai = (context as CloudflareContext).cloudflare?.env?.AI ?? (env as Env & { AI?: Ai }).AI;
+  if (!ai) return fallback;
+
+  try {
+    const result = await Promise.race([
+      ai.run(lightweightChatTitleModelId, {
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Name a branched chat from the selected source message.",
+              "Return only the contextual title without the word Branch.",
+              "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+            ].join(" "),
+          },
+          { role: "user", content: messageText.slice(0, 2_000) },
+        ],
+        max_completion_tokens: 24,
+        temperature: 0.1,
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Chat title model timed out.")), 5_000);
+      }),
+    ]);
+    const generatedTitle = normalizeBranchGeneratedTitle(extractGeneratedText(result), fallback);
+    console.info("[VertexAI] Branch chat title generated", {
+      model: lightweightChatTitleModelId,
+      title: generatedTitle,
+      usedFallback: generatedTitle === fallback,
+    });
+    return generatedTitle;
+  } catch (error) {
+    console.warn("[VertexAI] Branch chat title generation fell back", {
+      model: lightweightChatTitleModelId,
+      message: error instanceof Error ? error.message : "Unknown title generation error.",
+    });
+    return fallback;
+  }
+}
+
+function branchChatDescription(messageText: string) {
+  const snippet = messageText.trim().replace(/\s+/g, " ").slice(0, 96);
+  return snippet ? `Branched from: ${snippet}` : "Branched from a selected chat message.";
 }
 
 async function getWorkspaceId(mode: WorkspaceMode) {
@@ -351,7 +467,7 @@ async function listMessagesForChats({
   const placeholders = chatScopes.map(() => "?").join(", ");
   const result = await getDb()
     .prepare(
-      `SELECT chat_id as chatId, id, author, role, avatar, message_time as time, body as text, artifact_title as artifactTitle, artifact_type as artifactType, artifact_meta as artifactMeta
+      `SELECT chat_id as chatId, id, parent_id as parentId, author, role, avatar, message_time as time, body as text, artifact_title as artifactTitle, artifact_type as artifactType, artifact_meta as artifactMeta
        FROM chat_messages
        WHERE chat_id IN (${placeholders})
        ORDER BY created_at ASC`,
@@ -360,6 +476,7 @@ async function listMessagesForChats({
     .all<{
       chatId: string;
       id: string;
+      parentId: string | null;
       author: string;
       role: "user" | "assistant" | "system";
       avatar: string | null;
@@ -377,6 +494,7 @@ async function listMessagesForChats({
     groups[key] ??= [];
     groups[key].push({
       id: message.id,
+      parentId: message.parentId ?? undefined,
       author: message.author,
       role: message.role,
       avatar: message.avatar ?? undefined,
@@ -476,6 +594,160 @@ export const createScopedChat = createServerFn({ method: "POST" })
     }
 
     return { id, title, description } satisfies ChatSummary;
+  });
+
+export const branchScopedChat = createServerFn({ method: "POST" })
+  .validator((data: BranchChatInput) => data)
+  .handler(async ({ context, data }): Promise<BranchChatResult> => {
+    const user = await requireManager();
+    if (!data.chatId) throw new Error("Chat is required.");
+    if (!data.messageId) throw new Error("Message is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before branching a team chat.");
+
+    const workspaceId = await getWorkspaceId(data.mode);
+    let sourceChat: ChatSummary | null = null;
+    if (data.section === "project") {
+      if (!data.projectId) throw new Error("Project is required.");
+      await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+      sourceChat = await getDb()
+        .prepare("SELECT id, title, description FROM chats WHERE id = ? AND workspace_id = ? AND section = 'project' AND project_id = ? LIMIT 1")
+        .bind(data.chatId, workspaceId, data.projectId)
+        .first<ChatSummary>();
+    } else if (data.mode === "Team") {
+      await requireTeamMember(user.id, data.teamId ?? "");
+      sourceChat = await getDb()
+        .prepare(
+          `SELECT c.id, c.title, c.description
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.team_id = ?
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, data.teamId ?? "")
+        .first<ChatSummary>();
+    } else {
+      sourceChat = await getDb()
+        .prepare(
+          `SELECT c.id, c.title, c.description
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.user_id = ?
+             AND cm.team_id IS NULL
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, user.id)
+        .first<ChatSummary>();
+    }
+    if (!sourceChat) throw new Error("Chat was not found.");
+
+    const sourceMessage = await getDb()
+      .prepare(
+        `SELECT id,
+                author,
+                role,
+                avatar,
+                message_time as time,
+                body as text,
+                artifact_title as artifactTitle,
+                artifact_type as artifactType,
+                artifact_meta as artifactMeta
+         FROM chat_messages
+         WHERE id = ?
+           AND chat_id = ?
+         LIMIT 1`,
+      )
+      .bind(data.messageId, data.chatId)
+      .first<{
+        id: string;
+        author: string;
+        role: "user" | "assistant" | "system";
+        avatar: string | null;
+        time: string;
+        text: string;
+        artifactTitle: string | null;
+        artifactType: "doc" | "ppt" | "sheet" | null;
+        artifactMeta: string | null;
+      }>();
+    if (!sourceMessage) throw new Error("Message was not found in this chat.");
+
+    const sort = await getDb()
+      .prepare("SELECT COALESCE(MAX(sort_order), 0) + 1 as sortOrder FROM chats WHERE workspace_id = ? AND section = ? AND ((? IS NULL AND project_id IS NULL) OR project_id = ?)")
+      .bind(workspaceId, data.section, data.projectId ?? null, data.projectId ?? null)
+      .first<{ sortOrder: number }>();
+    const title = await generateBranchChatTitle(context, sourceChat.title, sourceMessage.text);
+    const description = branchChatDescription(sourceMessage.text);
+    const nextChatId = chatId(title);
+    await getDb()
+      .prepare("INSERT INTO chats (id, workspace_id, project_id, section, title, description, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(nextChatId, workspaceId, data.section === "project" ? data.projectId : null, data.section, title, description, sort?.sortOrder ?? 1)
+      .run();
+
+    if (data.section === "workspace") {
+      await getDb()
+        .prepare("INSERT INTO chat_members (chat_id, user_id, team_id, created_at) VALUES (?, ?, ?, ?)")
+        .bind(nextChatId, data.mode === "Team" ? null : user.id, data.mode === "Team" ? data.teamId ?? null : null, Date.now())
+        .run();
+    }
+
+    const rootMessage: ChatMessage = {
+      id: `msg-branch-root-${crypto.randomUUID()}`,
+      parentId: sourceMessage.id,
+      author: sourceMessage.author,
+      role: sourceMessage.role,
+      avatar: sourceMessage.avatar ?? undefined,
+      time: sourceMessage.time,
+      text: sourceMessage.text,
+      artifact: sourceMessage.artifactTitle && sourceMessage.artifactType && sourceMessage.artifactMeta
+        ? { title: sourceMessage.artifactTitle, type: sourceMessage.artifactType, meta: sourceMessage.artifactMeta }
+        : undefined,
+    };
+    await getDb()
+      .prepare(
+        `INSERT INTO chat_messages (
+          id,
+          chat_id,
+          parent_id,
+          workspace_id,
+          author,
+          role,
+          avatar,
+          message_time,
+          body,
+          artifact_title,
+          artifact_type,
+          artifact_meta,
+          created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        rootMessage.id,
+        nextChatId,
+        sourceMessage.id,
+        workspaceId,
+        rootMessage.author,
+        rootMessage.role,
+        rootMessage.avatar ?? null,
+        rootMessage.time,
+        rootMessage.text,
+        rootMessage.artifact?.title ?? null,
+        rootMessage.artifact?.type ?? null,
+        rootMessage.artifact?.meta ?? null,
+        new Date().toISOString(),
+      )
+      .run();
+
+    return {
+      chat: { id: nextChatId, title, description },
+      rootMessage,
+    };
   });
 
 export const deleteScopedChat = createServerFn({ method: "POST" })

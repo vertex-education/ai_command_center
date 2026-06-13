@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex, type AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 
 export const user = sqliteTable(
   "user",
@@ -241,6 +241,7 @@ export const chatMessages = sqliteTable(
   {
     id: text("id").primaryKey(),
     chatId: text("chat_id").notNull().references(() => chats.id, { onDelete: "cascade" }),
+    parentId: text("parent_id").references((): AnySQLiteColumn => chatMessages.id, { onDelete: "set null" }),
     workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
     author: text("author").notNull(),
     role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
@@ -254,6 +255,7 @@ export const chatMessages = sqliteTable(
   },
   (table) => ({
     chatIdx: index("chat_messages_chat_idx").on(table.chatId, table.createdAt),
+    parentIdx: index("chat_messages_parent_idx").on(table.parentId),
     workspaceIdx: index("chat_messages_workspace_idx").on(table.workspaceId),
   }),
 );

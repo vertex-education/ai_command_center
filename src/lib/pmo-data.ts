@@ -14,6 +14,7 @@ import {
   aiUnavailableMessage,
   buildVertexAiSystemPrompt,
   emptyAiResponseMessage,
+  lightweightChatTitleModelId,
   modelOptions,
   promptTemplates,
   vertexAiModelId,
@@ -64,11 +65,13 @@ export type Idea = {
 
 export type ChatMessage = {
   id: string;
+  parentId?: string;
   author: string;
   role: "user" | "assistant" | "system";
   avatar?: string;
   time: string;
   text: string;
+  clientStatus?: "sending";
   artifact?: {
     title: string;
     meta: string;
@@ -88,7 +91,9 @@ export type Artifact = {
   href: string;
   r2Key: string;
   preview: string[];
+  previewJson?: JsonValue;
   pinnedTo: WorkspaceMode[];
+  clientStatus?: "saving";
 };
 
 export type Decision = {
@@ -151,7 +156,7 @@ export type PmoWorkspaceState = {
   workspaces: Record<WorkspaceMode, ScopedWorkspaceState>;
 };
 
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 type WebSearchResult = {
   title: string;
@@ -252,6 +257,62 @@ function conciseChatTitleFromRequest(text: string) {
   const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
   const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
   return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
+}
+
+function normalizeGeneratedChatTitle(title: string, fallback: string) {
+  const cleaned = title
+    .split("\n")[0]
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/^["'`]+|["'`.]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const usable = cleaned && cleaned.length >= 3 ? cleaned : fallback;
+  const conciseTitle = usable.length > 60 ? usable.slice(0, 57).trim() : usable;
+  return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
+}
+
+async function generateChatTitleFromInitialMessage(context: unknown, text: string) {
+  const fallback = conciseChatTitleFromRequest(text);
+  const ai = (context as CloudflareContext).cloudflare?.env?.AI;
+  if (!ai) return fallback;
+
+  try {
+    const result = await withAiTimeout(
+      (signal) => ai.run(
+        lightweightChatTitleModelId,
+        {
+          messages: [
+            {
+              role: "system",
+              content: [
+                "Name this chat from the user's initial message.",
+                "Return only a concise title, no quotes, no punctuation at the end.",
+                "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+              ].join(" "),
+            },
+            { role: "user", content: text.slice(0, 2_000) },
+          ],
+          max_completion_tokens: 24,
+          temperature: 0.1,
+        },
+        { signal },
+      ),
+      5_000,
+    );
+    const generatedTitle = normalizeGeneratedChatTitle(extractAiResponse(result), fallback);
+    console.info("[VertexAI] Chat title generated", {
+      model: lightweightChatTitleModelId,
+      title: generatedTitle,
+      usedFallback: generatedTitle === fallback,
+    });
+    return generatedTitle;
+  } catch (error) {
+    console.warn("[VertexAI] Chat title generation fell back", {
+      model: lightweightChatTitleModelId,
+      message: error instanceof Error ? error.message : "Unknown title generation error.",
+    });
+    return fallback;
+  }
 }
 
 export type AddIdeaInput = {
@@ -711,6 +772,13 @@ function buildArtifacts(mode: WorkspaceMode, project?: ProjectSummary): Artifact
       "Dummy artifact content is intentionally unique by workspace.",
       "D1 stores metadata while R2 stores the file bytes.",
     ],
+    previewJson: {
+      preview: [
+        `${project?.name ?? workspaceModeLabel(mode)}-only evidence and working notes.`,
+        "Dummy artifact content is intentionally unique by workspace.",
+        "D1 stores metadata while R2 stores the file bytes.",
+      ],
+    },
     pinnedTo: status === "Pinned" ? [mode] : [],
   }));
 }
@@ -967,6 +1035,7 @@ async function persistChatMessage({
   chatId,
   message,
   mode,
+  parentId,
   projectId,
   workspaceId,
 }: {
@@ -975,14 +1044,16 @@ async function persistChatMessage({
   projectId: string | null;
   mode: WorkspaceMode;
   message: ChatMessage;
+  parentId?: string | null;
 }): Promise<ChatMessageInsertEvent> {
   await getDb()
     .prepare(
-      "INSERT INTO chat_messages (id, chat_id, workspace_id, author, role, avatar, message_time, body, artifact_title, artifact_type, artifact_meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO chat_messages (id, chat_id, parent_id, workspace_id, author, role, avatar, message_time, body, artifact_title, artifact_type, artifact_meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(
       message.id,
       chatId,
+      message.parentId ?? parentId ?? null,
       workspaceId,
       message.author,
       message.role,
@@ -1008,12 +1079,13 @@ async function persistChatMessage({
 
 async function listPersistedChatMessages(chatId: string) {
   const result = await getDb()
-    .prepare("SELECT id, author, role, avatar, message_time as time, body as text FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC")
+    .prepare("SELECT id, parent_id as parentId, author, role, avatar, message_time as time, body as text FROM chat_messages WHERE chat_id = ? ORDER BY created_at ASC")
     .bind(chatId)
-    .all<{ id: string; author: string; role: "user" | "assistant" | "system"; avatar: string | null; time: string; text: string }>();
+    .all<{ id: string; parentId: string | null; author: string; role: "user" | "assistant" | "system"; avatar: string | null; time: string; text: string }>();
 
   return (result.results ?? []).map((message) => ({
     ...message,
+    parentId: message.parentId ?? undefined,
     avatar: message.avatar ?? undefined,
   })) satisfies ChatMessage[];
 }
@@ -1377,10 +1449,12 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
     const mode = modeByWorkspaceId.get(row.workspaceId);
     if (!mode) continue;
     let preview: string[] = [];
+    let previewJson: JsonValue | undefined;
     let projectId: string | null = null;
     let sourceChatTitle: string | undefined;
     try {
-      const parsed = JSON.parse(row.previewJson);
+      const parsed = JSON.parse(row.previewJson) as JsonValue;
+      previewJson = parsed;
       if (Array.isArray(parsed)) {
         preview = parsed.map((item) => String(item));
       } else if (parsed && typeof parsed === "object") {
@@ -1404,6 +1478,7 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
       href: artifactDownloadHref(row.r2Key, row.href),
       r2Key: row.r2Key,
       preview,
+      previewJson,
       pinnedTo: row.pinned ? [mode] : [],
     };
     const workspace = root.workspaces[mode];
@@ -1516,7 +1591,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
     const text = data.text.trim();
     if (!text) return { workspace: clone(getMutableRoot()), llmTrace: null };
     const existingMessages = await listPersistedChatMessages(data.chatId);
-    const chatTitle = existingMessages.length === 0 ? conciseChatTitleFromRequest(text) : data.chatTitle;
+    const chatTitle = existingMessages.length === 0 ? await generateChatTitleFromInitialMessage(context, text) : data.chatTitle;
 
     const userMessage: ChatMessage = {
       id: createId("msg-user"),
@@ -1733,6 +1808,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       href,
       r2Key,
       preview: ["Saved table export", fileName],
+      previewJson: buildTablePreviewJson(rows, ["Saved table export", fileName], projectId, sourceChatTitle),
       pinnedTo: [],
     };
 
@@ -1773,7 +1849,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
         artifact.summary,
         r2Key,
         href,
-        JSON.stringify({ preview: artifact.preview, projectId, sourceChatTitle }),
+        JSON.stringify(artifact.previewJson),
       )
       .run();
 
@@ -1781,6 +1857,24 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     recordActivity(workspace, "Artifact saved", `${title} saved as XLSX.`);
     return { workspace: clone(getMutableRoot()), artifact };
   });
+
+function buildTablePreviewJson(
+  rows: ExportTable["rows"],
+  preview: string[],
+  projectId: string | null,
+  sourceChatTitle: string | undefined,
+): JsonValue {
+  const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+  const dataRows = rows.slice(0, 100).map((row) => columns.map((column) => String(row[column] ?? "")));
+  return {
+    kind: "table",
+    preview,
+    projectId,
+    sourceChatTitle: sourceChatTitle ?? null,
+    columns,
+    rows: dataRows,
+  };
+}
 
 export const toggleDecisionStatus = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; id: string }) => data)

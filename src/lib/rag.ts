@@ -6,9 +6,11 @@ import { setResponseStatus } from "@tanstack/react-start/server";
 import { getRequest } from "@tanstack/start-server-core";
 import { getAuth } from "@/lib/auth";
 import type { DocumentIngestionJob } from "@/lib/document-ingestion-queue";
+import { buildVertexAiSystemPrompt } from "@/lib/prompts";
 
 const embeddingModelId = "@cf/baai/bge-large-en-v1.5";
 const generationModelId = "@cf/google/gemma-4-26b-a4b-it";
+const intentRoutingModelId = "@cf/meta/llama-3.2-1b-instruct";
 const embeddingBatchSize = 50;
 
 type RagEnv = Env & {
@@ -41,6 +43,7 @@ export type IngestGeneratedArtifactResult = {
 export type ChatWithScopedRagInput = {
   prompt: string;
   teamId: string;
+  workspaceId: string;
   projectId: string;
 };
 
@@ -67,6 +70,13 @@ type DocumentChunkRow = {
   content: string;
 };
 
+type ScopedPromptContext = {
+  workspaceName: string;
+  projectName: string;
+  projectDescription: string;
+  projectStatus: string;
+};
+
 type TavilySearchPayload = {
   answer?: unknown;
   results?: unknown;
@@ -75,6 +85,8 @@ type TavilySearchPayload = {
 type FirecrawlSearchPayload = {
   data?: unknown;
 };
+
+type PromptIntent = "RAG_SEARCH" | "DIRECT_CHAT" | "ARTIFACT_GENERATION";
 
 function getRuntimeEnv() {
   return env as RagEnv;
@@ -140,6 +152,44 @@ async function requireScopedProjectAccess(teamId: string, projectId: string) {
     .bind(projectId, teamId, userId)
     .first<{ project_id: string }>();
   if (!projectMembership) throw new Error("You are not assigned to this project.");
+}
+
+async function fetchScopedPromptContext(workspaceId: string, projectId: string) {
+  const context = await getDb()
+    .prepare(
+      `SELECT w.name as workspaceName,
+              p.name as projectName,
+              p.description as projectDescription,
+              p.status as projectStatus
+       FROM projects p
+       INNER JOIN workspaces w ON w.id = p.workspace_id
+       WHERE w.id = ?
+         AND p.id = ?
+       LIMIT 1`,
+    )
+    .bind(workspaceId, projectId)
+    .first<ScopedPromptContext>();
+
+  if (!context) throw new Error("Project was not found in the selected workspace.");
+  return context;
+}
+
+function buildScopedEnvironmentContext(context: ScopedPromptContext) {
+  return [
+    "Current Workspace Context",
+    `Workspace: ${context.workspaceName}`,
+    `Project: ${context.projectName}`,
+    `Project status: ${context.projectStatus}`,
+    `Project description: ${context.projectDescription || "No project description is recorded."}`,
+  ].join("\n");
+}
+
+function prependScopedContextToSystemPrompt(basePrompt: string, context: ScopedPromptContext) {
+  return [
+    buildScopedEnvironmentContext(context),
+    "",
+    basePrompt,
+  ].join("\n");
 }
 
 function assertRequiredString(value: string, label: string) {
@@ -248,6 +298,43 @@ function extractStreamToken(payload: unknown) {
   return "";
 }
 
+function normalizePromptIntent(value: string): PromptIntent | null {
+  const normalized = value.trim().toUpperCase().replace(/[^A-Z_]/g, "");
+  if (normalized === "RAG_SEARCH" || normalized === "DIRECT_CHAT" || normalized === "ARTIFACT_GENERATION") return normalized;
+  return null;
+}
+
+async function classifyPromptIntent(prompt: string): Promise<PromptIntent> {
+  try {
+    const result = await getAi().run(intentRoutingModelId, {
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Classify the user's latest prompt for a scoped command-center assistant.",
+            "Return exactly one label with no explanation: RAG_SEARCH, DIRECT_CHAT, or ARTIFACT_GENERATION.",
+            "Use RAG_SEARCH when the user asks about existing workspace, team, project, uploaded artifact, document, file, record, history, source, citation, or prior generated content.",
+            "Use DIRECT_CHAT for greetings, administrative questions, general conversation, planning, brainstorming, explanation, or requests that do not need scoped records.",
+            "Use ARTIFACT_GENERATION when the user asks to draft, write, create, generate, format, or produce a standalone artifact from the prompt itself.",
+            "When unsure, choose RAG_SEARCH.",
+          ].join(" "),
+        },
+        { role: "user", content: prompt },
+      ],
+      max_completion_tokens: 8,
+      temperature: 0,
+    });
+
+    const intent = normalizePromptIntent(extractGeneratedText(result));
+    return intent ?? "RAG_SEARCH";
+  } catch (error) {
+    console.warn("[ScopedRAG] Intent routing failed; falling back to RAG_SEARCH.", {
+      message: error instanceof Error ? error.message : "Unknown intent routing error.",
+    });
+    return "RAG_SEARCH";
+  }
+}
+
 function buildContext(chunks: DocumentChunkRow[]) {
   if (chunks.length === 0) return "No scoped historical chunks were found.";
 
@@ -277,6 +364,70 @@ async function fetchChunksByIds(ids: string[]) {
 
 function sseEncode(event: string, data: unknown) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+function createAiSseResponse(aiStream: ReadableStream<Uint8Array>, citations: ChatWithScopedRagCitation[]) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const enqueue = (event: string, payload: unknown) => controller.enqueue(encoder.encode(sseEncode(event, payload)));
+      const reader = aiStream.getReader();
+      let buffer = "";
+      let fullResponse = "";
+
+      enqueue("citations", { citations });
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split("\n\n");
+          buffer = events.pop() ?? "";
+
+          for (const rawEvent of events) {
+            for (const line of rawEvent.split("\n")) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
+              const dataLine = trimmed.slice(5).trim();
+              if (!dataLine || dataLine === "[DONE]") continue;
+
+              try {
+                const token = extractStreamToken(JSON.parse(dataLine));
+                if (!token) continue;
+                fullResponse += token;
+                enqueue("token", { token });
+              } catch {
+                fullResponse += dataLine;
+                enqueue("token", { token: dataLine });
+              }
+            }
+          }
+        }
+
+        const tail = decoder.decode();
+        if (tail) buffer += tail;
+        if (!fullResponse.trim()) enqueue("token", { token: "The model did not return a response." });
+        enqueue("done", { response: fullResponse.trim(), citations });
+      } catch (error) {
+        enqueue("error", { message: error instanceof Error ? error.message : "Scoped RAG stream failed." });
+      } finally {
+        reader.releaseLock();
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no",
+    },
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -469,10 +620,27 @@ export const chatWithScopedRag = createServerFn({ method: "POST" })
   .validator((data: ChatWithScopedRagInput) => data)
   .handler(async ({ data }): Promise<Response> => {
     const teamId = assertRequiredString(data.teamId, "Team ID");
+    const workspaceId = assertRequiredString(data.workspaceId, "Workspace ID");
     const projectId = assertRequiredString(data.projectId, "Project ID");
     const prompt = assertRequiredString(data.prompt, "Prompt");
 
     await requireScopedProjectAccess(teamId, projectId);
+    const scopedPromptContext = await fetchScopedPromptContext(workspaceId, projectId);
+
+    const intent = await classifyPromptIntent(prompt);
+    if (intent === "DIRECT_CHAT" || intent === "ARTIFACT_GENERATION") {
+      const aiStream = (await getAi().run(generationModelId, {
+        messages: [
+          { role: "system", content: prependScopedContextToSystemPrompt(buildVertexAiSystemPrompt(), scopedPromptContext) },
+          { role: "user", content: prompt },
+        ],
+        max_completion_tokens: 1_200,
+        stream: true,
+        temperature: 0.2,
+      })) as unknown as ReadableStream<Uint8Array>;
+
+      return createAiSseResponse(aiStream, []);
+    }
 
     const runtimeEnv = getRuntimeEnv();
     const webContext = requiresExternalWebKnowledge(prompt)
@@ -501,6 +669,8 @@ export const chatWithScopedRag = createServerFn({ method: "POST" })
     }));
 
     const systemPrompt = [
+      buildScopedEnvironmentContext(scopedPromptContext),
+      "",
       "You are a scoped team-project assistant.",
       webContext
         ? "Use the real-time web context for external current facts, and use the historical chunks for prior generated artifacts."
@@ -524,65 +694,5 @@ export const chatWithScopedRag = createServerFn({ method: "POST" })
       temperature: 0.2,
     })) as unknown as ReadableStream<Uint8Array>;
 
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const enqueue = (event: string, payload: unknown) => controller.enqueue(encoder.encode(sseEncode(event, payload)));
-        const reader = aiStream.getReader();
-        let buffer = "";
-        let fullResponse = "";
-
-        enqueue("citations", { citations });
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const events = buffer.split("\n\n");
-            buffer = events.pop() ?? "";
-
-            for (const rawEvent of events) {
-              for (const line of rawEvent.split("\n")) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                const dataLine = trimmed.slice(5).trim();
-                if (!dataLine || dataLine === "[DONE]") continue;
-
-                try {
-                  const token = extractStreamToken(JSON.parse(dataLine));
-                  if (!token) continue;
-                  fullResponse += token;
-                  enqueue("token", { token });
-                } catch {
-                  fullResponse += dataLine;
-                  enqueue("token", { token: dataLine });
-                }
-              }
-            }
-          }
-
-          const tail = decoder.decode();
-          if (tail) buffer += tail;
-          if (!fullResponse.trim()) enqueue("token", { token: "The model did not return a response." });
-          enqueue("done", { response: fullResponse.trim(), citations });
-        } catch (error) {
-          enqueue("error", { message: error instanceof Error ? error.message : "Scoped RAG stream failed." });
-        } finally {
-          reader.releaseLock();
-          controller.close();
-        }
-      },
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-      },
-    });
+    return createAiSseResponse(aiStream, citations);
   });

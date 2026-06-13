@@ -27,6 +27,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  GitBranch,
   KeyRound,
   Lightbulb,
   LogOut,
@@ -53,6 +54,7 @@ import {
   Zap,
 } from "lucide-react";
 import { ArtifactUploader } from "@/components/ArtifactUploader";
+import { ArtifactRenderer } from "@/components/ArtifactRenderer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -146,6 +148,7 @@ import {
 import {
   deleteScopedChat,
   deleteScopedProject,
+  branchScopedChat,
   createScopedProject,
   createScopedChat,
   createScopedInvite,
@@ -155,6 +158,7 @@ import {
   listMyTeams,
   type CreateChatInput,
   type CreateProjectInput,
+  type BranchChatInput,
   type DeleteChatInput,
   type DeleteProjectInput,
   type RenameChatInput,
@@ -208,14 +212,68 @@ function appendChatMessageToScopedChats(current: ScopedChatsResult | undefined, 
   const conversationKey = getConversationKey(event.mode, event.projectId, event.chatId);
   const messages = current.conversations[conversationKey] ?? [];
   if (messages.some((message) => message.id === event.message.id)) return current;
+  const reconciledMessages = event.message.role === "user"
+    ? messages.filter((message) => message.clientStatus !== "sending" || message.text !== event.message.text)
+    : messages;
 
   return {
     ...current,
     conversations: {
       ...current.conversations,
-      [conversationKey]: [...messages, event.message],
+      [conversationKey]: [...reconciledMessages, event.message],
     },
   } satisfies ScopedChatsResult;
+}
+
+function appendChatMessageToCache(current: ScopedChatsResult | undefined, conversationKey: string, message: ChatMessage) {
+  if (!current) return current;
+  const messages = current.conversations[conversationKey] ?? [];
+  return {
+    ...current,
+    conversations: {
+      ...current.conversations,
+      [conversationKey]: [...messages, message],
+    },
+  } satisfies ScopedChatsResult;
+}
+
+function updateChatMessageInCache(current: ScopedChatsResult | undefined, conversationKey: string, messageId: string, text: string) {
+  if (!current) return current;
+  return {
+    ...current,
+    conversations: {
+      ...current.conversations,
+      [conversationKey]: (current.conversations[conversationKey] ?? []).map((message) =>
+        message.id === messageId ? { ...message, text } : message,
+      ),
+    },
+  } satisfies ScopedChatsResult;
+}
+
+function removeOptimisticChatMessages(current: ScopedChatsResult | undefined, conversationKey: string) {
+  if (!current) return current;
+  return {
+    ...current,
+    conversations: {
+      ...current.conversations,
+      [conversationKey]: (current.conversations[conversationKey] ?? []).filter((message) => message.clientStatus !== "sending"),
+    },
+  } satisfies ScopedChatsResult;
+}
+
+function addArtifactToWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, artifact: Artifact) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        artifacts: [artifact, ...scopedWorkspace.artifacts.filter((item) => item.r2Key !== artifact.r2Key)],
+      },
+    },
+  } satisfies PmoWorkspaceState;
 }
 
 type CreateChatDialogState = {
@@ -453,7 +511,6 @@ function PMOCommandCenter() {
     email: session.user.email,
   }]);
   const [transientChats, setTransientChats] = useState<Record<string, ChatSummary>>({});
-  const [optimisticMessages, setOptimisticMessages] = useState<Record<string, ChatMessage[]>>({});
   const [isScopedRagStreaming, setIsScopedRagStreaming] = useState(false);
   const chatFormRef = useRef<HTMLFormElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -489,15 +546,42 @@ function PMOCommandCenter() {
   const sendMessageMutation = useMutation({
     mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel; webSearchEnabled?: boolean }) =>
       sendChatMessage({ data: input }),
+    onMutate: async (input) => {
+      const queryKey = scopedChatsQueryKey;
+      const conversationKey = getConversationKey(input.mode, input.projectId, input.chatId);
+      const optimisticMessage: ChatMessage = {
+        id: `optimistic-user-${Date.now()}`,
+        author: "You",
+        role: "user",
+        avatar: avatarAlex,
+        time: clientTimeLabel(),
+        text: input.text,
+        clientStatus: "sending",
+      };
+      await queryClient.cancelQueries({ queryKey });
+      const previousScopedChats = queryClient.getQueryData<ScopedChatsResult>(queryKey);
+      queryClient.setQueryData<ScopedChatsResult>(queryKey, (current) =>
+        appendChatMessageToCache(current ?? emptyScopedChatsResult, conversationKey, optimisticMessage),
+      );
+      return { queryKey, previousScopedChats };
+    },
     onSuccess: async (result) => {
       const llmTrace = (result as { llmTrace?: LlmDevTrace | null } | undefined)?.llmTrace;
       if (llmTrace) {
         setLlmTraces((traces) => [llmTrace, ...traces].slice(0, 20));
       }
       await invalidateWorkspace();
-      await invalidateChats();
       await invalidateProjects();
       focusChatComposer();
+    },
+    onError: (error, _input, context) => {
+      if (context?.previousScopedChats) {
+        queryClient.setQueryData(context.queryKey, context.previousScopedChats);
+      }
+      updateToast(error instanceof Error ? error.message : "Chat submission failed");
+    },
+    onSettled: async (_result, _error, _input, context) => {
+      await queryClient.invalidateQueries({ queryKey: context?.queryKey ?? ["scoped-chats"] });
     },
   });
   const updateStatusMutation = useMutation({
@@ -556,6 +640,13 @@ function PMOCommandCenter() {
     onSuccess: () => {
       void invalidateChats();
       void invalidateProjects();
+    },
+  });
+  const branchChatMutation = useMutation({
+    mutationFn: (input: BranchChatInput) => branchScopedChat({ data: input }),
+    onSuccess: async () => {
+      await invalidateChats();
+      await invalidateProjects();
     },
   });
   const deleteChatMutation = useMutation({
@@ -623,13 +714,7 @@ function PMOCommandCenter() {
     () => promptTemplates.map((prompt) => `${scopeContextLabel}: ${prompt}`),
     [scopeContextLabel],
   );
-  const persistedMessages = activeChat ? visibleWorkspace.conversations[conversationKey] ?? [] : [];
-  const pendingMessages = activeChat ? optimisticMessages[conversationKey] ?? [] : [];
-  const currentMessages = activeChat
-    ? persistedMessages.length > 0 || pendingMessages.length > 0
-      ? [...persistedMessages, ...pendingMessages]
-      : []
-    : [];
+  const currentMessages = activeChat ? visibleWorkspace.conversations[conversationKey] ?? [] : [];
 
   const selectedIdea = scopedIdeas.find((idea) => idea.id === selectedIdeaId) ?? scopedIdeas[0];
   const selectedArtifact =
@@ -849,46 +934,6 @@ function PMOCommandCenter() {
     return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }
 
-  function appendOptimisticMessage(key: string, text: string) {
-    const message: ChatMessage = {
-      id: `optimistic-${Date.now()}`,
-      author: "You",
-      role: "user",
-      avatar: avatarAlex,
-      time: clientTimeLabel(),
-      text,
-    };
-    setOptimisticMessages((messages) => ({
-      ...messages,
-      [key]: [...(messages[key] ?? []), message],
-    }));
-  }
-
-  function appendOptimisticMessages(key: string, nextMessages: ChatMessage[]) {
-    setOptimisticMessages((messages) => ({
-      ...messages,
-      [key]: [...(messages[key] ?? []), ...nextMessages],
-    }));
-  }
-
-  function updateOptimisticMessage(key: string, messageId: string, text: string) {
-    setOptimisticMessages((messages) => ({
-      ...messages,
-      [key]: (messages[key] ?? []).map((message) =>
-        message.id === messageId ? { ...message, text } : message,
-      ),
-    }));
-  }
-
-  function clearOptimisticMessages(key: string) {
-    setOptimisticMessages((messages) => {
-      if (!messages[key]) return messages;
-      const nextMessages = { ...messages };
-      delete nextMessages[key];
-      return nextMessages;
-    });
-  }
-
   function handleCreateTeam() {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
@@ -971,10 +1016,6 @@ function PMOCommandCenter() {
       description: `AI chatbot scoped to ${contextLabel}.`,
     });
     setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
-    setOptimisticMessages((messages) => ({
-      ...messages,
-      [getConversationKey(activeMode, projectId, chat.id)]: [],
-    }));
     setActiveChatSection(section);
     setActiveChatId(chat.id);
     setActiveTab("Chat");
@@ -983,6 +1024,42 @@ function PMOCommandCenter() {
     focusChatComposer({ highlight: true });
     updateToast(`${chat.title} started`);
     return chat;
+  }
+
+  async function handleBranchMessage(message: ChatMessage) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
+      return;
+    }
+    if (!activeChat) {
+      updateToast("Select a chat before branching context.");
+      return;
+    }
+    if (activeMode === "Team" && !selectedTeam) {
+      updateToast("Select a team before branching context.");
+      return;
+    }
+
+    try {
+      const result = await branchChatMutation.mutateAsync({
+        mode: activeMode,
+        teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+        projectId: scopedProjectId,
+        section: activeChatSection,
+        chatId: activeChat.id,
+        messageId: message.id,
+      });
+      setTransientChats((chats) => ({ ...chats, [result.chat.id]: result.chat }));
+      setActiveChatSection(activeChatSection);
+      setActiveChatId(result.chat.id);
+      setActiveTab("Chat");
+      setRightOpen(true);
+      setChatInput("");
+      focusChatComposer({ highlight: true });
+      updateToast(`${result.chat.title} started from selected context`);
+    } catch (error) {
+      updateToast(error instanceof Error ? error.message : "Could not branch context.");
+    }
   }
 
   async function handleOpenWorkspaceChat() {
@@ -1007,11 +1084,13 @@ function PMOCommandCenter() {
     projectId,
     prompt,
     teamId,
+    workspaceId,
   }: {
     key: string;
     projectId: string;
     prompt: string;
     teamId: string;
+    workspaceId: string;
   }) {
     const userMessage: ChatMessage = {
       id: `optimistic-user-${Date.now()}`,
@@ -1036,10 +1115,15 @@ function PMOCommandCenter() {
       return `${tokenText}${citationText ? `\n\n${citationText}` : ""}`.trimStart();
     };
 
-    appendOptimisticMessages(key, [userMessage, assistantMessage]);
+    await queryClient.cancelQueries({ queryKey: scopedChatsQueryKey });
+    const previousScopedChats = queryClient.getQueryData<ScopedChatsResult>(scopedChatsQueryKey);
+    queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) => {
+      const withUser = appendChatMessageToCache(current ?? emptyScopedChatsResult, key, userMessage);
+      return appendChatMessageToCache(withUser, key, assistantMessage);
+    });
     setIsScopedRagStreaming(true);
     try {
-      const response = await chatWithScopedRag({ data: { prompt, teamId, projectId } });
+      const response = await chatWithScopedRag({ data: { prompt, teamId, workspaceId, projectId } });
       if (!(response instanceof Response)) throw new Error("Scoped RAG did not return a streaming response.");
       if (!response.ok) throw new Error(`Scoped RAG stream failed (${response.status}).`);
       if (!response.body) throw new Error("Scoped RAG stream did not include a body.");
@@ -1047,18 +1131,27 @@ function PMOCommandCenter() {
       await readScopedRagSse(response.body, {
         onCitations: (nextCitations) => {
           citations = nextCitations;
-          updateOptimisticMessage(key, assistantMessageId, renderStreamingText());
+          queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
+            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText()),
+          );
         },
         onToken: (token) => {
           tokenText += token;
-          updateOptimisticMessage(key, assistantMessageId, renderStreamingText());
+          queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
+            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText()),
+          );
         },
         onError: (message) => {
           throw new Error(message);
         },
       });
 
-      updateOptimisticMessage(key, assistantMessageId, renderStreamingText() || "The model did not return a response.");
+      queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
+        updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText() || "The model did not return a response."),
+      );
+    } catch (error) {
+      queryClient.setQueryData(scopedChatsQueryKey, previousScopedChats ?? emptyScopedChatsResult);
+      throw error;
     } finally {
       setIsScopedRagStreaming(false);
     }
@@ -1236,10 +1329,6 @@ function PMOCommandCenter() {
       section: createChatState.section,
     });
     setTransientChats((chats) => ({ ...chats, [chat.id]: chat }));
-    setOptimisticMessages((messages) => ({
-      ...messages,
-      [getConversationKey(activeMode, createChatState.projectId, chat.id)]: [],
-    }));
     setActiveChatSection(createChatState.section);
     setActiveChatId(chat.id);
     setCreateChatState(null);
@@ -1327,6 +1416,7 @@ function PMOCommandCenter() {
     const text = chatInput.trim();
     if (!text) return;
     let targetConversationKey = "";
+    let usedSendMessageMutation = false;
     try {
       const target = await ensureActiveChatForSubmit();
       targetConversationKey = getConversationKey(activeMode, target.projectId, target.chat.id);
@@ -1340,12 +1430,13 @@ function PMOCommandCenter() {
           projectId: target.projectId,
           prompt: text,
           teamId,
+          workspaceId: `ws-${activeWorkspace.scope}`,
         });
         updateToast("Scoped RAG response streamed");
         return;
       }
 
-      appendOptimisticMessage(targetConversationKey, text);
+      usedSendMessageMutation = true;
       await sendMessageMutation.mutateAsync({
         mode: activeMode,
         teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
@@ -1357,12 +1448,17 @@ function PMOCommandCenter() {
         reasoningLevel: chatReasoningLevel,
         webSearchEnabled,
       });
-      clearOptimisticMessages(targetConversationKey);
       updateToast("VertexAI response added");
     } catch (error) {
-      if (targetConversationKey) clearOptimisticMessages(targetConversationKey);
       setChatInput(text);
-      updateToast(error instanceof Error ? error.message : "Chat submission failed");
+      if (!usedSendMessageMutation) {
+        if (targetConversationKey) {
+          queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
+            removeOptimisticChatMessages(current, targetConversationKey),
+          );
+        }
+        updateToast(error instanceof Error ? error.message : "Chat submission failed");
+      }
     }
   }
 
@@ -1510,7 +1606,17 @@ function PMOCommandCenter() {
                             : "scrollbar-thin overflow-auto p-4 pb-32",
                         )}
                       >
-                        {activeTab === "Chat" ? <ChatView chatTitle={activeChat?.title} isTyping={sendMessageMutation.isPending || isScopedRagStreaming} llmTraces={llmTraces} messages={currentMessages} showTokenUsage={showTokenUsage} /> : null}
+                        {activeTab === "Chat" ? (
+                          <ChatView
+                            canBranch={canEdit && !branchChatMutation.isPending}
+                            chatTitle={activeChat?.title}
+                            isTyping={sendMessageMutation.isPending || isScopedRagStreaming}
+                            llmTraces={llmTraces}
+                            messages={currentMessages}
+                            showTokenUsage={showTokenUsage}
+                            onBranchContext={handleBranchMessage}
+                          />
+                        ) : null}
                     {activeTab === "Ideas" ? (
                       <IdeasView
                         canEdit={canEdit}
@@ -3074,16 +3180,20 @@ function SectionHeader({
 }
 
 function ChatView({
+  canBranch,
   chatTitle,
   isTyping,
   llmTraces,
   messages,
+  onBranchContext,
   showTokenUsage,
 }: {
+  canBranch: boolean;
   chatTitle?: string;
   isTyping: boolean;
   llmTraces: LlmDevTrace[];
   messages: ChatMessage[];
+  onBranchContext: (message: ChatMessage) => void;
   showTokenUsage: boolean;
 }) {
   const messageEndRef = useRef<HTMLDivElement>(null);
@@ -3125,6 +3235,11 @@ function ChatView({
               <div className={cn("flex flex-wrap items-center gap-2 text-xs text-muted-foreground", isUser && "justify-end")}>
                 <strong className="text-sm text-foreground">{isUser ? "You" : "VertexAI"}</strong>
                 <span>{message.time}</span>
+                {message.clientStatus === "sending" ? (
+                  <span className="rounded-md border bg-background px-1.5 py-0.5 text-[11px] font-semibold uppercase text-muted-foreground">
+                    Sending
+                  </span>
+                ) : null}
                 {!isUser && showTokenUsage && tokenUsage ? <TokenUsageBadge usage={tokenUsage} /> : null}
               </div>
               <div
@@ -3133,6 +3248,7 @@ function ChatView({
                   isUser
                     ? "rounded-br-sm bg-primary text-primary-foreground"
                     : "rounded-bl-sm border bg-muted/60 text-foreground",
+                  message.clientStatus === "sending" && "opacity-75",
                 )}
               >
                 {isUser ? message.text : (
@@ -3145,6 +3261,22 @@ function ChatView({
                   />
                 )}
               </div>
+              {canBranch && message.clientStatus !== "sending" ? (
+                <div className="flex justify-start">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 gap-1 px-2 text-xs"
+                    title="Branch Context"
+                    aria-label={`Branch context from ${isUser ? "your" : "VertexAI"} message at ${message.time}`}
+                    onClick={() => onBranchContext(message)}
+                  >
+                    <GitBranch className="size-3.5" />
+                    <span>Branch Context</span>
+                  </Button>
+                </div>
+              ) : null}
               {message.artifact ? (
                 <button className="mt-2 grid min-h-14 max-w-lg grid-cols-[34px_minmax(0,1fr)_24px] items-center gap-2 rounded-md border bg-card p-2 text-left">
                   <span className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground">
@@ -3501,6 +3633,42 @@ function RenderedTableExportControls({
   const savedTablesRef = useRef(new Set<string>());
   const saveMutation = useMutation({
     mutationFn: (formData: FormData) => saveTableArtifact({ data: formData }),
+    onMutate: async (formData) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      const title = typeof formData.get("title") === "string" ? String(formData.get("title")) : "Table export";
+      const modeValue = formData.get("mode");
+      const optimisticMode = workspaceModes.includes(modeValue as WorkspaceMode) ? modeValue as WorkspaceMode : activeMode;
+      const projectIdValue = formData.get("project_id");
+      const sourceChatTitleValue = formData.get("chat_title");
+      const rowsJson = formData.get("rows_json");
+      const optimisticPreview = parsePreviewRows(typeof rowsJson === "string" ? rowsJson : "");
+      const optimisticArtifact: Artifact = {
+        projectId: typeof projectIdValue === "string" && projectIdValue ? projectIdValue : null,
+        sourceChatTitle: typeof sourceChatTitleValue === "string" && sourceChatTitleValue ? sourceChatTitleValue : undefined,
+        title,
+        type: "XLSX",
+        owner: "You",
+        date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
+        status: "Draft",
+        summary: "Saving XLSX artifact...",
+        href: "#",
+        r2Key: `optimistic-artifact-${Date.now()}`,
+        preview: ["Saving table export", title],
+        previewJson: {
+          kind: "table",
+          preview: ["Saving table export", title],
+          columns: optimisticPreview.columns,
+          rows: optimisticPreview.rows,
+        },
+        pinnedTo: [],
+        clientStatus: "saving",
+      };
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        addArtifactToWorkspaceCache(current, optimisticMode, optimisticArtifact),
+      );
+      return { previousWorkspace };
+    },
     onSuccess: async (result, formData) => {
       const tableKey = formData.get("table_key");
       if (typeof tableKey === "string") savedTablesRef.current.add(tableKey);
@@ -3510,7 +3678,8 @@ function RenderedTableExportControls({
       const title = artifact?.title ?? formData.get("title");
       onSaved(typeof title === "string" ? title : "Table export");
     },
-    onError: (error) => {
+    onError: (error, _formData, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
       onError(error instanceof Error ? error.message : "Could not save artifact.");
     },
   });
@@ -3831,14 +4000,22 @@ function ArtifactsView({
             </span>
             <span className="min-w-0">
               <strong className="block truncate">{row.original.title}</strong>
-              <em className="block text-xs not-italic text-muted-foreground">{row.original.summary}</em>
+              <em className="block text-xs not-italic text-muted-foreground">
+                {row.original.clientStatus === "saving" ? "Saving..." : row.original.summary}
+              </em>
             </span>
           </div>
         ),
       },
       { accessorKey: "type", header: "Type" },
       { accessorKey: "owner", header: "Owner" },
-      { accessorKey: "status", header: "Status" },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => row.original.clientStatus === "saving" ? (
+          <Badge variant="warning">Saving</Badge>
+        ) : row.original.status,
+      },
       {
         id: "actions",
         header: "",
@@ -3849,6 +4026,7 @@ function ArtifactsView({
               variant="ghost"
               size="icon"
               aria-label={`Preview ${row.original.title}`}
+              disabled={row.original.clientStatus === "saving"}
               onClick={(event) => {
                 event.stopPropagation();
                 onPreview(row.original);
@@ -3864,6 +4042,7 @@ function ArtifactsView({
                   size="icon"
                   aria-label={row.original.pinnedTo.includes(activeMode) ? `Unpin ${row.original.title}` : `Pin ${row.original.title}`}
                   title={row.original.pinnedTo.includes(activeMode) ? "Unpin artifact" : "Pin artifact"}
+                  disabled={row.original.clientStatus === "saving"}
                   onClick={(event) => {
                     event.stopPropagation();
                     onTogglePin(row.original);
@@ -3877,20 +4056,27 @@ function ArtifactsView({
                   size="icon"
                   aria-label={`Delete ${row.original.title}`}
                   title="Delete artifact"
+                  disabled={row.original.clientStatus === "saving"}
                   onClick={(event) => {
                     event.stopPropagation();
                     onDelete(row.original);
                   }}
                 >
-                  <Trash2 className="text-destructive" />
-                </Button>
-              </>
+                <Trash2 className="text-destructive" />
+              </Button>
+            </>
             ) : null}
-            <Button asChild variant="ghost" size="icon" aria-label={`Download ${row.original.title}`}>
-              <a href={row.original.href} download aria-label={`Download ${row.original.title}`} title={`Download ${row.original.title}`} onClick={(event) => event.stopPropagation()}>
+            {row.original.clientStatus === "saving" ? (
+              <Button type="button" variant="ghost" size="icon" aria-label={`Download ${row.original.title}`} disabled>
                 <Download />
-              </a>
-            </Button>
+              </Button>
+            ) : (
+              <Button asChild variant="ghost" size="icon" aria-label={`Download ${row.original.title}`}>
+                <a href={row.original.href} download aria-label={`Download ${row.original.title}`} title={`Download ${row.original.title}`} onClick={(event) => event.stopPropagation()}>
+                  <Download />
+                </a>
+              </Button>
+            )}
           </div>
         ),
       },
@@ -3918,7 +4104,10 @@ function ArtifactsView({
         data={artifacts}
         selectedId={selectedArtifactTitle}
         getRowId={(artifact) => artifact.title}
-        onRowClick={onSelectArtifact}
+        onRowClick={(artifact) => {
+          if (artifact.clientStatus === "saving") return;
+          onSelectArtifact(artifact);
+        }}
       />
     </div>
   );
@@ -4632,14 +4821,11 @@ function ArtifactDetail({
       </CardHeader>
       <CardContent className="space-y-4 pt-4">
         <p className="text-sm leading-6 text-muted-foreground">{artifact.summary}</p>
-        <div className="space-y-2">
-          {artifact.preview.map((item) => (
-            <div className="flex gap-2 text-sm text-muted-foreground" key={item}>
-              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" />
-              {item}
-            </div>
-          ))}
-        </div>
+        <ArtifactRenderer
+          fileType={artifact.type}
+          previewJson={artifact.previewJson}
+          fallbackPreview={artifact.preview}
+        />
         <div className="grid grid-cols-2 gap-2">
           {canEdit ? (
             <Button type="button" variant="outline" onClick={onToggleArtifactPin}>
@@ -5145,17 +5331,14 @@ function ArtifactPreviewDialog({
                   <span className="font-semibold text-foreground">Source chat</span>
                   <p className="mt-1 text-muted-foreground">{artifact.sourceChatTitle ?? "Not captured for this artifact"}</p>
                 </div>
-                <ul className="space-y-2 text-sm text-muted-foreground">
-                  {artifact.preview.map((item) => (
-                    <li className="flex gap-2" key={item}>
-                      <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-success" />
-                      {item}
-                    </li>
-                  ))}
-                </ul>
+                <ArtifactRenderer
+                  fileType={artifact.type}
+                  previewJson={artifact.previewJson}
+                  fallbackPreview={artifact.preview}
+                />
               </div>
             </div>
-            {isWorkbook ? <XlsxArtifactPreview artifact={artifact} /> : null}
+            {isWorkbook && !hasStructuredTablePreview(artifact.previewJson) ? <XlsxArtifactPreview artifact={artifact} /> : null}
             <DialogFooter className={cn(isWorkbook && "border-t px-5 py-4")}>
               <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
                 Close
@@ -5172,6 +5355,33 @@ function ArtifactPreviewDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function parsePreviewRows(rowsJson: string) {
+  try {
+    const parsed = JSON.parse(rowsJson);
+    if (!Array.isArray(parsed)) return { columns: [], rows: [] };
+    if (parsed.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+      const columns = Array.from(new Set(parsed.flatMap((row) => Object.keys(row as Record<string, unknown>))));
+      return {
+        columns,
+        rows: parsed.slice(0, 100).map((row) => columns.map((column) => String((row as Record<string, unknown>)[column] ?? ""))),
+      };
+    }
+    if (parsed.every((row) => Array.isArray(row))) {
+      const rows = parsed.map((row) => (row as unknown[]).map((cell) => String(cell ?? "")));
+      return { columns: rows[0] ?? [], rows: rows.slice(1, 101) };
+    }
+    return { columns: [], rows: [] };
+  } catch {
+    return { columns: [], rows: [] };
+  }
+}
+
+function hasStructuredTablePreview(previewJson: unknown) {
+  if (!previewJson || typeof previewJson !== "object" || Array.isArray(previewJson)) return false;
+  const record = previewJson as { rows?: unknown };
+  return Array.isArray(record.rows);
 }
 
 type XlsxPreviewSheet = {
