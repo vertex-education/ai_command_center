@@ -41,7 +41,7 @@ type AuthSession = {
 };
 
 type AuthorizationRole = "admin" | "user" | "viewer";
-type StreamReasoningLevel = "low" | "medium" | "high";
+export type StreamReasoningLevel = "low" | "medium" | "high";
 
 type ScopedAccessContext = InferenceAuthorizationContext & {
   userId: string;
@@ -49,7 +49,7 @@ type ScopedAccessContext = InferenceAuthorizationContext & {
   teamId: string | null;
 };
 
-type StreamContextBudget = {
+export type StreamContextBudget = {
   asanaMaxChars: number;
   maxCompletionTokens: number;
   maxContextTokens: number;
@@ -165,12 +165,12 @@ type StreamTracePayload = {
   };
 };
 
-type TavilySearchPayload = {
+export type TavilySearchPayload = {
   answer?: unknown;
   results?: unknown;
 };
 
-type FirecrawlSearchPayload = {
+export type FirecrawlSearchPayload = {
   data?: unknown;
 };
 
@@ -339,18 +339,18 @@ function prependScopedAuthorizationToSystemPrompt(basePrompt: string, authorizat
   return prependInferenceAuthorizationDirective(basePrompt, authorization);
 }
 
-function assertRequiredString(value: string, label: string) {
+export function assertRequiredString(value: string, label: string) {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`${label} is required.`);
   return trimmed;
 }
 
-function safeFileName(fileName: string) {
+export function safeFileName(fileName: string) {
   const normalized = fileName.trim().replace(/\\/g, "/").split("/").pop() ?? "artifact.md";
   return normalized.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-|-$/g, "") || "artifact.md";
 }
 
-function contentTypeFor(fileName: string) {
+export function contentTypeFor(fileName: string) {
   const lower = fileName.toLowerCase();
   if (lower.endsWith(".md")) return "text/markdown; charset=utf-8";
   if (lower.endsWith(".txt")) return "text/plain; charset=utf-8";
@@ -359,11 +359,11 @@ function contentTypeFor(fileName: string) {
   return "application/octet-stream";
 }
 
-function createR2Key(teamId: string, projectId: string, fileName: string) {
+export function createR2Key(teamId: string, projectId: string, fileName: string) {
   return `rag/${teamId}/${projectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName(fileName)}`;
 }
 
-function normalizeSensitivityLabel(value: string | undefined, restricted: boolean | undefined) {
+export function normalizeSensitivityLabel(value: string | undefined, restricted: boolean | undefined) {
   if (restricted) return "Confidential";
   return value === "Confidential" ? "Confidential" : "Standard";
 }
@@ -1117,12 +1117,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function truncateForRagPrompt(value: string, maxLength: number) {
+export function truncateForRagPrompt(value: string, maxLength: number) {
   const normalized = value.replace(/\s+/g, " ").trim();
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1).trim()}...` : normalized;
 }
 
-function normalizeStreamReasoningLevel(value: unknown): StreamReasoningLevel {
+export function normalizeStreamReasoningLevel(value: unknown): StreamReasoningLevel {
   return value === "medium" || value === "high" ? value : "low";
 }
 
@@ -1178,7 +1178,7 @@ function higherReasoningLabel(level: StreamReasoningLevel) {
   return "an admin-approved larger context limit";
 }
 
-function createTextSseResponse(message: string, citations: ChatWithScopedRagCitation[] = []) {
+export function createTextSseResponse(message: string, citations: ChatWithScopedRagCitation[] = []) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -1199,7 +1199,7 @@ function createTextSseResponse(message: string, citations: ChatWithScopedRagCita
   });
 }
 
-function applyContextBudgets({
+export function applyContextBudgets({
   asanaContext,
   budget,
   historicalContext,
@@ -1310,7 +1310,7 @@ async function fetchFirecrawlSearch(query: string, apiKey: string) {
   }, webSearchTimeoutMs, "Firecrawl");
 }
 
-function tavilySummaryFromPayload(payload: TavilySearchPayload) {
+export function tavilySummaryFromPayload(payload: TavilySearchPayload) {
   if (typeof payload.answer === "string" && payload.answer.trim()) return payload.answer.trim();
   if (!Array.isArray(payload.results)) return "Tavily did not return an AI-generated summary.";
 
@@ -1328,7 +1328,7 @@ function tavilySummaryFromPayload(payload: TavilySearchPayload) {
   return snippets.length ? snippets.join("\n") : "Tavily did not return an AI-generated summary.";
 }
 
-function firecrawlMarkdownFromPayload(payload: FirecrawlSearchPayload) {
+export function firecrawlMarkdownFromPayload(payload: FirecrawlSearchPayload) {
   const rows = Array.isArray(payload.data) ? payload.data : [];
   const sections = rows
     .map((item, index) => {

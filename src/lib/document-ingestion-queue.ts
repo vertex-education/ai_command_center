@@ -184,7 +184,7 @@ function splitOversizedSection(section: string) {
   return chunks;
 }
 
-function chunkText(rawText: string) {
+export function chunkText(rawText: string) {
   const text = rawText.replace(/\r\n/g, "\n").trim();
   if (!text) return [];
 
@@ -257,16 +257,16 @@ async function embedTexts(
   return embeddings;
 }
 
-function customTagsIndexValue(customTags: string[]) {
+export function customTagsIndexValue(customTags: string[]) {
   return customTags.map((tag) => tag.trim().toLowerCase()).filter(Boolean).join(",");
 }
 
-function isConfidentialTag(value: string) {
+export function isConfidentialTag(value: string) {
   const normalized = value.trim().toLowerCase();
-  return normalized === "confidential" || normalized === "restricted";
+  return /(^|[^a-z])(confidential|restricted)([^a-z]|$)/.test(normalized);
 }
 
-function inferSensitivityLabel({
+export function inferSensitivityLabel({
   customTags = [],
   documentName,
   metadata,

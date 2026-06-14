@@ -53,6 +53,16 @@ const teamsSubscriptionWarningThreshold = 9_000;
 
 export function inferMicrosoftGraphResourceKind(resource: string | undefined): MicrosoftGraphResourceKind {
   const normalized = resource?.trim().toLowerCase() ?? "";
+
+  if (
+    normalized.startsWith("/me/messages") ||
+    normalized.startsWith("me/messages") ||
+    normalized.startsWith("/users/") && normalized.includes("/messages") ||
+    normalized.startsWith("users/") && normalized.includes("/messages")
+  ) {
+    return "outlook";
+  }
+
   if (
     normalized.startsWith("/teams") ||
     normalized.startsWith("teams/") ||
@@ -62,15 +72,6 @@ export function inferMicrosoftGraphResourceKind(resource: string | undefined): M
     normalized.includes("/messages")
   ) {
     return "teams";
-  }
-
-  if (
-    normalized.startsWith("/me/messages") ||
-    normalized.startsWith("me/messages") ||
-    normalized.startsWith("/users/") && normalized.includes("/messages") ||
-    normalized.startsWith("users/") && normalized.includes("/messages")
-  ) {
-    return "outlook";
   }
 
   return "other";

@@ -18,7 +18,7 @@ type AsanaWebhookPayload = AsanaWebhookEvent[] | {
   events?: AsanaWebhookEvent[];
 };
 
-type AsanaWebhookEvent = {
+export type AsanaWebhookEvent = {
   action?: string;
   change?: {
     action?: string;
@@ -141,7 +141,7 @@ export async function handleAsanaWebhookRequest(request: Request, runtimeEnv: As
   });
 }
 
-function resolveWebhookScope(request: Request) {
+export function resolveWebhookScope(request: Request) {
   const url = new URL(request.url);
   const workspaceKey = url.searchParams.get("workspaceId")?.trim() || url.searchParams.get("asanaWorkspaceGid")?.trim() || "";
   const resourceKey = url.searchParams.get("asanaProjectGid")?.trim() || url.searchParams.get("webhookKey")?.trim() || "";
@@ -151,7 +151,7 @@ function resolveWebhookScope(request: Request) {
   };
 }
 
-function webhookSecretKey(secretKey: string) {
+export function webhookSecretKey(secretKey: string) {
   return `asana:webhook-secret:${secretKey}`;
 }
 
@@ -166,7 +166,7 @@ async function loadWebhookSecret(webhookEnv: AsanaWebhookEnv, secretKey: string)
   return kvSecret?.trim() || webhookEnv.ASANA_WEBHOOK_SECRET?.trim() || "";
 }
 
-function getSignatureHeader(headers: Headers) {
+export function getSignatureHeader(headers: Headers) {
   for (const name of signatureHeaderNames) {
     const value = headers.get(name);
     if (value) return value;
@@ -174,7 +174,7 @@ function getSignatureHeader(headers: Headers) {
   return null;
 }
 
-async function verifyAsanaSignature({
+export async function verifyAsanaSignature({
   rawBody,
   secret,
   signature,
@@ -196,11 +196,11 @@ async function verifyAsanaSignature({
   return crypto.subtle.verify("HMAC", key, signatureBytes, rawBody);
 }
 
-function normalizeSignature(signature: string) {
+export function normalizeSignature(signature: string) {
   return signature.trim().toLowerCase().replace(/^sha256=/, "");
 }
 
-function hexToBytes(hex: string) {
+export function hexToBytes(hex: string) {
   if (!/^[0-9a-f]+$/.test(hex) || hex.length % 2 !== 0) return null;
   const bytes = new Uint8Array(hex.length / 2);
   for (let index = 0; index < hex.length; index += 2) {
@@ -240,7 +240,7 @@ async function upsertAsanaTaskStates(webhookEnv: AsanaWebhookEnv, workspaceKey: 
 
 type AsanaTaskStateUpsert = typeof asanaWebhookTaskStates.$inferInsert;
 
-function normalizeTaskStateEvent(workspaceKey: string, event: AsanaWebhookEvent): AsanaTaskStateUpsert | null {
+export function normalizeTaskStateEvent(workspaceKey: string, event: AsanaWebhookEvent): AsanaTaskStateUpsert | null {
   const task = event.resource?.resource_type === "task"
     ? event.resource
     : event.parent?.resource_type === "task"
@@ -266,7 +266,7 @@ function normalizeTaskStateEvent(workspaceKey: string, event: AsanaWebhookEvent)
   };
 }
 
-function extractEventStatus(event: AsanaWebhookEvent) {
+export function extractEventStatus(event: AsanaWebhookEvent) {
   const field = event.change?.field?.trim().toLowerCase();
   if (!field || !["status", "completed", "approval_status", "custom_fields"].includes(field)) return null;
   const value = event.change?.new_value;
@@ -370,7 +370,7 @@ async function resolveMappedProjectTarget(events: AsanaWebhookEvent[], webhookEn
   return null;
 }
 
-function parseProjectMap(value: string | undefined) {
+export function parseProjectMap(value: string | undefined) {
   if (!value?.trim()) return null;
   try {
     const parsed = JSON.parse(value) as Record<string, ProjectMapEntry>;
@@ -428,7 +428,7 @@ async function queryProjectChat(db: D1Database, where: string, bindings: unknown
   };
 }
 
-function modeForScope(scope: "personal" | "team" | "org"): WorkspaceMode {
+export function modeForScope(scope: "personal" | "team" | "org"): WorkspaceMode {
   if (scope === "team") return "Team";
   if (scope === "org") return "Org";
   return "Personal";
@@ -496,7 +496,7 @@ async function persistAsanaChatMessage(target: ProjectChatTarget, message: ChatM
   };
 }
 
-function buildAsanaChatMessage(events: AsanaWebhookEvent[]): ChatMessage {
+export function buildAsanaChatMessage(events: AsanaWebhookEvent[]): ChatMessage {
   const primary = events[0];
   const task = primary?.resource?.resource_type === "task" ? primary.resource : events.find((event) => event.resource?.resource_type === "task")?.resource;
   const taskLabel = task?.name || (task?.gid ? `Task ${task.gid}` : "Asana task");
@@ -511,7 +511,7 @@ function buildAsanaChatMessage(events: AsanaWebhookEvent[]): ChatMessage {
   };
 }
 
-function formatAsanaEventLine(event: AsanaWebhookEvent) {
+export function formatAsanaEventLine(event: AsanaWebhookEvent) {
   const action = event.change?.action || event.action || "updated";
   const field = event.change?.field ? ` ${event.change.field}` : "";
   const actor = event.user?.name ? ` by ${event.user.name}` : "";
@@ -519,32 +519,32 @@ function formatAsanaEventLine(event: AsanaWebhookEvent) {
   return `- ${resource}: ${action}${field}${actor}.`;
 }
 
-function extractTaskGids(events: AsanaWebhookEvent[]) {
+export function extractTaskGids(events: AsanaWebhookEvent[]) {
   return uniqueStrings(events.flatMap((event) => [
     event.resource?.resource_type === "task" ? event.resource.gid : undefined,
     event.parent?.resource_type === "task" ? event.parent.gid : undefined,
   ]));
 }
 
-function extractProjectGids(events: AsanaWebhookEvent[]) {
+export function extractProjectGids(events: AsanaWebhookEvent[]) {
   return uniqueStrings(events.flatMap((event) => [
     event.resource?.resource_type === "project" ? event.resource.gid : undefined,
     event.parent?.resource_type === "project" ? event.parent.gid : undefined,
   ]));
 }
 
-function extractProjectNames(events: AsanaWebhookEvent[]) {
+export function extractProjectNames(events: AsanaWebhookEvent[]) {
   return uniqueStrings(events.flatMap((event) => [
     event.resource?.resource_type === "project" ? event.resource.name : undefined,
     event.parent?.resource_type === "project" ? event.parent.name : undefined,
   ]));
 }
 
-function uniqueStrings(values: Array<string | undefined>) {
+export function uniqueStrings(values: Array<string | undefined>) {
   return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
-function chatSyncScopeKey({
+export function chatSyncScopeKey({
   mode,
   teamId,
   userId,

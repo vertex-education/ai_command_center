@@ -235,14 +235,14 @@ export type PmoWorkspaceState = {
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
-type WebSearchResult = {
+export type WebSearchResult = {
   title: string;
   url: string;
   snippet: string;
   source: string;
 };
 
-type WebSearchTrace = {
+export type WebSearchTrace = {
   enabled: boolean;
   query: string;
   provider: string;
@@ -338,7 +338,7 @@ const chatTitleStopWords = new Set([
   "you",
 ]);
 
-function conciseChatTitleFromRequest(text: string) {
+export function conciseChatTitleFromRequest(text: string) {
   const cleaned = text
     .replace(/[`*_#>\[\](){}]/g, " ")
     .replace(/https?:\/\/\S+/gi, " ")
@@ -354,12 +354,15 @@ function conciseChatTitleFromRequest(text: string) {
     .filter(Boolean)
     .filter((word, index) => index < 2 || !chatTitleStopWords.has(word.toLowerCase()))
     .slice(0, 6);
+  while (words.length > 1 && chatTitleStopWords.has(words[0].toLowerCase())) {
+    words.shift();
+  }
   const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
   const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
   return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
 }
 
-function normalizeGeneratedChatTitle(title: string, fallback: string) {
+export function normalizeGeneratedChatTitle(title: string, fallback: string) {
   const cleaned = title
     .split("\n")[0]
     .replace(/^title\s*:\s*/i, "")
@@ -498,14 +501,14 @@ export const chatReasoningProfiles: Record<ChatReasoningLevel, ChatReasoningProf
 
 export const chatReasoningLevels: ChatReasoningLevel[] = ["low", "medium", "high"];
 
-function normalizeReasoningLevel(value: unknown): ChatReasoningLevel {
+export function normalizeReasoningLevel(value: unknown): ChatReasoningLevel {
   if (value === "off" || value === "quick") return "low";
   if (value === "deep") return "medium";
   if (value === "max") return "high";
   return typeof value === "string" && value in chatReasoningProfiles ? value as ChatReasoningLevel : "low";
 }
 
-function buildReasoningInstruction(level: ChatReasoningLevel) {
+export function buildReasoningInstruction(level: ChatReasoningLevel) {
   if (level === "high") {
     return [
       "Reasoning depth: High.",
@@ -1100,14 +1103,14 @@ function truncateForPrompt(value: string, maxLength: number) {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1).trim()}...` : normalized;
 }
 
-function truncateAttachmentContext(value: string, maxLength = 20_000) {
-  const normalized = value.replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+export function truncateAttachmentContext(value: string, maxLength = 20_000) {
+  const normalized = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
   return normalized.length > maxLength
     ? `${normalized.slice(0, maxLength).trim()}\n[Attachment text truncated for Gemma context.]`
     : normalized;
 }
 
-function buildAttachmentPromptContext(attachments: ChatAttachment[] | undefined) {
+export function buildAttachmentPromptContext(attachments: ChatAttachment[] | undefined) {
   const sanitized = sanitizeChatAttachments(attachments).filter((attachment) => attachment.status !== "error" && attachment.extractedText.trim());
   if (!sanitized.length) return null;
   let totalChars = 0;
@@ -1204,7 +1207,7 @@ async function searchWebForPrompt(
   }
 }
 
-function buildWebSearchPromptContext(search: WebSearchTrace) {
+export function buildWebSearchPromptContext(search: WebSearchTrace) {
   if (!search.enabled) return null;
   const lines = [
     `Web search: enabled`,
@@ -1223,7 +1226,7 @@ function buildWebSearchPromptContext(search: WebSearchTrace) {
   return lines.join("\n");
 }
 
-function chatSafeAiErrorMessage(error: unknown) {
+export function chatSafeAiErrorMessage(error: unknown) {
   const raw = error instanceof Error ? error.message : "Workers AI request failed.";
   if (/<html[\s>]/i.test(raw) || /504 Gateway Time-out/i.test(raw)) {
     return "Workers AI gateway timed out before returning a response.";
@@ -1490,27 +1493,27 @@ async function runGemmaChat({
   }
 }
 
-function cycleDecisionStatus(status: Decision["status"]): Decision["status"] {
+export function cycleDecisionStatus(status: Decision["status"]): Decision["status"] {
   return status === "Completed" ? "Not Completed" : "Completed";
 }
 
-function cycleApprovalStatus(status: Approval["status"]): Approval["status"] {
+export function cycleApprovalStatus(status: Approval["status"]): Approval["status"] {
   if (status === "Not Reviewed") return "Reviewing";
   if (status === "Reviewing") return "Approved";
   if (status === "Approved") return "Not Approved";
   return "Not Reviewed";
 }
 
-function cycleTaskStatus(status: Task["status"]): Task["status"] {
+export function cycleTaskStatus(status: Task["status"]): Task["status"] {
   return status === "Completed" ? "Open" : "Completed";
 }
 
-function titleMatchesTask(left: string, right: string) {
+export function titleMatchesTask(left: string, right: string) {
   const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   return normalize(left) === normalize(right);
 }
 
-function buildAsanaNotesForWorkflowTask(task: Task) {
+export function buildAsanaNotesForWorkflowTask(task: Task) {
   return [
     task.originalText ? `Original text: ${task.originalText}` : "",
     task.owner ? `Owner: ${task.owner}` : "",
@@ -1532,13 +1535,13 @@ async function createAsanaSyncStateForTask(task: Task) {
   } satisfies Pick<Task, "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncError">;
 }
 
-function boundedScore(value: unknown, fallback: number) {
+export function boundedScore(value: unknown, fallback: number) {
   const score = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(score)) return fallback;
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-function extractJsonObject(text: string) {
+export function extractJsonObject(text: string) {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const candidate = fenced ?? text.match(/\{[\s\S]*\}/)?.[0] ?? text;
   try {

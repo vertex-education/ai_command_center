@@ -50,11 +50,11 @@ async function handleEvents({ request }: { request: Request }) {
   }
 }
 
-function normalizeMode(value: string | null): WorkspaceMode | null {
+export function normalizeMode(value: string | null): WorkspaceMode | null {
   return validModes.includes(value as WorkspaceMode) ? value as WorkspaceMode : null;
 }
 
-function parseLastEventId(value: string | null) {
+export function parseLastEventId(value: string | null) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 0;
 }
@@ -201,7 +201,7 @@ async function listEvents(scope: EventSubscriptionScope, lastEventId: number) {
   return (result.results ?? []).map(parseRealtimeEventRow);
 }
 
-function sseEncode(event: string, id: number | undefined, data: unknown) {
+export function sseEncode(event: string, id: number | undefined, data: unknown) {
   const idLine = id === undefined ? "" : `id: ${id}\n`;
   return `${idLine}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }

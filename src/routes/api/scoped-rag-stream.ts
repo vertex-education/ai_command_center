@@ -2,8 +2,18 @@ import { createFileRoute } from "@tanstack/react-router";
 import { createScopedRagStreamResponse, type ChatWithScopedRagInput } from "@/lib/rag";
 
 async function handleScopedRagStream({ request }: { request: Request }) {
+  const input = parseScopedRagStreamInput(request);
+
+  try {
+    return await createScopedRagStreamResponse(input);
+  } catch (error) {
+    return createScopedRagErrorResponse(error instanceof Error ? error.message : "Scoped RAG stream failed.");
+  }
+}
+
+export function parseScopedRagStreamInput(request: Request): ChatWithScopedRagInput {
   const url = new URL(request.url);
-  const input: ChatWithScopedRagInput = {
+  return {
     prompt: url.searchParams.get("prompt") ?? "",
     teamId: url.searchParams.get("teamId") ?? "",
     workspaceId: url.searchParams.get("workspaceId") ?? "",
@@ -13,19 +23,13 @@ async function handleScopedRagStream({ request }: { request: Request }) {
     reasoningLevel: normalizeReasoningLevel(url.searchParams.get("reasoningLevel")),
     webSearchEnabled: url.searchParams.get("webSearchEnabled") === "1",
   };
-
-  try {
-    return await createScopedRagStreamResponse(input);
-  } catch (error) {
-    return createScopedRagErrorResponse(error instanceof Error ? error.message : "Scoped RAG stream failed.");
-  }
 }
 
-function normalizeReasoningLevel(value: string | null) {
+export function normalizeReasoningLevel(value: string | null) {
   return value === "medium" || value === "high" ? value : "low";
 }
 
-function createScopedRagErrorResponse(message: string) {
+export function createScopedRagErrorResponse(message: string) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {

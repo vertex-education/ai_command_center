@@ -37,7 +37,11 @@ function extractGeneratedText(result: unknown) {
 }
 
 export function normalizePromptIntent(value: string): PromptIntent | null {
-  const normalized = value.trim().toUpperCase().replace(/[^A-Z_]/g, "");
+  const normalized = value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z]+/g, "_")
+    .replace(/^_+|_+$/g, "");
   if (
     normalized === "RAG_SEARCH" ||
     normalized === "WEB_SEARCH" ||
@@ -51,6 +55,18 @@ export function normalizePromptIntent(value: string): PromptIntent | null {
 
 export function inferPromptIntentFallback(prompt: string): PromptIntent {
   const normalized = prompt.toLowerCase();
+  const artifactPatterns = [
+    /\b(draft|write|create|generate|produce|format|compose|build)\b.*\b(artifact|brief|memo|doc|document|slide|deck|table|report|plan|email)\b/,
+    /\b(create|generate|produce)\b.*\b(file|export|artifact)\b/,
+  ];
+  if (artifactPatterns.some((pattern) => pattern.test(normalized))) return "ARTIFACT_GENERATION";
+
+  const strongRagPatterns = [
+    /\b(uploaded|existing|previous|prior|history|historical|artifact|document|file|record)\b/,
+    /\b(project|workspace|team)\b.*\b(status|artifact|history|document|file|decision|task)\b/,
+  ];
+  if (strongRagPatterns.some((pattern) => pattern.test(normalized))) return "RAG_SEARCH";
+
   const liveWebPatterns = [
     /\b(today|yesterday|this week|this month|this year|currently|current|latest|recent|recently|newest|now|as of)\b/,
     /\b(web|internet|online|search|look up|lookup|browse|google|source|sources|cite|citation)\b/,
@@ -60,15 +76,8 @@ export function inferPromptIntentFallback(prompt: string): PromptIntent {
   ];
   if (liveWebPatterns.some((pattern) => pattern.test(normalized))) return "WEB_SEARCH";
 
-  const artifactPatterns = [
-    /\b(draft|write|create|generate|produce|format|compose|build)\b.*\b(artifact|brief|memo|doc|document|slide|deck|table|report|plan|email)\b/,
-    /\b(create|generate|produce)\b.*\b(file|export|artifact)\b/,
-  ];
-  if (artifactPatterns.some((pattern) => pattern.test(normalized))) return "ARTIFACT_GENERATION";
-
   const ragPatterns = [
-    /\b(uploaded|existing|previous|prior|history|historical|artifact|document|file|citation|source|record)\b/,
-    /\b(project|workspace|team)\b.*\b(status|artifact|history|document|file|decision|task)\b/,
+    /\b(citation|source)\b/,
   ];
   if (ragPatterns.some((pattern) => pattern.test(normalized))) return "RAG_SEARCH";
 

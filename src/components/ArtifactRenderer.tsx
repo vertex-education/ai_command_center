@@ -112,9 +112,9 @@ export type WorkflowSuggestionInput = {
   source?: string;
 };
 
-type WorkflowActionKind = "approval" | "decision" | "idea" | "task";
+export type WorkflowActionKind = "approval" | "decision" | "idea" | "task";
 
-type ParsedWorkflowAction = {
+export type ParsedWorkflowAction = {
   kind: WorkflowActionKind;
   id?: string;
   title: string;
@@ -205,7 +205,7 @@ export function ArtifactRenderer({
   );
 }
 
-function parsePreviewJson(previewJson: JsonValue | undefined): unknown {
+export function parsePreviewJson(previewJson: JsonValue | undefined): unknown {
   if (typeof previewJson !== "string") return previewJson;
   try {
     return JSON.parse(previewJson);
@@ -214,14 +214,14 @@ function parsePreviewJson(previewJson: JsonValue | undefined): unknown {
   }
 }
 
-function normalizeMarkdownPreview(value: unknown, fileType: string) {
+export function normalizeMarkdownPreview(value: unknown, fileType: string) {
   const markdown = extractStringField(value, ["markdown", "content", "text", "body"]);
   if (markdown && (fileType === "md" || fileType === "markdown" || looksLikeMarkdown(markdown))) return markdown;
   if (typeof value === "string" && (fileType === "md" || fileType === "markdown" || looksLikeMarkdown(value))) return value;
   return "";
 }
 
-function normalizeCodePreview(value: unknown, fileType: string): CodePayload | null {
+export function normalizeCodePreview(value: unknown, fileType: string): CodePayload | null {
   const languageFromFileType = codeLanguageFromFileType(fileType);
   if (typeof value === "string" && languageFromFileType) {
     return { code: value, language: languageFromFileType };
@@ -233,7 +233,7 @@ function normalizeCodePreview(value: unknown, fileType: string): CodePayload | n
   return { code, language };
 }
 
-function normalizeTablePreview(value: unknown): NormalizedTable | null {
+export function normalizeTablePreview(value: unknown): NormalizedTable | null {
   const rowsValue = isRecord(value) ? value.rows ?? value.data : Array.isArray(value) ? value : undefined;
   if (!Array.isArray(rowsValue) || rowsValue.length === 0) return null;
 
@@ -267,7 +267,7 @@ function normalizeTablePreview(value: unknown): NormalizedTable | null {
   return null;
 }
 
-function normalizeSummaryPreview(value: unknown, fallbackPreview: string[]) {
+export function normalizeSummaryPreview(value: unknown, fallbackPreview: string[]) {
   if (isRecord(value) && Array.isArray(value.preview)) return value.preview.map((item) => stringifyCell(item)).filter(Boolean);
   if (Array.isArray(value) && value.every((item) => !Array.isArray(item) && !isRecord(item))) {
     return value.map((item) => stringifyCell(item)).filter(Boolean);
@@ -276,7 +276,7 @@ function normalizeSummaryPreview(value: unknown, fallbackPreview: string[]) {
   return fallbackPreview;
 }
 
-function normalizeWorkflowActionPreview(value: unknown): ParsedWorkflowAction[] {
+export function normalizeWorkflowActionPreview(value: unknown): ParsedWorkflowAction[] {
   const parsed = typeof value === "string" ? safeParseJson(value) : value;
   if (!parsed) return [];
   return collectWorkflowActionCandidates(parsed)
@@ -334,7 +334,7 @@ function normalizeWorkflowAction(candidate: { kind: WorkflowActionKind; value: u
   };
 }
 
-function resolveMarkdownWorkflowAction(text: string, workflowActions: WorkflowActionContext | undefined): ParsedWorkflowAction | null {
+export function resolveMarkdownWorkflowAction(text: string, workflowActions: WorkflowActionContext | undefined): ParsedWorkflowAction | null {
   const rawText = text.replace(/\s+/g, " ").trim();
   const explicit = rawText.match(/\b(approval|decision|idea|task)\s*[:#]\s*([a-z0-9][\w:-]*)/i);
   if (explicit) {

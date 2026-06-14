@@ -12,6 +12,22 @@ Each scope has its own projects, chats, ideas, artifacts, decisions, approvals, 
 
 Pinned ideas, approvals, decisions, tasks, and artifacts render in a `Pinned Items` rail above the workspace tabs. Pinning is explicit: newly created workflow items do not auto-load into the rail. The rail stays scoped to the active workspace or selected project, shows only items the user pins, and only displays left or right carousel buttons when the pinned cards overflow the available width. Each arrow click moves to the next card boundary so the next pinned item is fully visible.
 
+## Feature Map
+
+The full feature catalog lives in [docs/vertexai-feature-catalog.md](docs/vertexai-feature-catalog.md). In short, VertexAI currently includes:
+
+- Scoped Personal, Team, and Org workspaces with isolated projects, chats, workflow items, artifacts, risks, prompts, and activity.
+- Project Studio chat experiences with project chats, workspace chats, branchable conversations, reasoning modes, file attachments, web search, Asana context, and scoped RAG streaming.
+- AI prompt guardrails for dynamic workspace context, role-based inference authorization, intent routing, context budgeting, and Cloudflare AI Gateway usage tracking.
+- Dynamic artifact rendering for Markdown, tables, code, summaries, and workflow-action JSON.
+- Workflow features for ideas, AI idea assessment, decisions, approvals, tasks, risks, pinned items, and Asana task sync.
+- Immutable artifact versioning with D1 metadata, R2 files, restore-by-new-version behavior, and asynchronous RAG ingestion through Queues and Vectorize.
+- Invite-only authentication, Microsoft Entra sign-in, encrypted Microsoft Graph token storage, Microsoft Graph webhooks, and Teams subscription capacity tracking.
+- Asana OAuth, encrypted Asana token storage, project mapping, task sync, project webhooks, verified webhook delivery, and Asana snapshot memory for RAG.
+- Scheduled and cron-driven project briefings with custom Markdown instruction formatting.
+- Realtime mutation event streams and chat presence/message sync through a Durable Object.
+- Admin metrics and provider usage tracking for AI Gateway, Workers AI, Tavily, Firecrawl, and Vectorize-backed flows.
+
 ## Stack
 
 - React 19
@@ -61,6 +77,12 @@ Lint:
 
 ```powershell
 npm run lint
+```
+
+Run deterministic Vitest coverage:
+
+```powershell
+npm test
 ```
 
 ## Authentication
