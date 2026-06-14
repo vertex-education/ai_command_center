@@ -1,6 +1,6 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { Inbox, KeyRound, PlayCircle, ShieldCheck, UserRound } from "lucide-react";
-import { AppRail } from "@/components/AppRail";
+import { Inbox, KeyRound, PlayCircle, Plug, ShieldCheck, UserRound } from "lucide-react";
+import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,7 +25,7 @@ function UserProfilePage() {
   return (
     <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
       <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
-        <AppRail />
+        <AuthenticatedAppRail session={session} />
         <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30 p-4 lg:p-6">
           <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
@@ -77,6 +77,10 @@ function UserProfilePage() {
                   <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/profile/invites")}>
                     <Inbox className="size-4" />
                     Invites
+                  </Button>
+                  <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/profile/asana")}>
+                    <Plug className="size-4" />
+                    Asana integration
                   </Button>
                   {session.user.role === "admin" ? (
                     <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/admin")}>

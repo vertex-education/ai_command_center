@@ -899,19 +899,19 @@
           </div>
           <div class="info-card">
             <strong>Ideas</strong>
-            <p>Improvement ideas can be captured, voted on, pinned, filtered, and moved through statuses.</p>
+            <p>Improvement ideas can be captured, AI-scored, explicitly pinned, filtered, shared through authenticated links, and moved through statuses.</p>
           </div>
           <div class="info-card">
             <strong>Decisions</strong>
-            <p>The app tracks decision records and lets editors cycle their status.</p>
+            <p>The app tracks decision records, status changes, and explicit pins for the workspace strip.</p>
           </div>
           <div class="info-card">
             <strong>Approvals</strong>
-            <p>Approval items show who owns a decision and whether it is needed, requested, or approved.</p>
+            <p>Approval items show ownership, review status, and can be pinned when they need visibility.</p>
           </div>
           <div class="info-card">
             <strong>Tasks</strong>
-            <p>Follow-up tasks can move from open to in progress to done.</p>
+            <p>Follow-up tasks can move between open and completed, and can be pinned without being auto-loaded into Pinned Items.</p>
           </div>
         </div>
       </section>
@@ -1036,7 +1036,7 @@
           <details class="detail-card">
             <summary>Access and authentication</summary>
             <div>
-              <p>Better Auth handles email/password sign-in, email verification, sessions, and admin roles.</p>
+              <p>Better Auth handles email/password sign-in, Microsoft Entra ID OAuth with PKCE, email verification, sessions, and admin roles.</p>
               <p>New accounts are invite-gated. Admins can create invites, roles can be admin, user, or viewer, and edit actions check role before writing.</p>
             </div>
           </details>
@@ -1073,7 +1073,7 @@
               </tr>
               <tr>
                 <td>Sharing</td>
-                <td>The UI exposes share actions and scoped invites, but magic-link governance is not yet a full product-grade sharing system.</td>
+                <td>The UI exposes authenticated idea links, artifact share actions, and scoped invites, but full permissioned sharing is not yet product-grade.</td>
                 <td>Real sharing needs expiration, revocation, audit logs, per-file permissions, and access warnings.</td>
               </tr>
               <tr>
@@ -1259,7 +1259,8 @@
         tech: {
           title: "Access and authentication",
           bullets: [
-            "better-auth provides email/password auth, email verification, sessions, and admin role support.",
+            "better-auth provides email/password auth, Microsoft Entra ID OAuth with PKCE, email verification, sessions, and admin role support.",
+            "startMicrosoftSignIn creates the Microsoft authorization URL in a TanStack Start server function so provider tokens stay server-side.",
             "auth-workflow.ts creates invite tokens, hashes tokens, records invites in D1, and sends invite emails.",
             "Sign-up is blocked unless the internal invite header is present.",
             "Write server functions call requireWorkspaceEditor, requireManager, requireTeamMember, or requireProjectMember."
@@ -1344,7 +1345,7 @@
           ["fake-row selected", "Pin an artifact"],
           ["fake-row", "Move a decision to Done"],
           ["fake-row", "Approve an approval"],
-          ["fake-row", "Mark a task In progress"]
+          ["fake-row", "Mark a task Completed"]
         ],
         calloutTitle: "Turning chat into work",
         callout: "The prototype is designed so the AI conversation sits next to operational records. A user can move from discussion to tracked action."

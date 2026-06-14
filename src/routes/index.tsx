@@ -137,6 +137,7 @@ import {
   sendChatMessage,
   saveTableArtifact,
   restoreArtifactVersion,
+  refreshIdeaAssessment,
   removeSuggestedApproval,
   removeSuggestedDecision,
   removeSuggestedIdea,
@@ -151,7 +152,6 @@ import {
   updateDecisionStatus,
   updateIdeaStatus,
   updateTaskStatus,
-  voteIdea,
   workspaceModeLabel,
   workspaceModes,
 } from "@/lib/pmo-data";
@@ -633,6 +633,7 @@ function PMOCommandCenter() {
   const chatInputRef = useRef<HTMLInputElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const composerHighlightTimeoutRef = useRef<number | null>(null);
+  const shareLinkHandledRef = useRef(false);
   const [isComposerHighlighted, setIsComposerHighlighted] = useState(false);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
@@ -653,6 +654,24 @@ function PMOCommandCenter() {
   const [isTutorialOpen, setIsTutorialOpen] = useState(false);
   const [tutorialStepIndex, setTutorialStepIndex] = useState(0);
   const canEdit = session.user.role === "admin" || session.user.role === "user";
+
+  useEffect(() => {
+    if (shareLinkHandledRef.current || typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const requestedMode = params.get("mode") as WorkspaceMode | null;
+    const requestedTab = params.get("tab") as TabName | null;
+    const requestedIdeaId = params.get("idea");
+    if (requestedMode && workspaceModes.includes(requestedMode)) setActiveMode(requestedMode);
+    if (requestedTab === "Ideas") {
+      setActiveRail("Workspaces");
+      setActiveTab("Ideas");
+    }
+    if (requestedIdeaId) {
+      setSelectedIdeaId(requestedIdeaId);
+      setRightOpen(true);
+    }
+    shareLinkHandledRef.current = Boolean(requestedMode || requestedTab || requestedIdeaId);
+  }, []);
 
   useEffect(() => {
     const requestedRail = window.sessionStorage.getItem("vertex-target-rail") as RailName | null;
@@ -742,9 +761,13 @@ function PMOCommandCenter() {
     onSuccess: invalidateWorkspace,
     onError: (error) => updateToast(error instanceof Error ? error.message : "Could not update decision status."),
   });
-  const voteIdeaMutation = useMutation({
-    mutationFn: (id: string) => voteIdea({ data: { id, mode: activeMode } }),
-    onSuccess: invalidateWorkspace,
+  const refreshIdeaAssessmentMutation = useMutation({
+    mutationFn: (id: string) => refreshIdeaAssessment({ data: { id, mode: activeMode } }),
+    onSuccess: () => {
+      updateToast("Gemma 4 assessment refreshed");
+      void invalidateWorkspace();
+    },
+    onError: (error) => updateToast(error instanceof Error ? error.message : "Could not refresh idea assessment."),
   });
   const toggleIdeaPinMutation = useMutation({
     mutationFn: (id: string) => toggleIdeaPin({ data: { id, mode: activeMode } }),
@@ -1276,6 +1299,18 @@ function PMOCommandCenter() {
       setToast(null);
       setToastLink(null);
     }, 4200);
+  }
+
+  function handleShareIdea(idea: Idea) {
+    const params = new URLSearchParams({
+      mode: activeMode,
+      tab: "Ideas",
+      idea: idea.id,
+    });
+    if (activeMode === "Team" && selectedTeam?.id) params.set("teamId", selectedTeam.id);
+    const href = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
+    void navigator.clipboard?.writeText(href).catch(() => undefined);
+    updateToast("Authenticated share link copied", { href, label: "Open link" });
   }
 
   function handleRailClick(label: RailName) {
@@ -2179,15 +2214,11 @@ function PMOCommandCenter() {
                         canEdit={canEdit}
                         artifacts={scopedArtifacts}
                         selectedArtifactTitle={selectedArtifact?.title}
-                        onPreview={setPreviewArtifact}
                         onSelectArtifact={(artifact) => {
                           setSelectedArtifactTitle(artifact.title);
                           setRightOpen(true);
                         }}
                         onShare={() => updateToast("Share options prepared")}
-                        onTogglePin={(artifact) =>
-                          toggleArtifactPinMutation.mutate({ r2Key: artifact.r2Key, mode: activeMode })
-                        }
                       />
                     ) : null}
                     {activeTab === "Decisions" ? (
@@ -2403,6 +2434,7 @@ function PMOCommandCenter() {
                       decision={selectedDecision}
                       idea={selectedIdea}
                       isPinned={selectedIdea ? visibleWorkspace.pinnedIdeaIds.includes(selectedIdea.id) : false}
+                      isRefreshingIdeaAssessment={refreshIdeaAssessmentMutation.isPending}
                       messages={currentMessages}
                       metrics={metrics}
                       prompts={scopedPrompts}
@@ -2414,7 +2446,13 @@ function PMOCommandCenter() {
                       onRestoreArtifactVersion={(artifactId) =>
                         restoreArtifactMutation.mutate({ mode: activeMode, artifactId })
                       }
-                      onShare={() => updateToast("Share link options ready")}
+                      onShare={() => {
+                        if (activeTab === "Ideas") {
+                          selectedIdea ? handleShareIdea(selectedIdea) : updateToast("Select an idea before sharing.");
+                        } else {
+                          updateToast("Share options prepared");
+                        }
+                      }}
                       onStatusChange={(status) => selectedIdea && updateStatusMutation.mutate({ id: selectedIdea.id, status })}
                       onToggleArtifactPin={() =>
                         selectedArtifact && toggleArtifactPinMutation.mutate({ r2Key: selectedArtifact.r2Key, mode: activeMode })
@@ -2426,11 +2464,11 @@ function PMOCommandCenter() {
                       onDeleteIdea={(id) => removeIdeaMutation.mutate(id)}
                       onDeleteTask={(id) => removeTaskMutation.mutate(id)}
                       onPreviewWorkflow={(preview) => setWorkflowPreview(preview)}
+                      onRefreshIdeaAssessment={() => selectedIdea && refreshIdeaAssessmentMutation.mutate(selectedIdea.id)}
                       onUsePrompt={(prompt) => {
                         setChatInput(prompt);
                         setActiveTab("Chat");
                       }}
-                      onVoteIdea={() => selectedIdea && voteIdeaMutation.mutate(selectedIdea.id)}
                     />
                   )
                 ) : (
@@ -4812,6 +4850,7 @@ function WorkflowStatusSelect<TStatus extends string>({
 function WorkflowLineList({
   canEdit,
   emptyLabel,
+  hideActions = false,
   items,
   onDelete,
   onPreview,
@@ -4820,6 +4859,7 @@ function WorkflowLineList({
 }: {
   canEdit: boolean;
   emptyLabel: string;
+  hideActions?: boolean;
   items: WorkflowLineItem[];
   onDelete: (id: string) => void;
   onPreview: (item: WorkflowLineItem) => void;
@@ -4861,7 +4901,7 @@ function WorkflowLineList({
             </strong>
             <span className="mt-0.5 block truncate text-xs text-muted-foreground">{item.meta}</span>
           </span>
-          <div className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
+          {hideActions ? null : <div className="flex shrink-0 items-center gap-2" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
             {canEdit && onTogglePin ? (
               <Button
                 type="button"
@@ -4886,7 +4926,7 @@ function WorkflowLineList({
                 Delete
               </Button>
             ) : null}
-          </div>
+          </div>}
         </div>
       ))}
     </div>
@@ -4927,7 +4967,7 @@ function IdeasView({
       id: idea.id,
       title: idea.title,
       originalText: idea.originalText,
-      meta: `${idea.owner} / ${idea.category} / ${idea.votes} votes${pinnedIdeaIds.includes(idea.id) ? " / Pinned" : ""}`,
+      meta: `${idea.owner} / ${idea.category} / Impact ${idea.impact} / Effort ${idea.effort} / Confidence ${idea.confidence}${pinnedIdeaIds.includes(idea.id) ? " / Pinned" : ""}`,
       complete: idea.status === "Convert to Project" ? "success" : idea.status === "Dismiss" ? "destructive" : undefined,
       pinned: pinnedIdeaIds.includes(idea.id),
       statusControl: (
@@ -5004,19 +5044,15 @@ function ArtifactsView({
   canEdit,
   artifacts,
   selectedArtifactTitle,
-  onPreview,
   onSelectArtifact,
   onShare,
-  onTogglePin,
 }: {
   activeMode: WorkspaceMode;
   canEdit: boolean;
   artifacts: Artifact[];
   selectedArtifactTitle?: string;
-  onPreview: (artifact: Artifact) => void;
   onSelectArtifact: (artifact: Artifact) => void;
   onShare: () => void;
-  onTogglePin: (artifact: Artifact) => void;
 }) {
   const columns = useMemo<ColumnDef<Artifact>[]>(
     () => [
@@ -5052,68 +5088,8 @@ function ArtifactsView({
           return row.original.status;
         },
       },
-      {
-        id: "actions",
-        header: "",
-        cell: ({ row }) => (
-          <div className="flex justify-end gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={`Preview ${row.original.title}`}
-              disabled={Boolean(row.original.clientStatus)}
-              onClick={(event) => {
-                event.stopPropagation();
-                onPreview(row.original);
-              }}
-            >
-              <Eye />
-            </Button>
-            {canEdit ? (
-              <>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={row.original.pinnedTo.includes(activeMode) ? `Unpin ${row.original.title}` : `Pin ${row.original.title}`}
-                  title={row.original.pinnedTo.includes(activeMode) ? "Unpin artifact" : "Pin artifact"}
-                  disabled={Boolean(row.original.clientStatus)}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onTogglePin(row.original);
-                  }}
-                >
-                  <Star className={cn("text-muted-foreground", row.original.pinnedTo.includes(activeMode) && "fill-warning text-warning")} />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`${row.original.title} is protected by immutable version history`}
-                  title="Artifacts are immutable. Restore older versions from the timeline."
-                  disabled
-                >
-                <ShieldCheck className="text-muted-foreground" />
-              </Button>
-            </>
-            ) : null}
-            {row.original.clientStatus ? (
-              <Button type="button" variant="ghost" size="icon" aria-label={`Download ${row.original.title}`} disabled>
-                <Download />
-              </Button>
-            ) : (
-              <Button asChild variant="ghost" size="icon" aria-label={`Download ${row.original.title}`}>
-                <a href={row.original.href} download aria-label={`Download ${row.original.title}`} title={`Download ${row.original.title}`} onClick={(event) => event.stopPropagation()}>
-                  <Download />
-                </a>
-              </Button>
-            )}
-          </div>
-        ),
-      },
     ],
-    [activeMode, canEdit, onPreview, onTogglePin],
+    [],
   );
 
   return (
@@ -5610,6 +5586,7 @@ function DetailPanel({
   decision,
   idea,
   isPinned,
+  isRefreshingIdeaAssessment,
   messages,
   metrics,
   prompts,
@@ -5630,7 +5607,7 @@ function DetailPanel({
   onDeleteIdea,
   onDeleteTask,
   onUsePrompt,
-  onVoteIdea,
+  onRefreshIdeaAssessment,
 }: {
   activeMode: WorkspaceMode;
   activeTab: TabName;
@@ -5641,6 +5618,7 @@ function DetailPanel({
   decision?: Decision;
   idea?: Idea;
   isPinned: boolean;
+  isRefreshingIdeaAssessment: boolean;
   messages: ChatMessage[];
   metrics: DetailMetric[];
   prompts: string[];
@@ -5661,7 +5639,7 @@ function DetailPanel({
   onDeleteIdea: (id: string) => void;
   onDeleteTask: (id: string) => void;
   onUsePrompt: (prompt: string) => void;
-  onVoteIdea: () => void;
+  onRefreshIdeaAssessment: () => void;
 }) {
   return (
     <aside className="scrollbar-thin hidden min-h-0 overflow-auto bg-muted/35 p-4 lg:block">
@@ -5693,10 +5671,11 @@ function DetailPanel({
           isPinned={isPinned}
           onDelete={() => onDeleteIdea(idea.id)}
           onPreview={() => onPreviewWorkflow(workflowPreviewFromIdea(idea))}
+          isRefreshingAssessment={isRefreshingIdeaAssessment}
           onShare={onShare}
           onStatusChange={onStatusChange}
           onToggleIdeaPin={onToggleIdeaPin}
-          onVoteIdea={onVoteIdea}
+          onRefreshAssessment={onRefreshIdeaAssessment}
         />
       ) : null}
 
@@ -5889,26 +5868,65 @@ function PromptMetadata({
   );
 }
 
+function ideaScoreReason(idea: Idea, label: "Impact" | "Effort" | "Confidence") {
+  const llmEntry = idea.metrics.find((metric) => metric.toLowerCase().startsWith(`${label.toLowerCase()} llm:`));
+  if (llmEntry) return llmEntry.replace(/^[^:]+:\s*/, "").trim();
+  const fallbackEntry = idea.metrics.find((metric) => metric.toLowerCase().startsWith(`${label.toLowerCase()} fallback:`));
+  if (fallbackEntry) return fallbackEntry.replace(/^[^:]+:\s*/, "").trim();
+  return "Fallback/stale score. Refresh to ask Gemma 4 for a dynamic rationale.";
+}
+
+function parseIdeaConsideration(value: string) {
+  const match = value.match(/^(pro|gap|con)\s*:\s*(.+)$/i);
+  const kind = (match?.[1]?.toLowerCase() ?? "gap") as "pro" | "gap" | "con";
+  return {
+    kind,
+    text: match?.[2]?.trim() || value.replace(/^Consideration:\s*/i, "").trim(),
+  };
+}
+
+function IdeaConsideration({ value }: { value: string }) {
+  const consideration = parseIdeaConsideration(value);
+  const Icon = consideration.kind === "pro" ? CheckCircle2 : consideration.kind === "con" ? Bug : Bell;
+  const classes = consideration.kind === "pro"
+    ? "border-success/25 bg-success/10 text-success"
+    : consideration.kind === "con"
+      ? "border-destructive/25 bg-destructive/10 text-destructive"
+      : "border-warning/30 bg-warning/10 text-warning";
+  const label = consideration.kind === "pro" ? "Pro" : consideration.kind === "con" ? "Con" : "Gap";
+  return (
+    <div className={cn("flex gap-2 rounded-md border p-3 text-sm", classes)}>
+      <Icon className="mt-0.5 size-4 shrink-0" />
+      <div>
+        <strong className="block text-xs uppercase">{label}</strong>
+        <span>{consideration.text}</span>
+      </div>
+    </div>
+  );
+}
+
 function IdeaDetail({
   canEdit,
   idea,
   isPinned,
+  isRefreshingAssessment,
   onDelete,
   onPreview,
+  onRefreshAssessment,
   onShare,
   onStatusChange,
   onToggleIdeaPin,
-  onVoteIdea,
 }: {
   canEdit: boolean;
   idea: Idea;
   isPinned: boolean;
+  isRefreshingAssessment: boolean;
   onDelete: () => void;
   onPreview: () => void;
+  onRefreshAssessment: () => void;
   onShare: () => void;
   onStatusChange: (status: IdeaStatus) => void;
   onToggleIdeaPin: () => void;
-  onVoteIdea: () => void;
 }) {
   return (
     <Card className="mb-3">
@@ -5929,18 +5947,21 @@ function IdeaDetail({
       <CardContent className="space-y-4 pt-4">
         <p className="text-sm leading-6 text-muted-foreground">{idea.summary}</p>
         <div className="flex items-center gap-2">
-          <img alt={idea.owner} className="size-9 rounded-full object-cover" src={idea.avatar} />
+          <span className="grid size-9 shrink-0 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground" aria-label={idea.owner}>
+            {initials(idea.owner)}
+          </span>
           <div>
             <strong className="block text-sm">{idea.owner}</strong>
             <span className="text-xs text-muted-foreground">Owner / {idea.created}</span>
           </div>
         </div>
         <div className="space-y-3">
-          <ProgressMetric label="Impact" value={idea.impact} />
-          <ProgressMetric label="Effort" value={idea.effort} />
-          <ProgressMetric label="Confidence" value={idea.confidence} />
+          <div className="text-xs font-semibold uppercase text-muted-foreground">AI analysis</div>
+          <ProgressMetric label="Impact" value={idea.impact} tooltip={ideaScoreReason(idea, "Impact")} />
+          <ProgressMetric label="Effort" value={idea.effort} tooltip={ideaScoreReason(idea, "Effort")} />
+          <ProgressMetric label="Confidence" value={idea.confidence} tooltip={ideaScoreReason(idea, "Confidence")} />
         </div>
-        <div className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">{idea.nextStep}</div>
+        <IdeaConsideration value={idea.nextStep} />
         <div className="flex flex-wrap gap-2">
           {idea.tags.map((tag) => (
             <Badge key={tag} variant="outline">
@@ -5979,9 +6000,9 @@ function IdeaDetail({
         </div>
         {canEdit ? (
           <div className="grid grid-cols-3 gap-2">
-            <Button type="button" variant="outline" onClick={onVoteIdea}>
-              <Zap />
-              Vote
+            <Button type="button" variant="outline" disabled={isRefreshingAssessment} onClick={onRefreshAssessment}>
+              <RotateCcw className={cn(isRefreshingAssessment && "animate-spin")} />
+              {isRefreshingAssessment ? "Refreshing" : "Refresh"}
             </Button>
             <Button type="button" variant="outline" onClick={onShare}>
               <Share2 />
@@ -7017,18 +7038,12 @@ function ScoreCell({ value }: { value: number }) {
   );
 }
 
-function ProgressMetric({ label, value }: { label: string; value: number }) {
+function ProgressMetric({ label, tooltip, value }: { label: string; tooltip?: string; value: number }) {
   return (
-    <div className="space-y-1">
+    <div className="space-y-1" title={tooltip}>
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
         <span>{label}</span>
-        <span className="flex items-center gap-1">
-          <strong className="text-foreground">{value}</strong>
-          <ChartExportButtons
-            rows={[{ metric: label, value }]}
-            title={label}
-          />
-        </span>
+        <strong className="text-foreground">{value}</strong>
       </div>
       <Progress value={value} />
     </div>

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Eye, EyeOff } from "lucide-react";
-import { AppRail } from "@/components/AppRail";
+import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -22,6 +22,7 @@ export const Route = createFileRoute("/profile/password")({
 });
 
 function ResetPasswordPage() {
+  const { session } = Route.useLoaderData();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -69,7 +70,7 @@ function ResetPasswordPage() {
   return (
     <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
       <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
-        <AppRail />
+        <AuthenticatedAppRail session={session} />
         <section className="grid min-h-0 place-items-center overflow-auto bg-muted/30 p-4">
           <Card className="w-full max-w-md">
             <CardHeader>

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Check, UsersRound } from "lucide-react";
-import { AppRail } from "@/components/AppRail";
+import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { acceptScopedInvite, listMyScopedInvites } from "@/lib/team-workflow";
@@ -11,6 +11,7 @@ export const Route = createFileRoute("/profile/invites")({
   loader: async () => {
     const session = await getSessionSnapshot();
     if (!session) throw redirect({ to: "/sign-in" });
+    return { session };
   },
   head: () => ({
     meta: [{ title: "Invites | Vertex AI Command Center" }],
@@ -21,6 +22,7 @@ export const Route = createFileRoute("/profile/invites")({
 const invitesQueryKey = ["profile", "scoped-invites"] as const;
 
 function InvitesPage() {
+  const { session } = Route.useLoaderData();
   const queryClient = useQueryClient();
   const invitesQuery = useQuery({
     queryKey: invitesQueryKey,
@@ -41,7 +43,7 @@ function InvitesPage() {
   return (
     <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
       <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
-        <AppRail />
+        <AuthenticatedAppRail session={session} />
         <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30 p-4 lg:p-6">
           <div className="mx-auto grid max-w-4xl gap-4">
             <div className="flex items-center justify-between gap-3">

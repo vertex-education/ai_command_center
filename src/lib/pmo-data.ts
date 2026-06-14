@@ -68,6 +68,8 @@ export type Idea = {
   thread: string[];
 };
 
+type IdeaAssessment = Pick<Idea, "impact" | "effort" | "confidence" | "nextStep" | "metrics" | "thread">;
+
 export type ChatMessage = {
   id: string;
   parentId?: string;
@@ -1445,10 +1447,146 @@ function titleMatchesTask(left: string, right: string) {
   return normalize(left) === normalize(right);
 }
 
-function impactScore(value: AddIdeaInput["impact"]) {
-  if (value === "High") return 86;
-  if (value === "Medium") return 68;
-  return 46;
+function boundedScore(value: unknown, fallback: number) {
+  const score = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(score)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function extractJsonObject(text: string) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
+  const candidate = fenced ?? text.match(/\{[\s\S]*\}/)?.[0] ?? text;
+  try {
+    const parsed = JSON.parse(candidate);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadIdeaAssessmentContext(mode: WorkspaceMode, projectId: string | null) {
+  const workspace = await getDb()
+    .prepare("SELECT name FROM workspaces WHERE id = ? LIMIT 1")
+    .bind(workspaceIdForMode(mode))
+    .first<{ name: string }>();
+  const project = projectId
+    ? await getDb()
+      .prepare("SELECT name, description, status FROM projects WHERE id = ? LIMIT 1")
+      .bind(projectId)
+      .first<{ name: string; description: string; status: string }>()
+    : null;
+  return {
+    workspaceName: workspace?.name ?? `${workspaceModeLabel(mode)} Workspace`,
+    projectName: project?.name ?? null,
+    projectDescription: project?.description ?? null,
+    projectStatus: project?.status ?? null,
+  };
+}
+
+async function assessIdeaWithGemma({
+  context,
+  mode,
+  idea,
+}: {
+  context: unknown;
+  mode: WorkspaceMode;
+  idea: Pick<Idea, "title" | "originalText" | "category" | "owner" | "summary" | "tags" | "projectId">;
+}): Promise<IdeaAssessment> {
+  const fallbackImpact = idea.tags.includes("High") ? 86 : idea.tags.includes("Low") ? 46 : 68;
+  const fallback: IdeaAssessment = {
+    impact: fallbackImpact,
+    effort: fallbackImpact >= 80 ? 52 : fallbackImpact >= 60 ? 42 : 30,
+    confidence: fallbackImpact >= 80 ? 78 : 66,
+    nextStep: "gap: Confirm owner, evidence source, and governance fit before prioritizing.",
+    metrics: [
+      "Impact fallback: Refresh to ask Gemma 4 for a score rationale.",
+      "Effort fallback: Refresh to ask Gemma 4 for a score rationale.",
+      "Confidence fallback: Refresh to ask Gemma 4 for a score rationale.",
+    ],
+    thread: ["Idea captured through Vertex AI Command Center.", "Gemma assessment pending until Workers AI is available."],
+  };
+  const ai = (context as CloudflareContext).cloudflare?.env?.AI;
+  if (!ai) return fallback;
+
+  const workspaceContext = await loadIdeaAssessmentContext(mode, idea.projectId);
+  const prompt = [
+    "Assess this PMO improvement idea for Vertex Education.",
+    "Compare the Vertex Education context to the idea's facets: operational fit, likely school/team value, implementation load, data/governance risk, dependency risk, and clarity of the request.",
+    "Return only valid JSON with keys impact, effort, confidence, impactReason, effortReason, confidenceReason, considerationType, consideration.",
+    "Scores must be integers from 0 to 100. Effort means implementation effort and dependency load, where higher is harder.",
+    "Each score reason must be a concise explanation, 8 to 14 words, naming the main driver of that score.",
+    "considerationType must be pro, gap, or con.",
+    "The consideration must be one concise standout pro, con, or gap for the yellow box.",
+    "",
+    `Workspace: ${workspaceContext.workspaceName}`,
+    `Project: ${workspaceContext.projectName ?? "General workspace"}`,
+    `Project description: ${workspaceContext.projectDescription ?? "Not scoped to a project"}`,
+    `Project status: ${workspaceContext.projectStatus ?? "N/A"}`,
+    `Idea owner: ${idea.owner}`,
+    `Idea title: ${idea.title}`,
+    `Category: ${idea.category}`,
+    `Summary: ${idea.summary}`,
+    `Original text: ${idea.originalText ?? ""}`,
+    `Tags: ${idea.tags.join(", ")}`,
+  ].join("\n");
+
+  try {
+    const result = await withAiTimeout(
+      (signal) => runTrackedWorkersAiWithGateway(
+        ai,
+        vertexAiModelId,
+        {
+          messages: [
+            { role: "system", content: "You are Gemma 4 assessing Vertex Education PMO ideas. Be concise and do not invent facts." },
+            { role: "user", content: prompt },
+          ],
+          max_completion_tokens: 420,
+          temperature: 0.2,
+        },
+        {
+          feature: "gemma-idea-assessment",
+          projectId: idea.projectId,
+          signal,
+          metadata: {
+            feature: "idea-assessment",
+            mode,
+            projectId: idea.projectId?.slice(0, 80) ?? null,
+          },
+        },
+      ),
+      20_000,
+    );
+    const parsed = extractJsonObject(extractAiResponse(result).trim());
+    if (!parsed) return fallback;
+    const consideration = typeof parsed.consideration === "string" && parsed.consideration.trim()
+      ? parsed.consideration.trim().slice(0, 240)
+      : fallback.nextStep.replace(/^(?:pro|gap|con):\s*/i, "");
+    const considerationType = typeof parsed.considerationType === "string" && ["pro", "gap", "con"].includes(parsed.considerationType.toLowerCase())
+      ? parsed.considerationType.toLowerCase()
+      : "gap";
+    const reason = (key: "impactReason" | "effortReason" | "confidenceReason") =>
+      typeof parsed[key] === "string" && parsed[key].trim()
+        ? parsed[key].trim().replace(/\s+/g, " ").slice(0, 120)
+        : "";
+    const impactReason = reason("impactReason");
+    const effortReason = reason("effortReason");
+    const confidenceReason = reason("confidenceReason");
+    if (!impactReason || !effortReason || !confidenceReason) return fallback;
+    return {
+      impact: boundedScore(parsed.impact, fallback.impact),
+      effort: boundedScore(parsed.effort, fallback.effort),
+      confidence: boundedScore(parsed.confidence, fallback.confidence),
+      nextStep: `${considerationType}: ${consideration}`,
+      metrics: [
+        `Impact LLM: ${impactReason}`,
+        `Effort LLM: ${effortReason}`,
+        `Confidence LLM: ${confidenceReason}`,
+      ],
+      thread: ["Gemma 4 assessed impact, effort, and confidence against Vertex Education context.", `Last assessment: ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })}`],
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 export function getConversationKey(mode: WorkspaceMode, projectId: string | null, chatId: string) {
@@ -1917,11 +2055,16 @@ async function updatePersistedWorkflowActionPinned(
 async function requireWorkspaceEditor() {
   const request = getRequest();
   const session = await getAuth(request).api.getSession({ headers: request.headers });
-  const user = (session as { user?: { id?: string; role?: string | null } } | null)?.user;
+  const user = (session as { user?: { id?: string; name?: string | null; email?: string | null; role?: string | null } } | null)?.user;
   if (user?.role !== "admin" && user?.role !== "user" || !user.id) {
     throw new Error("Viewer accounts have view-only access.");
   }
-  return { id: user.id, clientId: request.headers.get("x-vertex-client-id") };
+  return {
+    id: user.id,
+    name: user.name?.trim() || user.email?.trim() || "You",
+    email: user.email?.trim() || "",
+    clientId: request.headers.get("x-vertex-client-id"),
+  };
 }
 
 async function recordWorkspaceMutation({
@@ -2132,33 +2275,35 @@ export const sendChatMessage = createServerFn({ method: "POST" })
 
 export const addIdea = createServerFn({ method: "POST" })
   .validator((data: AddIdeaInput & { mode?: WorkspaceMode; projectId?: string | null }) => data)
-  .handler(async ({ data }) => {
+  .handler(async ({ context, data }) => {
     const user = await requireWorkspaceEditor();
     const mode = data.mode ?? "Personal";
     const workspace = getMutableWorkspace(mode);
     const title = data.title.trim();
     if (!title) return mergePersistedWorkspace(clone(getMutableRoot()));
 
-    const nextIdea: Idea = {
+    const baseIdea: Idea = {
       id: createId(`${workspace.scope}-idea`),
       projectId: data.projectId ?? null,
       title,
       originalText: data.summary.trim() || title,
       status: data.status,
       category: data.category,
-      owner: "Alex Morgan",
+      owner: user.name,
       avatar: avatarAlex,
       created: "Just now",
-      votes: 1,
-      impact: impactScore(data.impact),
-      effort: data.impact === "High" ? 52 : data.impact === "Medium" ? 42 : 30,
-      confidence: data.impact === "High" ? 78 : 66,
+      votes: 0,
+      impact: 0,
+      effort: 0,
+      confidence: 0,
       summary: data.summary.trim() || `New ${workspaceModeLabel(mode).toLowerCase()} improvement idea captured from the current scope.`,
-      nextStep: "Confirm owner, evidence source, and governance fit.",
+      nextStep: "",
       tags: [data.category, data.impact, workspaceModeLabel(mode), data.projectId ? "Project" : "General"],
-      metrics: ["Owner confirmation needed", "Evidence source pending", "Governance review pending"],
-      thread: ["Idea captured through Vertex AI Command Center.", "Assistant prepared initial impact and follow-up fields."],
+      metrics: [],
+      thread: [],
     };
+    const assessment = await assessIdeaWithGemma({ context, mode, idea: baseIdea });
+    const nextIdea: Idea = { ...baseIdea, ...assessment };
 
     workspace.ideas = [nextIdea, ...workspace.ideas];
     await persistIdea(mode, nextIdea, false);
@@ -2892,14 +3037,14 @@ export const createDecisionFromSuggestion = createServerFn({ method: "POST" })
 
 export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
   .validator((data: CreateWorkflowSuggestionInput) => data)
-  .handler(async ({ data }) => {
+  .handler(async ({ context, data }) => {
     const user = await requireWorkspaceEditor();
     const title = (await generateWorkflowSuggestionTitle("idea", data.title)).slice(0, 120);
     if (!title) throw new Error("Idea title is required.");
     const workspace = getMutableWorkspace(data.mode);
     const existingIdea = workspace.ideas.find((idea) => titleMatchesTask(idea.title, title) && (data.projectId ?? null) === idea.projectId);
     if (existingIdea) return mergePersistedWorkspace(clone(getMutableRoot()));
-    const idea: Idea = {
+    const baseIdea: Idea = {
       id: createId(`${workspace.scope}-llm-idea`),
       projectId: data.projectId ?? null,
       title,
@@ -2909,16 +3054,18 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       owner: data.owner?.trim().slice(0, 80) || "You",
       avatar: avatarAlex,
       created: "Just now",
-      votes: 1,
-      impact: impactScore("Medium"),
-      effort: 42,
-      confidence: 66,
+      votes: 0,
+      impact: 0,
+      effort: 0,
+      confidence: 0,
       summary: data.source ? `Captured from ${data.source}.` : "Captured from VertexAI suggestions.",
-      nextStep: "Confirm owner, evidence source, and governance fit.",
+      nextStep: "",
       tags: ["Workflow", "Medium", workspaceModeLabel(data.mode), data.projectId ? "Project" : "General"],
-      metrics: ["Owner confirmation needed", "Evidence source pending", "Governance review pending"],
-      thread: ["Idea captured through Vertex AI Command Center.", "Assistant prepared initial impact and follow-up fields."],
+      metrics: [],
+      thread: [],
     };
+    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea: baseIdea });
+    const idea: Idea = { ...baseIdea, ...assessment };
     workspace.ideas = [idea, ...workspace.ideas];
     await persistIdea(data.mode, idea, false);
     recordActivity(workspace, "Idea created", `${idea.title} was added from VertexAI suggestions.`);
@@ -2929,6 +3076,31 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       mode: data.mode,
       operation: "insert",
       projectId: idea.projectId,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
+    return mergePersistedWorkspace(clone(getMutableRoot()));
+  });
+
+export const refreshIdeaAssessment = createServerFn({ method: "POST" })
+  .validator((data: { mode: WorkspaceMode; id: string }) => data)
+  .handler(async ({ context, data }) => {
+    const user = await requireWorkspaceEditor();
+    const workspace = getMutableWorkspace(data.mode);
+    const idea = workspace.ideas.find((item) => item.id === data.id);
+    if (!idea) return mergePersistedWorkspace(clone(getMutableRoot()));
+    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea });
+    const nextIdea: Idea = { ...idea, ...assessment };
+    workspace.ideas = workspace.ideas.map((item) => (item.id === data.id ? nextIdea : item));
+    await persistIdea(data.mode, nextIdea, workspace.pinnedIdeaIds.includes(data.id));
+    recordActivity(workspace, "Idea assessment refreshed", `${nextIdea.title} was rescored by Gemma 4.`);
+    await recordWorkspaceMutation({
+      entity: "idea",
+      entityId: data.id,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "assessment-refresh",
+      projectId: nextIdea.projectId,
       sourceClientId: user.clientId,
       sourceUserId: user.id,
     });

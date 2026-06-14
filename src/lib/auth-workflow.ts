@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
-import { getAuth, getInternalSignupSecret, sendAuthEmail } from "@/lib/auth";
+import { getAuth, getInternalSignupSecret, getMicrosoftEntraProviderId, isMicrosoftEntraConfigured, sendAuthEmail } from "@/lib/auth";
 import { env } from "cloudflare:workers";
 
 type AuthUser = {
@@ -186,6 +186,25 @@ export const getSessionSnapshot = createServerFn({ method: "GET" }).handler(asyn
       emailVerified: Boolean(session.user.emailVerified),
     },
   };
+});
+
+export const startMicrosoftSignIn = createServerFn({ method: "POST" }).handler(async () => {
+  if (!isMicrosoftEntraConfigured()) throw new Error("Microsoft sign-in is not configured.");
+
+  const request = getRequest();
+  const result = await getAuth(request).api.signInWithOAuth2({
+    body: {
+      providerId: getMicrosoftEntraProviderId(),
+      callbackURL: "/",
+      errorCallbackURL: "/sign-in?oauthError=1",
+      disableRedirect: true,
+    },
+    headers: request.headers,
+  });
+
+  const url = (result as { url?: string }).url;
+  if (!url) throw new Error("Microsoft did not return an authorization URL.");
+  return { url };
 });
 
 export const getInvitePreview = createServerFn({ method: "GET" })

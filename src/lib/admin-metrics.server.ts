@@ -80,6 +80,11 @@ type GatewayUsageSummary = {
   latestAt: number | null;
 };
 
+type GatewayLogCacheEntry = {
+  expiresAt: number;
+  promise: Promise<AiGatewayLog | null>;
+};
+
 const usageTableSql = `
 CREATE TABLE IF NOT EXISTS admin_usage_events (
   id TEXT PRIMARY KEY,
@@ -105,6 +110,11 @@ const usageIndexesSql = [
 ];
 
 const defaultAiGatewayId = "default";
+const gatewayLogCache = new Map<string, GatewayLogCacheEntry>();
+const gatewayLogSuccessCacheTtlMs = 5 * 60 * 1000;
+const gatewayLogFailureCacheTtlMs = 60 * 1000;
+const gatewayLogLookupConcurrency = 3;
+const gatewayLogSampleLimit = 20;
 
 function getRuntimeEnv() {
   return env as Env & {
@@ -191,17 +201,75 @@ function getAiGatewayLogIdFromMetadata(value: string | null | undefined) {
 }
 
 async function getAiGatewayLog(logId: string) {
+  const cached = gatewayLogCache.get(logId);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.promise;
+
   const ai = getRuntimeEnv().AI;
   if (!ai) return null;
-  try {
-    return await ai.gateway(defaultAiGatewayId).getLog(logId);
-  } catch (error) {
-    console.warn("[AdminMetrics] AI Gateway log was not available.", {
-      logId,
-      message: error instanceof Error ? error.message : "Unknown Gateway log lookup error.",
+
+  const promise = ai.gateway(defaultAiGatewayId).getLog(logId)
+    .then((log) => {
+      gatewayLogCache.set(logId, {
+        expiresAt: Date.now() + gatewayLogSuccessCacheTtlMs,
+        promise: Promise.resolve(log),
+      });
+      return log;
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : "Unknown Gateway log lookup error.";
+      console.warn("[AdminMetrics] AI Gateway log was not available.", { logId, message });
+      gatewayLogCache.set(logId, {
+        expiresAt: Date.now() + gatewayLogFailureCacheTtlMs,
+        promise: Promise.resolve(null),
+      });
+      return null;
     });
-    return null;
+
+  gatewayLogCache.set(logId, {
+    expiresAt: now + gatewayLogFailureCacheTtlMs,
+    promise,
+  });
+
+  return promise;
+}
+
+async function getAiGatewayLogs(logIds: string[], limit = gatewayLogSampleLimit) {
+  const uniqueLogIds = Array.from(new Set(logIds.filter((logId) => logId.trim()))).slice(0, limit);
+  const entries: Array<[string, AiGatewayLog]> = [];
+
+  for (let index = 0; index < uniqueLogIds.length; index += gatewayLogLookupConcurrency) {
+    const chunk = uniqueLogIds.slice(index, index + gatewayLogLookupConcurrency);
+    const logs = await Promise.all(chunk.map(async (logId) => {
+      const log = await getAiGatewayLog(logId);
+      return log ? [logId, log] as [string, AiGatewayLog] : null;
+    }));
+
+    for (const log of logs) {
+      if (log) entries.push(log);
+    }
   }
+
+  return new Map(entries);
+}
+
+function summarizeGatewayLogs(logs: AiGatewayLog[]): GatewayUsageSummary {
+  const tokensIn = logs.reduce((sum, log) => sum + (log.tokens_in ?? 0), 0);
+  const tokensOut = logs.reduce((sum, log) => sum + (log.tokens_out ?? 0), 0);
+  const cost = logs.reduce((sum, log) => sum + (log.cost ?? 0), 0);
+  return {
+    requests: logs.length,
+    tokensIn: logs.length ? tokensIn : null,
+    tokensOut: logs.length ? tokensOut : null,
+    totalTokens: logs.length ? tokensIn + tokensOut : null,
+    cost: logs.some((log) => typeof log.cost === "number") ? cost : null,
+    cached: logs.filter((log) => log.cached).length,
+    success: logs.filter((log) => log.success).length,
+    latestAt: logs.reduce<number | null>((latest, log) => {
+      const createdAt = log.created_at instanceof Date ? log.created_at.getTime() : new Date(log.created_at).getTime();
+      return latest === null || createdAt > latest ? createdAt : latest;
+    }, null),
+  };
 }
 
 async function countRows(sql: string, ...params: unknown[]) {
@@ -381,23 +449,7 @@ async function getGatewayUsageSummary() {
     } satisfies GatewayUsageSummary;
   }
 
-  const logs = (await Promise.all(logIds.slice(0, 20).map((logId) => getAiGatewayLog(logId)))).filter((log): log is AiGatewayLog => Boolean(log));
-  const tokensIn = logs.reduce((sum, log) => sum + (log.tokens_in ?? 0), 0);
-  const tokensOut = logs.reduce((sum, log) => sum + (log.tokens_out ?? 0), 0);
-  const cost = logs.reduce((sum, log) => sum + (log.cost ?? 0), 0);
-  return {
-    requests: logs.length,
-    tokensIn: logs.length ? tokensIn : null,
-    tokensOut: logs.length ? tokensOut : null,
-    totalTokens: logs.length ? tokensIn + tokensOut : null,
-    cost: logs.some((log) => typeof log.cost === "number") ? cost : null,
-    cached: logs.filter((log) => log.cached).length,
-    success: logs.filter((log) => log.success).length,
-    latestAt: logs.reduce<number | null>((latest, log) => {
-      const createdAt = log.created_at instanceof Date ? log.created_at.getTime() : new Date(log.created_at).getTime();
-      return latest === null || createdAt > latest ? createdAt : latest;
-    }, null),
-  };
+  return summarizeGatewayLogs(Array.from((await getAiGatewayLogs(logIds)).values()));
 }
 
 async function buildSingleMetricCard(metricId: string): Promise<MetricCard> {
@@ -545,6 +597,11 @@ async function getHealthMetrics() {
   const cloudflareUsage = providerRowsByName.get("cloudflare-workers-ai");
   const tavilyUsage = providerRowsByName.get("tavily");
   const firecrawlUsage = providerRowsByName.get("firecrawl");
+  const recentGatewayLogs = await getAiGatewayLogs(
+    recentUsage
+      .map((row) => getAiGatewayLogIdFromMetadata(row.metadataJson))
+      .filter((value): value is string => Boolean(value)),
+  );
 
   const runtime = getRuntimeEnv();
 
@@ -626,10 +683,10 @@ async function getHealthMetrics() {
         { label: "Firecrawl", configured: Boolean(runtime.FIRECRAWL_API_KEY) },
       ],
     },
-    recentUsage: await Promise.all(recentUsage.map(async (row) => {
+    recentUsage: recentUsage.map((row) => {
       const aiGatewayLogId = getAiGatewayLogIdFromMetadata(row.metadataJson);
       const metadata = parseMetadata(row.metadataJson);
-      const gatewayLog = aiGatewayLogId ? await getAiGatewayLog(aiGatewayLogId) : null;
+      const gatewayLog = aiGatewayLogId ? recentGatewayLogs.get(aiGatewayLogId) ?? null : null;
       const gatewayTokensIn = gatewayLog?.tokens_in ?? null;
       const gatewayTokensOut = gatewayLog?.tokens_out ?? null;
       const gatewayTotalTokens = gatewayTokensIn !== null || gatewayTokensOut !== null
@@ -650,7 +707,7 @@ async function getHealthMetrics() {
         durationLabel: formatMs(gatewayLog?.duration ?? row.durationMs),
         createdLabel: formatDateTime(row.createdAt),
       };
-    })),
+    }),
   };
 }
 

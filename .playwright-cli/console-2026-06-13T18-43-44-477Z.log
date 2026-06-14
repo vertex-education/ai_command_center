@@ -82,3 +82,100 @@
 [18237132ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
 [18248223ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
 [18614028ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[26620337ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[26649299ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[26677456ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[26786839ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[27060808ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[27318256ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[27460599ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28094439ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28118289ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28135486ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28144269ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28160556ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[28227806ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/_serverFn/eyJmaWxlIjoiL3NyYy9saWIvYXV0aC13b3JrZmxvdy50cz90c3Mtc2VydmVyZm4tc3BsaXQiLCJleHBvcnQiOiJnZXRTZXNzaW9uU25hcHNob3RfY3JlYXRlU2VydmVyRm5faGFuZGxlciJ9:0
+[28227831ms] [ERROR] Error: Invariant failed: expected content-type header to be set
+    at getResponse (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:142:45)
+    at async serverFnFetcher (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:84:9)
+    at async client (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:190:17)
+    at async callNextMiddleware (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:121:20)
+    at async Object.assign (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:46:20)
+    at async loader (http://127.0.0.1:5173/src/routes/sign-in.tsx?t=1781404436576:15:19)
+    at async runLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:367:48)
+    at async handleLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:450:60)
+    at async loadRouteMatch (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:483:4)
+    at async Promise.all (index 1) @ http://127.0.0.1:5173/@vite/client:524
+[28227835ms] [ERROR] Error: Invariant failed: expected content-type header to be set
+    at getResponse (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:142:45)
+    at async serverFnFetcher (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:84:9)
+    at async client (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:190:17)
+    at async callNextMiddleware (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:121:20)
+    at async Object.assign (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:46:20)
+    at async loader (http://127.0.0.1:5173/src/routes/sign-in.tsx?t=1781404436576:15:19)
+    at async runLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:367:48)
+    at async handleLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:450:60)
+    at async loadRouteMatch (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:483:4)
+    at async Promise.all (index 1) @ http://127.0.0.1:5173/@vite/client:524
+[28227851ms] [ERROR] Error: Invariant failed: expected content-type header to be set
+    at getResponse (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:142:45)
+    at async serverFnFetcher (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:84:9)
+    at async client (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:190:17)
+    at async callNextMiddleware (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:121:20)
+    at async Object.assign (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:46:20)
+    at async loader (http://127.0.0.1:5173/src/routes/sign-in.tsx?t=1781404436576:15:19)
+    at async runLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:367:48)
+    at async handleLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:450:60)
+    at async loadRouteMatch (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:483:4)
+    at async Promise.all (index 1) @ http://127.0.0.1:5173/@vite/client:524
+[28227854ms] [ERROR] Error: Invariant failed: expected content-type header to be set
+    at getResponse (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:142:45)
+    at async serverFnFetcher (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:84:9)
+    at async client (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:190:17)
+    at async callNextMiddleware (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:121:20)
+    at async Object.assign (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:46:20)
+    at async loader (http://127.0.0.1:5173/src/routes/sign-in.tsx?t=1781404436576:15:19)
+    at async runLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:367:48)
+    at async handleLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:450:60)
+    at async loadRouteMatch (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:483:4)
+    at async Promise.all (index 1) @ http://127.0.0.1:5173/@vite/client:524
+[28227870ms] [ERROR] %o
+
+%s
+
+%s
+ Error: Invariant failed: expected content-type header to be set
+    at getResponse (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:142:45)
+    at async serverFnFetcher (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/client-rpc/serverFnFetcher.js?v=c9a0800e:84:9)
+    at async client (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:190:17)
+    at async callNextMiddleware (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:121:20)
+    at async Object.assign (http://127.0.0.1:5173/node_modules/@tanstack/start-client-core/dist/esm/createServerFn.js?v=c9a0800e:46:20)
+    at async loader (http://127.0.0.1:5173/src/routes/sign-in.tsx?t=1781404436576:15:19)
+    at async runLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:367:48)
+    at async handleLoader (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:450:60)
+    at async loadRouteMatch (http://127.0.0.1:5173/node_modules/@tanstack/router-core/dist/esm/load-matches.js?v=c9a0800e:483:4)
+    at async Promise.all (index 1) The above error occurred in the <MatchInnerImpl> component. React will try to recreate this component tree from scratch using the error boundary you provided, CatchBoundaryImpl. @ http://127.0.0.1:5173/@vite/client:524
+[28227873ms] [WARNING] Warning: Error in route match: /sign-in/sign-in @ http://127.0.0.1:5173/@vite/client:524
+[28227886ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[28239646ms] [LOG] [vite] server connection lost. Polling for restart... @ http://127.0.0.1:5173/@vite/client:992
+[28253078ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:5173/favicon.ico:0
+[28261970ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=05933b20:14337
+[28454175ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=05933b20:14337
+[28505076ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=05933b20:14337
+[28512453ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=05933b20:14337
+[28721912ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=05933b20:14337
+[28880199ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5173/node_modules/.vite/deps/react-dom_client.js?v=c9a0800e:14337
+[30619283ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[30631923ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[30686293ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[30720573ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[46690440ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[46809363ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[46822353ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[46883678ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47345431ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47393039ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47474469ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47528168ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47536414ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0
+[47705800ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5173/sign-in:0

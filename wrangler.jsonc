@@ -20,6 +20,12 @@
 			"remote": true
 		}
 	],
+	"kv_namespaces": [
+		{
+			"binding": "MICROSOFT_TOKEN_VAULT",
+			"id": "79a29da0fd4a4b6ca90aa77aed5a39d8"
+		}
+	],
 	"r2_buckets": [
 		{
 			"binding": "ARTIFACTS_BUCKET",
@@ -60,6 +66,10 @@
 			{
 				"binding": "DOCUMENT_INGESTION_QUEUE",
 				"queue": "document-ingestion-queue"
+			},
+			{
+				"binding": "GRAPH_WEBHOOK_QUEUE",
+				"queue": "graph-webhook-notifications"
 			}
 		],
 		"consumers": [
@@ -68,6 +78,12 @@
 				"max_batch_size": 5,
 				"max_batch_timeout": 30,
 				"max_retries": 3
+			},
+			{
+				"queue": "graph-webhook-notifications",
+				"max_batch_size": 25,
+				"max_batch_timeout": 5,
+				"max_retries": 5
 			}
 		]
 	},

@@ -1,12 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
-import { Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSessionSnapshot, startMicrosoftSignIn } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/sign-in")({
   loader: async () => {
@@ -27,9 +27,12 @@ function SignInPage() {
   const [message, setMessage] = useState(() =>
     typeof window !== "undefined" && new URLSearchParams(window.location.search).get("verified") === "1"
       ? "Email verified. Sign in to continue."
+      : typeof window !== "undefined" && new URLSearchParams(window.location.search).get("oauthError") === "1"
+        ? "Microsoft sign-in failed. Try again or use your invited account."
       : "",
   );
   const [isPending, setIsPending] = useState(false);
+  const [isMicrosoftPending, setIsMicrosoftPending] = useState(false);
 
   useEffect(() => {
     setShowPassword(false);
@@ -75,6 +78,19 @@ function SignInPage() {
     }
   }
 
+  async function handleMicrosoftSignIn() {
+    setIsMicrosoftPending(true);
+    setMessage("Opening Microsoft sign-in...");
+
+    try {
+      const { url } = await startMicrosoftSignIn();
+      window.location.href = url;
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Microsoft sign-in failed. Try again.");
+      setIsMicrosoftPending(false);
+    }
+  }
+
   return (
     <main className="grid min-h-screen place-items-center bg-muted/30 p-4">
       <Card className="w-full max-w-md">
@@ -84,6 +100,17 @@ function SignInPage() {
           <CardDescription>Sign in with your invited account.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
+          <Button className="w-full" type="button" variant="outline" disabled={isMicrosoftPending || isPending} onClick={handleMicrosoftSignIn}>
+            <LogIn className="mr-2 size-4" />
+            {isMicrosoftPending ? "Opening Microsoft..." : "Continue with Microsoft"}
+          </Button>
+
+          <div className="flex items-center gap-3 text-xs uppercase text-muted-foreground">
+            <div className="h-px flex-1 bg-border" />
+            <span>Email</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+
           <form className="space-y-4" onSubmit={handleSignIn}>
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>

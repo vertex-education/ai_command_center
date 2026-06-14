@@ -1,6 +1,6 @@
 import { Outlet, createFileRoute, redirect, useRouterState } from "@tanstack/react-router";
 import { Activity, ArrowLeft, BarChart3, UsersRound } from "lucide-react";
-import { AppRail } from "@/components/AppRail";
+import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Button } from "@/components/ui/button";
 import { getSessionSnapshot } from "@/lib/auth-workflow";
 import { cn } from "@/lib/utils";
@@ -24,12 +24,13 @@ const adminTabs = [
 ] as const;
 
 function AdminLayout() {
+  const { session } = Route.useLoaderData();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
 
   return (
     <main className="h-svh overflow-hidden bg-[linear-gradient(135deg,oklch(0.985_0.006_247),oklch(0.955_0.015_240))] p-0 text-foreground lg:p-5">
       <div className="workspace-shadow grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
-        <AppRail />
+        <AuthenticatedAppRail session={session} />
         <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30">
           <div className="sticky top-0 z-20 border-b bg-card/95 px-4 py-3 backdrop-blur lg:px-8">
             <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">

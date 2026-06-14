@@ -405,3 +405,104 @@ export const adminUsageEvents = sqliteTable(
     chatIdx: index("admin_usage_events_chat_idx").on(table.chatId, table.createdAt),
   }),
 );
+
+export const microsoftGraphSubscriptions = sqliteTable(
+  "microsoft_graph_subscriptions",
+  {
+    subscriptionId: text("subscription_id").primaryKey(),
+    tenantId: text("tenant_id"),
+    resource: text("resource").notNull(),
+    resourceKind: text("resource_kind", { enum: ["teams", "outlook", "other"] }).notNull(),
+    changeType: text("change_type").notNull(),
+    status: text("status", { enum: ["active", "renewing", "expired", "deleted"] }).notNull().default("active"),
+    expirationAt: text("expiration_at"),
+    firstSeenAt: text("first_seen_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+    notificationCount: integer("notification_count").notNull().default(0),
+  },
+  (table) => ({
+    resourceKindStatusIdx: index("microsoft_graph_subscriptions_kind_status_idx").on(table.resourceKind, table.status),
+    expirationIdx: index("microsoft_graph_subscriptions_expiration_idx").on(table.expirationAt),
+    tenantIdx: index("microsoft_graph_subscriptions_tenant_idx").on(table.tenantId),
+  }),
+);
+
+export const microsoftGraphWebhookDeliveries = sqliteTable(
+  "microsoft_graph_webhook_deliveries",
+  {
+    id: text("id").primaryKey(),
+    requestId: text("request_id").notNull(),
+    notificationCount: integer("notification_count").notNull(),
+    validationTokenCount: integer("validation_token_count").notNull(),
+    userAgent: text("user_agent"),
+    cfRay: text("cf_ray"),
+    connectingIp: text("connecting_ip"),
+    receivedAt: text("received_at").notNull(),
+  },
+  (table) => ({
+    requestIdx: uniqueIndex("microsoft_graph_webhook_deliveries_request_idx").on(table.requestId),
+    receivedAtIdx: index("microsoft_graph_webhook_deliveries_received_at_idx").on(table.receivedAt),
+  }),
+);
+
+export const asanaOauthStates = sqliteTable(
+  "asana_oauth_states",
+  {
+    stateHash: text("state_hash").primaryKey(),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    codeVerifier: text("code_verifier").notNull(),
+    redirectTo: text("redirect_to"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    userIdx: index("asana_oauth_states_user_idx").on(table.userId, table.expiresAt),
+  }),
+);
+
+export const asanaConnections = sqliteTable(
+  "asana_connections",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    asanaUserGid: text("asana_user_gid").notNull(),
+    asanaUserName: text("asana_user_name").notNull(),
+    asanaUserEmail: text("asana_user_email"),
+    scopes: text("scopes").notNull(),
+    connectedAt: integer("connected_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    userIdx: uniqueIndex("asana_connections_user_idx").on(table.userId),
+    asanaUserIdx: index("asana_connections_asana_user_idx").on(table.asanaUserGid),
+  }),
+);
+
+export const asanaProjectMappings = sqliteTable(
+  "asana_project_mappings",
+  {
+    id: text("id").primaryKey(),
+    connectionId: text("connection_id").notNull().references(() => asanaConnections.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    asanaWorkspaceGid: text("asana_workspace_gid").notNull(),
+    asanaWorkspaceName: text("asana_workspace_name").notNull(),
+    asanaProjectGid: text("asana_project_gid").notNull(),
+    asanaProjectName: text("asana_project_name").notNull(),
+    asanaTeamGid: text("asana_team_gid"),
+    vertexWorkspaceId: text("vertex_workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    vertexMode: text("vertex_mode", { enum: ["Personal", "Team", "Org"] }).notNull(),
+    vertexTeamId: text("vertex_team_id"),
+    vertexProjectId: text("vertex_project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    vertexChatId: text("vertex_chat_id").references(() => chats.id, { onDelete: "set null" }),
+    canWriteTasks: integer("can_write_tasks", { mode: "boolean" }).notNull().default(false),
+    permissionLevel: text("permission_level").notNull().default("read"),
+    permissionSource: text("permission_source").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    asanaProjectIdx: uniqueIndex("asana_project_mappings_project_idx").on(table.asanaProjectGid),
+    vertexProjectIdx: index("asana_project_mappings_vertex_project_idx").on(table.vertexProjectId),
+    userIdx: index("asana_project_mappings_user_idx").on(table.userId, table.updatedAt),
+  }),
+);

@@ -16,6 +16,7 @@ npx wrangler vectorize create-metadata-index ai-command-center-rag --propertyNam
 npx wrangler vectorize list-metadata-index ai-command-center-rag --config=./wrangler.jsonc
 
 npx wrangler queues create document-ingestion-queue
+npx wrangler queues create graph-webhook-notifications
 npm run cf-typegen
 ```
 
@@ -27,6 +28,7 @@ Required bindings for the scoped RAG path:
 - `ARTIFACTS_BUCKET`: stores raw generated or uploaded artifact text and files.
 - `VECTORIZE`: indexes embedded document chunks with `team_id`, `project_id`, `confidentiality`, and `restricted` metadata filters.
 - `DOCUMENT_INGESTION_QUEUE`: receives `scoped-rag-generated-artifact` jobs for chunking and indexing.
+- `GRAPH_WEBHOOK_QUEUE`: receives Microsoft Graph Teams and Outlook change notifications from `/api/graph/webhooks`.
 - `AI`: runs embeddings, intent routing, and streamed chat generation.
 - `TAVILY_API_KEY` and `FIRECRAWL_API_KEY`: optional external web context providers.
 
