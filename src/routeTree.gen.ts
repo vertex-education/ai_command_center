@@ -19,6 +19,7 @@ import { Route as ProfileIndexRouteImport } from './routes/profile/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as ProfilePasswordRouteImport } from './routes/profile/password'
 import { Route as ProfileInvitesRouteImport } from './routes/profile/invites'
+import { Route as ProfileBriefingsRouteImport } from './routes/profile/briefings'
 import { Route as ProfileAsanaRouteImport } from './routes/profile/asana'
 import { Route as ApiScopedRagStreamRouteImport } from './routes/api/scoped-rag-stream'
 import { Route as ApiEventsRouteImport } from './routes/api/events'
@@ -78,6 +79,11 @@ const ProfilePasswordRoute = ProfilePasswordRouteImport.update({
 const ProfileInvitesRoute = ProfileInvitesRouteImport.update({
   id: '/invites',
   path: '/invites',
+  getParentRoute: () => ProfileRoute,
+} as any)
+const ProfileBriefingsRoute = ProfileBriefingsRouteImport.update({
+  id: '/briefings',
+  path: '/briefings',
   getParentRoute: () => ProfileRoute,
 } as any)
 const ProfileAsanaRoute = ProfileAsanaRouteImport.update({
@@ -145,6 +151,7 @@ export interface FileRoutesByFullPath {
   '/api/events': typeof ApiEventsRoute
   '/api/scoped-rag-stream': typeof ApiScopedRagStreamRoute
   '/profile/asana': typeof ProfileAsanaRoute
+  '/profile/briefings': typeof ProfileBriefingsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/admin/': typeof AdminIndexRoute
@@ -165,6 +172,7 @@ export interface FileRoutesByTo {
   '/api/events': typeof ApiEventsRoute
   '/api/scoped-rag-stream': typeof ApiScopedRagStreamRoute
   '/profile/asana': typeof ProfileAsanaRoute
+  '/profile/briefings': typeof ProfileBriefingsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/admin': typeof AdminIndexRoute
@@ -188,6 +196,7 @@ export interface FileRoutesById {
   '/api/events': typeof ApiEventsRoute
   '/api/scoped-rag-stream': typeof ApiScopedRagStreamRoute
   '/profile/asana': typeof ProfileAsanaRoute
+  '/profile/briefings': typeof ProfileBriefingsRoute
   '/profile/invites': typeof ProfileInvitesRoute
   '/profile/password': typeof ProfilePasswordRoute
   '/admin/': typeof AdminIndexRoute
@@ -212,6 +221,7 @@ export interface FileRouteTypes {
     | '/api/events'
     | '/api/scoped-rag-stream'
     | '/profile/asana'
+    | '/profile/briefings'
     | '/profile/invites'
     | '/profile/password'
     | '/admin/'
@@ -232,6 +242,7 @@ export interface FileRouteTypes {
     | '/api/events'
     | '/api/scoped-rag-stream'
     | '/profile/asana'
+    | '/profile/briefings'
     | '/profile/invites'
     | '/profile/password'
     | '/admin'
@@ -254,6 +265,7 @@ export interface FileRouteTypes {
     | '/api/events'
     | '/api/scoped-rag-stream'
     | '/profile/asana'
+    | '/profile/briefings'
     | '/profile/invites'
     | '/profile/password'
     | '/admin/'
@@ -352,6 +364,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProfileInvitesRouteImport
       parentRoute: typeof ProfileRoute
     }
+    '/profile/briefings': {
+      id: '/profile/briefings'
+      path: '/briefings'
+      fullPath: '/profile/briefings'
+      preLoaderRoute: typeof ProfileBriefingsRouteImport
+      parentRoute: typeof ProfileRoute
+    }
     '/profile/asana': {
       id: '/profile/asana'
       path: '/asana'
@@ -439,6 +458,7 @@ const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
 interface ProfileRouteChildren {
   ProfileAsanaRoute: typeof ProfileAsanaRoute
+  ProfileBriefingsRoute: typeof ProfileBriefingsRoute
   ProfileInvitesRoute: typeof ProfileInvitesRoute
   ProfilePasswordRoute: typeof ProfilePasswordRoute
   ProfileIndexRoute: typeof ProfileIndexRoute
@@ -446,6 +466,7 @@ interface ProfileRouteChildren {
 
 const ProfileRouteChildren: ProfileRouteChildren = {
   ProfileAsanaRoute: ProfileAsanaRoute,
+  ProfileBriefingsRoute: ProfileBriefingsRoute,
   ProfileInvitesRoute: ProfileInvitesRoute,
   ProfilePasswordRoute: ProfilePasswordRoute,
   ProfileIndexRoute: ProfileIndexRoute,

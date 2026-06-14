@@ -24,6 +24,10 @@
 		{
 			"binding": "MICROSOFT_TOKEN_VAULT",
 			"id": "79a29da0fd4a4b6ca90aa77aed5a39d8"
+		},
+		{
+			"binding": "ASANA_WEBHOOK_SECRETS",
+			"id": "3940400518f74a07acbe0beef0d46b8f"
 		}
 	],
 	"r2_buckets": [
@@ -89,7 +93,7 @@
 	},
 	"triggers": {
 		"crons": [
-			"0 12 * * *"
+			"*/15 * * * *"
 		]
 	},
 	"ai": {
@@ -97,7 +101,9 @@
 		"remote": true
 	},
 	"vars": {
-		"CLOUDFLARE_AI_GATEWAY_ID": "default"
+		"CLOUDFLARE_AI_GATEWAY_ID": "default",
+		"BRIEFING_REPORTING_WINDOW_HOURS": "24",
+		"ASANA_WEBHOOK_ORIGIN": "https://ai-command-center.rcormier.workers.dev"
 	},
 	"send_email": [
 		{

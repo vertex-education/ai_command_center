@@ -21,7 +21,7 @@ Pinned ideas, approvals, decisions, tasks, and artifacts render in a `Pinned Ite
 - Drizzle ORM
 - Cloudflare Workers runtime
 - Cloudflare D1 for structured workspace data
-- Cloudflare KV for encrypted Microsoft Graph token storage
+- Cloudflare KV for encrypted Microsoft Graph token storage and per-workspace Asana webhook secrets
 - Cloudflare R2 for artifact files
 - Cloudflare Workers AI for assistant responses, embeddings, and prompt intent routing
 - Cloudflare Vectorize for scoped RAG artifact retrieval
@@ -114,6 +114,8 @@ Core tables:
 - `workspace_actions`: decisions, approvals, and tasks, including status, original assistant text, project scope, and explicit pin state.
 - `microsoft_graph_subscriptions`: Teams and Outlook Graph webhook subscription tracking, including active Teams subscription counts for the 10,000 tenant limit.
 - `microsoft_graph_webhook_deliveries`: audit rows for queued Graph webhook deliveries.
+- `asana_project_webhooks`: project-level Asana webhook registry used to prevent duplicate subscriptions and repair failed setup.
+- `asana_webhook_task_states`: latest verified Asana task webhook state by Asana task gid.
 
 Generated Drizzle migrations are stored in `drizzle/`.
 
@@ -142,6 +144,7 @@ Standalone Cloudflare deployment uses [wrangler.jsonc](wrangler.jsonc):
 
 - `DB` -> D1 database `ai-command-center-db`
 - `MICROSOFT_TOKEN_VAULT` -> KV namespace for AES-256-GCM encrypted Microsoft Graph access and refresh tokens
+- `ASANA_WEBHOOK_SECRETS` -> KV namespace for Asana `X-Hook-Secret` values captured during webhook handshakes
 - `ARTIFACTS_BUCKET` -> R2 bucket `ai-command-center-artifacts`
 - `VECTORIZE` -> Vectorize index `ai-command-center-rag`
 - `DOCUMENT_INGESTION_QUEUE` -> Queue for scoped RAG document ingestion
@@ -150,7 +153,8 @@ Standalone Cloudflare deployment uses [wrangler.jsonc](wrangler.jsonc):
 - `CHAT_SYNC` -> Durable Object namespace for chat presence and live chat events
 - `TOKEN_VAULT_KEY` -> 32-byte base64 Cloudflare Secret used as the AES-256-GCM key for Microsoft Graph token encryption
 - `MICROSOFT_ENTRA_CLIENT_ID`, `MICROSOFT_ENTRA_CLIENT_SECRET`, and `MICROSOFT_ENTRA_TENANT_ID` -> Cloudflare Secrets used for Microsoft sign-in and automatic Microsoft Graph token refresh
-- `ASANA_WEBHOOK_SECRET` -> Cloudflare Secret used to verify Asana webhook HMAC-SHA256 signatures before accepting task updates
+- `ASANA_WEBHOOK_SECRET` -> optional legacy fallback Cloudflare Secret used only when a per-workspace webhook secret has not been stored in `ASANA_WEBHOOK_SECRETS`
+- `ASANA_WEBHOOK_ORIGIN` -> public Worker origin used when creating Asana webhook target URLs outside the browser request origin
 - `ASANA_WEBHOOK_PROJECT_MAP` -> optional JSON environment value mapping Asana project or task gids to local project ids or `{ "projectId": "...", "chatId": "..." }` targets
 - `ASANA_WEBHOOK_SOURCE_USER_ID` -> optional local user id used as the source for database mutation events created from verified Asana webhooks
 - `ASANA_CLIENT_ID` and `ASANA_CLIENT_SECRET` -> Cloudflare Secrets used for Asana OAuth account connections and refresh-token rotation
@@ -240,23 +244,24 @@ The D1 schema for this flow lives in [drizzle/0013_asana_oauth_integration.sql](
 - `asana_oauth_states`: short-lived state and PKCE verifier records.
 - `asana_connections`: connected Asana account metadata and granted scopes.
 - `asana_project_mappings`: Asana-to-VertexAI project links, project chat routing, and captured task-write permission.
+- `asana_project_webhooks`: Asana project webhook gid, target URL, status, and last setup error.
 
 ## Asana Webhook Receiver
 
-The Cloudflare Worker exposes `POST /api/asana-webhook` for Asana task update webhooks.
+The Cloudflare Worker exposes `POST /api/webhooks/asana` for Asana task update webhooks.
 
-- During Asana's webhook handshake, the route echoes `X-Hook-Secret` and returns `204`.
-- For event deliveries, the route reads the raw request body, extracts `X-Asana-Request-Signature` or Asana's standard `X-Hook-Signature`, computes an HMAC-SHA256 digest with `ASANA_WEBHOOK_SECRET`, and compares the signatures before parsing JSON.
-- Verified task updates are resolved through `asana_project_mappings` first, then the legacy optional env map. Matching updates are inserted as system chat messages, published through `CHAT_SYNC`, and recorded in the D1 `events` table so `/api/chat-events` and `/api/events` subscribers refresh through the existing SSE sync path.
+- Configure each project-level Asana webhook target URL with `asanaWorkspaceGid` and `asanaProjectGid`, for example `https://<app-origin>/api/webhooks/asana?asanaWorkspaceGid=<asana-workspace-gid>&asanaProjectGid=<asana-project-gid>`. The workspace value is stored with task state, and the workspace plus project pair is the lookup key for that webhook's signing secret.
+- New Asana project mappings automatically call Asana's webhook API after the mapping is saved. The receiver first checks `asana_project_webhooks`, then checks existing Asana webhooks for the same project/target when the connected token can read webhooks, and only creates a new webhook when no active matching webhook exists.
+- The Profile > Asana page includes a Repair webhooks action that re-runs this idempotent ensure flow for all mapped projects available to the connected user.
+- During Asana's webhook handshake, the route stores the exact `X-Hook-Secret` value in the `ASANA_WEBHOOK_SECRETS` KV namespace and returns `200 OK` with the same `X-Hook-Secret` response header.
+- For event deliveries, the route reads the raw request body, extracts `X-Hook-Signature` or `X-Asana-Request-Signature`, retrieves the stored workspace secret from KV, imports it with `crypto.subtle.importKey("raw", secretKeyData, { name: "HMAC", hash: "SHA-256" }, false, ["verify"])`, and validates the signature with `crypto.subtle.verify` before parsing JSON.
+- Verified task updates are upserted into `asana_webhook_task_states` through Drizzle, then resolved through `asana_project_mappings` first and the optional env map second. Matching updates are inserted as system chat messages, published through `CHAT_SYNC`, and recorded in the D1 `events` table so `/api/chat-events` and `/api/events` subscribers refresh through the existing SSE sync path.
 - If the signature is valid but the payload cannot be mapped to a local project chat, the route returns `202` with `delivered: false` instead of guessing the destination.
+- If the signature is missing or invalid, the route returns `401 Unauthorized` before parsing the event JSON.
 
 Asana-enabled project chats also create durable Asana snapshots. The first retrieval stores a baseline in `asana_project_snapshots`; later retrievals compare the current tasks/status updates/stories to the latest snapshot. Changed snapshots are saved to R2 and queued through `DOCUMENT_INGESTION_QUEUE`, which embeds them into Vectorize through the existing scoped RAG document ingestion path.
 
-Set the required secret with Wrangler:
-
-```powershell
-"<asana-webhook-secret>" | node ./scripts/run-wrangler.mjs secret put ASANA_WEBHOOK_SECRET --config=./wrangler.jsonc
-```
+The normal production path does not require pre-seeding an Asana webhook secret: Asana provides the secret during the creation handshake, and the Worker stores it in KV. `ASANA_WEBHOOK_SECRET` remains available only as a legacy fallback for older single-secret deployments.
 
 For deterministic routing, configure a JSON project map. Keys can be Asana project gids or task gids:
 
@@ -268,6 +273,8 @@ For deterministic routing, configure a JSON project map. Keys can be Asana proje
 ```
 
 Without `ASANA_WEBHOOK_PROJECT_MAP`, the receiver attempts to match Asana project gids or project names to local `projects.id` or `projects.name`. Set `ASANA_WEBHOOK_SOURCE_USER_ID` when you want mutation rows attributed to a specific integration user; otherwise the receiver uses the first active admin or user account.
+
+See [docs/asana-webhooks.md](docs/asana-webhooks.md) for setup and operating notes.
 
 ## D1 Setup
 

@@ -1,17 +1,20 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
 import { env } from "cloudflare:workers";
+import { drizzle } from "drizzle-orm/d1";
+import { asanaWebhookTaskStates } from "../../db/schema";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { recordRealtimeMutationEvent } from "@/lib/realtime-events";
 import type { ChatMessage, WorkspaceMode } from "@/lib/pmo-data";
 
 type AsanaWebhookEnv = Env & {
+  ASANA_WEBHOOK_SECRETS?: KVNamespace;
   ASANA_WEBHOOK_SECRET?: string;
   ASANA_WEBHOOK_PROJECT_MAP?: string;
   ASANA_WEBHOOK_SOURCE_USER_ID?: string;
 };
 
-type AsanaWebhookPayload = {
+type AsanaWebhookPayload = AsanaWebhookEvent[] | {
   events?: AsanaWebhookEvent[];
 };
 
@@ -53,13 +56,19 @@ const signatureHeaderNames = ["X-Asana-Request-Signature", "X-Hook-Signature"];
 const webhookSourceClientId = "asana-webhook";
 const encoder = new TextEncoder();
 
-export async function handleAsanaWebhookRequest(request: Request) {
+export async function handleAsanaWebhookRequest(request: Request, runtimeEnv: AsanaWebhookEnv = env as AsanaWebhookEnv) {
   if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+
+  const webhookScope = resolveWebhookScope(request);
+  if (!webhookScope.workspaceKey) {
+    return Response.json({ error: "Asana webhook workspaceId or asanaWorkspaceGid is required." }, { status: 400 });
+  }
 
   const handshakeSecret = request.headers.get("X-Hook-Secret");
   if (handshakeSecret) {
+    await storeWebhookSecret(runtimeEnv, webhookScope.secretKey, handshakeSecret);
     return new Response(null, {
-      status: 204,
+      status: 200,
       headers: { "X-Hook-Secret": handshakeSecret },
     });
   }
@@ -68,8 +77,8 @@ export async function handleAsanaWebhookRequest(request: Request) {
   const signature = getSignatureHeader(request.headers);
   if (!signature) return Response.json({ error: "Missing Asana webhook signature." }, { status: 401 });
 
-  const webhookEnv = env as AsanaWebhookEnv;
-  const secret = webhookEnv.ASANA_WEBHOOK_SECRET?.trim();
+  const webhookEnv = runtimeEnv;
+  const secret = await loadWebhookSecret(webhookEnv, webhookScope.secretKey);
   if (!secret) return Response.json({ error: "Asana webhook secret is not configured." }, { status: 500 });
 
   const verified = await verifyAsanaSignature({ rawBody, secret, signature });
@@ -82,8 +91,10 @@ export async function handleAsanaWebhookRequest(request: Request) {
     return Response.json({ error: "Invalid JSON payload." }, { status: 400 });
   }
 
-  const events = Array.isArray(payload.events) ? payload.events : [];
+  const events = Array.isArray(payload) ? payload : Array.isArray(payload.events) ? payload.events : [];
   if (events.length === 0) return Response.json({ accepted: true, delivered: false, reason: "No events in payload." });
+
+  await upsertAsanaTaskStates(webhookEnv, webhookScope.workspaceKey, events);
 
   const target = await resolveProjectChatTarget(events, webhookEnv);
   if (!target) {
@@ -130,6 +141,31 @@ export async function handleAsanaWebhookRequest(request: Request) {
   });
 }
 
+function resolveWebhookScope(request: Request) {
+  const url = new URL(request.url);
+  const workspaceKey = url.searchParams.get("workspaceId")?.trim() || url.searchParams.get("asanaWorkspaceGid")?.trim() || "";
+  const resourceKey = url.searchParams.get("asanaProjectGid")?.trim() || url.searchParams.get("webhookKey")?.trim() || "";
+  return {
+    workspaceKey,
+    secretKey: resourceKey ? `${workspaceKey}:${resourceKey}` : workspaceKey,
+  };
+}
+
+function webhookSecretKey(secretKey: string) {
+  return `asana:webhook-secret:${secretKey}`;
+}
+
+async function storeWebhookSecret(webhookEnv: AsanaWebhookEnv, secretKey: string, secret: string) {
+  const namespace = webhookEnv.ASANA_WEBHOOK_SECRETS;
+  if (!namespace) throw new Error("ASANA_WEBHOOK_SECRETS KV binding is not configured.");
+  await namespace.put(webhookSecretKey(secretKey), secret);
+}
+
+async function loadWebhookSecret(webhookEnv: AsanaWebhookEnv, secretKey: string) {
+  const kvSecret = await webhookEnv.ASANA_WEBHOOK_SECRETS?.get(webhookSecretKey(secretKey));
+  return kvSecret?.trim() || webhookEnv.ASANA_WEBHOOK_SECRET?.trim() || "";
+}
+
 function getSignatureHeader(headers: Headers) {
   for (const name of signatureHeaderNames) {
     const value = headers.get(name);
@@ -147,36 +183,106 @@ async function verifyAsanaSignature({
   secret: string;
   signature: string;
 }) {
+  const signatureBytes = hexToBytes(normalizeSignature(signature));
+  if (!signatureBytes) return false;
+
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign"],
+    ["verify"],
   );
-  const digest = await crypto.subtle.sign("HMAC", key, rawBody);
-  const expected = toHex(new Uint8Array(digest));
-  return timingSafeEqualHex(expected, normalizeSignature(signature));
+  return crypto.subtle.verify("HMAC", key, signatureBytes, rawBody);
 }
 
 function normalizeSignature(signature: string) {
   return signature.trim().toLowerCase().replace(/^sha256=/, "");
 }
 
-function toHex(bytes: Uint8Array) {
-  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+function hexToBytes(hex: string) {
+  if (!/^[0-9a-f]+$/.test(hex) || hex.length % 2 !== 0) return null;
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < hex.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(hex.slice(index, index + 2), 16);
+  }
+  return bytes;
 }
 
-function timingSafeEqualHex(left: string, right: string) {
-  if (!/^[0-9a-f]+$/.test(left) || !/^[0-9a-f]+$/.test(right)) return false;
-  const leftBytes = encoder.encode(left);
-  const rightBytes = encoder.encode(right);
-  let diff = leftBytes.length ^ rightBytes.length;
-  const length = Math.max(leftBytes.length, rightBytes.length);
-  for (let index = 0; index < length; index += 1) {
-    diff |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+async function upsertAsanaTaskStates(webhookEnv: AsanaWebhookEnv, workspaceKey: string, events: AsanaWebhookEvent[]) {
+  const taskEvents = events.map((event) => normalizeTaskStateEvent(workspaceKey, event)).filter((event): event is AsanaTaskStateUpsert => Boolean(event));
+  if (taskEvents.length === 0) return;
+
+  const db = drizzle(webhookEnv.DB);
+  for (const taskEvent of taskEvents) {
+    await db
+      .insert(asanaWebhookTaskStates)
+      .values(taskEvent)
+      .onConflictDoUpdate({
+        target: asanaWebhookTaskStates.asanaTaskGid,
+        set: {
+          asanaWorkspaceGid: taskEvent.asanaWorkspaceGid,
+          vertexWorkspaceId: taskEvent.vertexWorkspaceId,
+          asanaProjectGid: taskEvent.asanaProjectGid,
+          taskName: taskEvent.taskName,
+          action: taskEvent.action,
+          changeAction: taskEvent.changeAction,
+          changeField: taskEvent.changeField,
+          status: taskEvent.status,
+          lastEventAt: taskEvent.lastEventAt,
+          rawEventJson: taskEvent.rawEventJson,
+          updatedAt: taskEvent.updatedAt,
+        },
+      })
+      .run();
   }
-  return diff === 0;
+}
+
+type AsanaTaskStateUpsert = typeof asanaWebhookTaskStates.$inferInsert;
+
+function normalizeTaskStateEvent(workspaceKey: string, event: AsanaWebhookEvent): AsanaTaskStateUpsert | null {
+  const task = event.resource?.resource_type === "task"
+    ? event.resource
+    : event.parent?.resource_type === "task"
+      ? event.parent
+      : null;
+  const asanaTaskGid = task?.gid?.trim();
+  if (!task || !asanaTaskGid) return null;
+
+  const now = new Date();
+  return {
+    asanaTaskGid,
+    asanaWorkspaceGid: workspaceKey,
+    vertexWorkspaceId: null,
+    asanaProjectGid: event.parent?.resource_type === "project" ? event.parent.gid ?? null : null,
+    taskName: task.name ?? null,
+    action: event.action ?? "changed",
+    changeAction: event.change?.action ?? null,
+    changeField: event.change?.field ?? null,
+    status: extractEventStatus(event),
+    lastEventAt: now,
+    rawEventJson: JSON.stringify(event),
+    updatedAt: now,
+  };
+}
+
+function extractEventStatus(event: AsanaWebhookEvent) {
+  const field = event.change?.field?.trim().toLowerCase();
+  if (!field || !["status", "completed", "approval_status", "custom_fields"].includes(field)) return null;
+  const value = event.change?.new_value;
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return value ? "completed" : "incomplete";
+  if (isObjectRecord(value)) {
+    const name = value.name;
+    if (typeof name === "string") return name;
+    const text = value.text_value;
+    if (typeof text === "string") return text;
+  }
+  return value === null ? null : String(value);
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function resolveProjectChatTarget(events: AsanaWebhookEvent[], webhookEnv: AsanaWebhookEnv) {

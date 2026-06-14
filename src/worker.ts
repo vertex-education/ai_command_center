@@ -1,6 +1,8 @@
 /// <reference path="../worker-configuration.d.ts" />
 
 import serverEntry from "@tanstack/react-start/server-entry";
+import { Hono } from "hono";
+import { handleAsanaWebhookRequest } from "./lib/asana-webhook";
 import { runDailyProjectBriefings } from "./lib/daily-briefings";
 import { handleDocumentIngestionQueue, type DocumentIngestionEnv, type DocumentIngestionJob } from "./lib/document-ingestion-queue";
 import { processMicrosoftGraphWebhookJob, type MicrosoftGraphWebhookEnv, type MicrosoftGraphWebhookJob } from "./lib/microsoft-graph-webhooks";
@@ -10,8 +12,16 @@ export { ChatSyncDurableObject } from "./lib/chat-sync";
 type AppQueueJob = DocumentIngestionJob | MicrosoftGraphWebhookJob;
 type AppQueueEnv = DocumentIngestionEnv & MicrosoftGraphWebhookEnv;
 
+const webhookApp = new Hono<{ Bindings: Env }>();
+webhookApp.post("/api/webhooks/asana", (c) => handleAsanaWebhookRequest(c.req.raw, c.env));
+
 export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/webhooks/asana") {
+      return webhookApp.fetch(request, env, ctx);
+    }
+
     const requestOptions = {
       context: {
         cloudflare: { env, ctx },

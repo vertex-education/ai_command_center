@@ -12,6 +12,7 @@ import { getSessionSnapshot } from "@/lib/auth-workflow";
 import {
   disconnectAsanaConnection,
   getAsanaConnectionSummary,
+  repairAsanaProjectWebhooks,
   saveAsanaProjectMappings,
   startAsanaConnection,
   type AsanaConnectionSummary,
@@ -102,6 +103,12 @@ function AsanaIntegrationPage() {
       setSavingProjectGid(null);
     },
   });
+  const repairWebhooksMutation = useMutation({
+    mutationFn: () => repairAsanaProjectWebhooks(),
+    onSuccess: () => {
+      void summaryQuery.refetch();
+    },
+  });
 
   const canConfirmScaffold = targetMode !== "Team" || Boolean(targetTeamId);
 
@@ -184,9 +191,15 @@ function AsanaIntegrationPage() {
                       Refresh
                     </Button>
                     {summary?.connected ? (
-                      <Button type="button" variant="outline" disabled={disconnectMutation.isPending} onClick={() => disconnectMutation.mutate()}>
-                        Disconnect
-                      </Button>
+                      <>
+                        <Button type="button" variant="outline" disabled={repairWebhooksMutation.isPending} onClick={() => repairWebhooksMutation.mutate()}>
+                          <RefreshCw className={`size-4 ${repairWebhooksMutation.isPending ? "animate-spin" : ""}`} />
+                          Repair webhooks
+                        </Button>
+                        <Button type="button" variant="outline" disabled={disconnectMutation.isPending} onClick={() => disconnectMutation.mutate()}>
+                          Disconnect
+                        </Button>
+                      </>
                     ) : (
                       <Button type="button" disabled={connectMutation.isPending || summary?.configured === false} onClick={() => connectMutation.mutate()}>
                         <ExternalLink className="size-4" />

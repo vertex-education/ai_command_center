@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { Gauge, Inbox, KeyRound, PlayCircle, Plug, ShieldCheck, UserRound } from "lucide-react";
+import { CalendarClock, Gauge, Inbox, KeyRound, PlayCircle, Plug, ShieldCheck, UserRound } from "lucide-react";
 import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -91,6 +91,10 @@ function UserProfilePage() {
                     <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/profile/asana")}>
                       <Plug className="size-4" />
                       Asana integration
+                    </Button>
+                    <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/profile/briefings")}>
+                      <CalendarClock className="size-4" />
+                      Automated briefings
                     </Button>
                     {session.user.role === "admin" ? (
                       <Button className="w-full justify-start" type="button" variant="outline" onClick={() => (window.location.href = "/admin")}>

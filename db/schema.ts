@@ -273,6 +273,7 @@ export const chatMessages = sqliteTable(
     workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
     author: text("author").notNull(),
     role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
+    type: text("type", { enum: ["message", "briefing"] }).notNull().default("message"),
     avatar: text("avatar"),
     messageTime: text("message_time").notNull(),
     body: text("body").notNull(),
@@ -379,9 +380,11 @@ export const workspaceActions = sqliteTable(
     source: text("source"),
     status: text("status").notNull(),
     pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
   },
   (table) => ({
     workspaceKindIdx: index("workspace_actions_workspace_kind_idx").on(table.workspaceId, table.kind),
+    workspaceKindCreatedIdx: index("workspace_actions_kind_created_idx").on(table.workspaceId, table.kind, table.createdAt),
   }),
 );
 
@@ -407,6 +410,56 @@ export const adminUsageEvents = sqliteTable(
     providerIdx: index("admin_usage_events_provider_idx").on(table.provider, table.createdAt),
     scopeIdx: index("admin_usage_events_scope_idx").on(table.teamId, table.projectId, table.createdAt),
     chatIdx: index("admin_usage_events_chat_idx").on(table.chatId, table.createdAt),
+  }),
+);
+
+export const briefingSchedules = sqliteTable(
+  "briefing_schedules",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").references(() => chats.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    recurrence: text("recurrence", { enum: ["daily", "weekdays", "weekly", "monthly", "once"] }).notNull(),
+    timeZone: text("time_zone").notNull(),
+    localTime: text("local_time").notNull(),
+    weekdaysJson: text("weekdays_json").notNull().default("[]"),
+    monthDay: integer("month_day"),
+    runOnceAt: integer("run_once_at", { mode: "timestamp_ms" }),
+    reportingWindowHours: integer("reporting_window_hours").notNull().default(24),
+    promptInstructions: text("prompt_instructions").notNull().default(""),
+    nextRunAt: integer("next_run_at", { mode: "timestamp_ms" }),
+    lastRunAt: integer("last_run_at", { mode: "timestamp_ms" }),
+    lastStatus: text("last_status"),
+    lastError: text("last_error"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    userIdx: index("briefing_schedules_user_idx").on(table.userId, table.updatedAt),
+    dueIdx: index("briefing_schedules_due_idx").on(table.enabled, table.nextRunAt),
+    scopeIdx: index("briefing_schedules_scope_idx").on(table.workspaceId, table.projectId),
+  }),
+);
+
+export const briefingRuns = sqliteTable(
+  "briefing_runs",
+  {
+    id: text("id").primaryKey(),
+    scheduleId: text("schedule_id").references(() => briefingSchedules.id, { onDelete: "set null" }),
+    chatMessageId: text("chat_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+    trigger: text("trigger", { enum: ["scheduled", "test", "manual-post"] }).notNull(),
+    status: text("status", { enum: ["success", "error"] }).notNull(),
+    outputMarkdown: text("output_markdown"),
+    error: text("error"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    scheduleIdx: index("briefing_runs_schedule_idx").on(table.scheduleId, table.createdAt),
+    statusIdx: index("briefing_runs_status_idx").on(table.status, table.createdAt),
   }),
 );
 
@@ -511,6 +564,26 @@ export const asanaProjectMappings = sqliteTable(
   }),
 );
 
+export const asanaProjectWebhooks = sqliteTable(
+  "asana_project_webhooks",
+  {
+    asanaProjectGid: text("asana_project_gid").primaryKey(),
+    asanaWorkspaceGid: text("asana_workspace_gid").notNull(),
+    webhookGid: text("webhook_gid"),
+    targetUrl: text("target_url").notNull(),
+    status: text("status", { enum: ["active", "creating", "failed", "deleted"] }).notNull().default("creating"),
+    lastError: text("last_error"),
+    createdByUserId: text("created_by_user_id").references(() => user.id, { onDelete: "set null" }),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    workspaceIdx: index("asana_project_webhooks_workspace_idx").on(table.asanaWorkspaceGid, table.updatedAt),
+    statusIdx: index("asana_project_webhooks_status_idx").on(table.status, table.updatedAt),
+    webhookIdx: uniqueIndex("asana_project_webhooks_webhook_idx").on(table.webhookGid),
+  }),
+);
+
 export const asanaProjectSnapshots = sqliteTable(
   "asana_project_snapshots",
   {
@@ -536,5 +609,28 @@ export const asanaProjectSnapshots = sqliteTable(
     mappingCreatedIdx: index("asana_project_snapshots_mapping_created_idx").on(table.mappingId, table.createdAt),
     mappingHashIdx: uniqueIndex("asana_project_snapshots_mapping_hash_idx").on(table.mappingId, table.snapshotHash),
     vertexProjectIdx: index("asana_project_snapshots_vertex_project_idx").on(table.vertexProjectId, table.createdAt),
+  }),
+);
+
+export const asanaWebhookTaskStates = sqliteTable(
+  "asana_webhook_task_states",
+  {
+    asanaTaskGid: text("asana_task_gid").primaryKey(),
+    asanaWorkspaceGid: text("asana_workspace_gid").notNull(),
+    vertexWorkspaceId: text("vertex_workspace_id"),
+    asanaProjectGid: text("asana_project_gid"),
+    taskName: text("task_name"),
+    action: text("action").notNull(),
+    changeAction: text("change_action"),
+    changeField: text("change_field"),
+    status: text("status"),
+    lastEventAt: integer("last_event_at", { mode: "timestamp_ms" }).notNull(),
+    rawEventJson: text("raw_event_json").notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    workspaceIdx: index("asana_webhook_task_states_workspace_idx").on(table.asanaWorkspaceGid, table.updatedAt),
+    vertexWorkspaceIdx: index("asana_webhook_task_states_vertex_workspace_idx").on(table.vertexWorkspaceId, table.updatedAt),
+    projectIdx: index("asana_webhook_task_states_project_idx").on(table.asanaProjectGid, table.updatedAt),
   }),
 );

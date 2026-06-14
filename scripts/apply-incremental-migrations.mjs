@@ -466,6 +466,129 @@ const migrations = [
       "CREATE INDEX IF NOT EXISTS asana_project_snapshots_vertex_project_idx ON asana_project_snapshots (vertex_project_id, created_at);",
     ],
   },
+  {
+    name: "0017_asana_webhook_task_states",
+    isComplete: () =>
+      tableExists("asana_webhook_task_states") &&
+      indexExists("asana_webhook_task_states_workspace_idx") &&
+      indexExists("asana_webhook_task_states_vertex_workspace_idx") &&
+      indexExists("asana_webhook_task_states_project_idx"),
+    statements: [
+      `CREATE TABLE IF NOT EXISTS asana_webhook_task_states (
+  asana_task_gid TEXT PRIMARY KEY,
+  asana_workspace_gid TEXT NOT NULL,
+  vertex_workspace_id TEXT,
+  asana_project_gid TEXT,
+  task_name TEXT,
+  action TEXT NOT NULL,
+  change_action TEXT,
+  change_field TEXT,
+  status TEXT,
+  last_event_at INTEGER NOT NULL,
+  raw_event_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);`,
+      "CREATE INDEX IF NOT EXISTS asana_webhook_task_states_workspace_idx ON asana_webhook_task_states (asana_workspace_gid, updated_at);",
+      "CREATE INDEX IF NOT EXISTS asana_webhook_task_states_vertex_workspace_idx ON asana_webhook_task_states (vertex_workspace_id, updated_at);",
+      "CREATE INDEX IF NOT EXISTS asana_webhook_task_states_project_idx ON asana_webhook_task_states (asana_project_gid, updated_at);",
+    ],
+  },
+  {
+    name: "0018_scheduled_briefings",
+    isComplete: () =>
+      columnExists("chat_messages", "type") &&
+      columnExists("workspace_actions", "created_at") &&
+      indexExists("workspace_actions_kind_created_idx"),
+    steps: [
+      {
+        isComplete: () => columnExists("chat_messages", "type"),
+        statement: "ALTER TABLE chat_messages ADD COLUMN type text DEFAULT 'message' NOT NULL;",
+      },
+      {
+        isComplete: () => columnExists("workspace_actions", "created_at"),
+        statement: "ALTER TABLE workspace_actions ADD COLUMN created_at integer DEFAULT 0 NOT NULL;",
+      },
+      {
+        isComplete: () => indexExists("workspace_actions_kind_created_idx"),
+        statement: "CREATE INDEX IF NOT EXISTS workspace_actions_kind_created_idx ON workspace_actions (workspace_id, kind, created_at);",
+      },
+    ],
+  },
+  {
+    name: "0019_user_briefing_schedules",
+    isComplete: () =>
+      tableExists("briefing_schedules") &&
+      tableExists("briefing_runs") &&
+      indexExists("briefing_schedules_user_idx") &&
+      indexExists("briefing_schedules_due_idx") &&
+      indexExists("briefing_schedules_scope_idx") &&
+      indexExists("briefing_runs_schedule_idx") &&
+      indexExists("briefing_runs_status_idx"),
+    statements: [
+      `CREATE TABLE IF NOT EXISTS briefing_schedules (
+  id TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  chat_id TEXT REFERENCES chats(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  recurrence TEXT NOT NULL,
+  time_zone TEXT NOT NULL,
+  local_time TEXT NOT NULL,
+  weekdays_json TEXT NOT NULL DEFAULT '[]',
+  month_day INTEGER,
+  run_once_at INTEGER,
+  reporting_window_hours INTEGER NOT NULL DEFAULT 24,
+  prompt_instructions TEXT NOT NULL DEFAULT '',
+  next_run_at INTEGER,
+  last_run_at INTEGER,
+  last_status TEXT,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);`,
+      "CREATE INDEX IF NOT EXISTS briefing_schedules_user_idx ON briefing_schedules (user_id, updated_at);",
+      "CREATE INDEX IF NOT EXISTS briefing_schedules_due_idx ON briefing_schedules (enabled, next_run_at);",
+      "CREATE INDEX IF NOT EXISTS briefing_schedules_scope_idx ON briefing_schedules (workspace_id, project_id);",
+      `CREATE TABLE IF NOT EXISTS briefing_runs (
+  id TEXT PRIMARY KEY NOT NULL,
+  schedule_id TEXT REFERENCES briefing_schedules(id) ON DELETE SET NULL,
+  chat_message_id TEXT REFERENCES chat_messages(id) ON DELETE SET NULL,
+  trigger TEXT NOT NULL,
+  status TEXT NOT NULL,
+  output_markdown TEXT,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);`,
+      "CREATE INDEX IF NOT EXISTS briefing_runs_schedule_idx ON briefing_runs (schedule_id, created_at);",
+      "CREATE INDEX IF NOT EXISTS briefing_runs_status_idx ON briefing_runs (status, created_at);",
+    ],
+  },
+  {
+    name: "0020_asana_project_webhooks",
+    isComplete: () =>
+      tableExists("asana_project_webhooks") &&
+      indexExists("asana_project_webhooks_workspace_idx") &&
+      indexExists("asana_project_webhooks_status_idx") &&
+      indexExists("asana_project_webhooks_webhook_idx"),
+    statements: [
+      `CREATE TABLE IF NOT EXISTS asana_project_webhooks (
+  asana_project_gid TEXT PRIMARY KEY,
+  asana_workspace_gid TEXT NOT NULL,
+  webhook_gid TEXT,
+  target_url TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'creating' CHECK (status IN ('active', 'creating', 'failed', 'deleted')),
+  last_error TEXT,
+  created_by_user_id TEXT REFERENCES "user"(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);`,
+      "CREATE INDEX IF NOT EXISTS asana_project_webhooks_workspace_idx ON asana_project_webhooks (asana_workspace_gid, updated_at);",
+      "CREATE INDEX IF NOT EXISTS asana_project_webhooks_status_idx ON asana_project_webhooks (status, updated_at);",
+      "CREATE UNIQUE INDEX IF NOT EXISTS asana_project_webhooks_webhook_idx ON asana_project_webhooks (webhook_gid);",
+    ],
+  },
 ];
 
 ensureMigrationTable();

@@ -103,6 +103,11 @@ export const saveAsanaProjectMappings = createServerFn({ method: "POST" })
     return saveAsanaProjectMappingsForCurrentUser(data);
   });
 
+export const repairAsanaProjectWebhooks = createServerFn({ method: "POST" }).handler(async () => {
+  const { repairAsanaProjectWebhooksForCurrentUser } = await import("@/lib/asana-integration.server");
+  return repairAsanaProjectWebhooksForCurrentUser();
+});
+
 export const createAsanaTaskForMappedProject = createServerFn({ method: "POST" })
   .validator((data: { vertexProjectId: string; title: string; notes?: string }) => data)
   .handler(async ({ data }) => {

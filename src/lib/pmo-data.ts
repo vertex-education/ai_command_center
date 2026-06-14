@@ -2039,8 +2039,8 @@ async function persistWorkflowAction(
   await getDb()
     .prepare(
       `INSERT OR REPLACE INTO workspace_actions (
-         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       item.id,
@@ -2054,6 +2054,7 @@ async function persistWorkflowAction(
       kind === "task" ? (item as Task).source : null,
       item.status,
       item.pinned ? 1 : 0,
+      Date.now(),
     )
     .run();
 }

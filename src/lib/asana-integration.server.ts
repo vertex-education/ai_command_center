@@ -11,6 +11,7 @@ type AsanaIntegrationEnv = AsanaTokenVaultEnv & {
   ASANA_CLIENT_ID?: string;
   ASANA_CLIENT_SECRET?: string;
   ASANA_USE_FULL_PERMISSIONS?: string;
+  ASANA_WEBHOOK_ORIGIN?: string;
   ARTIFACTS_BUCKET?: R2Bucket;
   DOCUMENT_INGESTION_QUEUE?: Queue<DocumentIngestionJob>;
 };
@@ -48,6 +49,16 @@ type AsanaApiEnvelope<T> = {
     uri?: string;
   } | null;
   errors?: Array<{ message?: string }>;
+};
+
+type AsanaWebhookRecord = {
+  gid: string;
+  active?: boolean;
+  target?: string;
+  resource?: {
+    gid?: string;
+    name?: string;
+  };
 };
 
 type AsanaWorkspace = {
@@ -535,6 +546,7 @@ async function safeSummaryRead<T>(event: string, userId: string, read: () => Pro
 
 export async function saveAsanaProjectMappingsForCurrentUser(data: { selections: AsanaMappingSelection[] }) {
     const user = await requireWorkspaceEditor();
+    const request = getRequest();
     const connection = await getConnectionForUser(user.id);
     if (!connection) throw new Error("Connect Asana before mapping projects.");
 
@@ -543,7 +555,7 @@ export async function saveAsanaProjectMappingsForCurrentUser(data: { selections:
     const asanaProjectByGid = new Map(asanaProjects.map((project) => [project.gid, project]));
     const tokenSet = await getValidAsanaTokens({ env: integrationEnv(), userId: user.id });
     const asanaUser = tokenSet ? await fetchAsanaMe(tokenSet.accessToken) : null;
-    const results: Array<{ asanaProjectGid: string; action: string; vertexProjectId?: string }> = [];
+    const results: Array<{ asanaProjectGid: string; action: string; vertexProjectId?: string; webhookStatus?: string; webhookGid?: string | null }> = [];
 
     for (const selection of data.selections) {
       if (selection.action === "ignore") continue;
@@ -558,10 +570,81 @@ export async function saveAsanaProjectMappingsForCurrentUser(data: { selections:
         : await getAccessibleVertexProject(user.id, selection.vertexProjectId ?? "");
       if (!vertexProject) throw new Error("Select a VertexAI project you can access.");
       await upsertAsanaProjectMapping({ connectionId: connection.id, userId: user.id, asanaProject, vertexProject });
-      results.push({ asanaProjectGid: asanaProject.gid, action: selection.action, vertexProjectId: vertexProject.id });
+      const webhook = tokenSet
+        ? await ensureAsanaProjectWebhook({
+          accessToken: tokenSet.accessToken,
+          asanaProject,
+          origin: asanaWebhookOrigin(request),
+          userId: user.id,
+        })
+        : await recordAsanaProjectWebhookFailure({
+          asanaProject,
+          error: "Asana OAuth token is unavailable; reconnect Asana and retry webhook setup.",
+          origin: asanaWebhookOrigin(request),
+          userId: user.id,
+        });
+      results.push({
+        asanaProjectGid: asanaProject.gid,
+        action: selection.action,
+        vertexProjectId: vertexProject.id,
+        webhookGid: webhook.webhookGid,
+        webhookStatus: webhook.status,
+      });
     }
 
     return { saved: results.length, results };
+}
+
+export async function repairAsanaProjectWebhooksForCurrentUser() {
+  const user = await requireWorkspaceEditor();
+  const tokenSet = await getValidAsanaTokens({ env: integrationEnv(), userId: user.id });
+  if (!tokenSet) throw new Error("Reconnect Asana before repairing webhooks.");
+
+  const rows = await getDb()
+    .prepare(
+      `SELECT asana_project_gid as gid,
+              asana_project_name as name,
+              asana_workspace_gid as workspaceGid,
+              asana_workspace_name as workspaceName,
+              asana_team_gid as teamGid
+       FROM asana_project_mappings
+       WHERE user_id = ?
+       ORDER BY updated_at DESC`,
+    )
+    .bind(user.id)
+    .all<{
+      gid: string;
+      name: string;
+      workspaceGid: string;
+      workspaceName: string;
+      teamGid: string | null;
+    }>();
+
+  const request = getRequest();
+  const results = [];
+  for (const row of rows.results ?? []) {
+    const result = await ensureAsanaProjectWebhook({
+      accessToken: tokenSet.accessToken,
+      asanaProject: {
+        gid: row.gid,
+        name: row.name,
+        workspaceGid: row.workspaceGid,
+        workspaceName: row.workspaceName,
+        teamGid: row.teamGid,
+        teamName: null,
+        portfolioGid: null,
+        portfolioName: null,
+        canWriteTasks: false,
+        permissionLevel: "unknown",
+        permissionSource: "repair",
+      },
+      origin: asanaWebhookOrigin(request),
+      userId: user.id,
+    });
+    results.push({ asanaProjectGid: row.gid, webhookGid: result.webhookGid, status: result.status });
+  }
+
+  return { repaired: results.length, results };
 }
 
 export async function createAsanaTaskForMappedProjectForCurrentUser(data: { vertexProjectId: string; title: string; notes?: string }) {
@@ -1987,6 +2070,198 @@ function projectPermissionRank(project: AsanaProjectOption) {
   if (project.canWriteTasks || project.permissionLevel === "write") return 3;
   if (project.permissionLevel === "unknown") return 2;
   return 1;
+}
+
+function asanaWebhookOrigin(request = getRequest()) {
+  return integrationEnv().ASANA_WEBHOOK_ORIGIN?.trim().replace(/\/+$/, "") || new URL(request.url).origin;
+}
+
+function asanaProjectWebhookTarget(origin: string, project: Pick<AsanaProjectOption, "gid" | "workspaceGid">) {
+  const target = new URL("/api/webhooks/asana", origin);
+  target.searchParams.set("asanaWorkspaceGid", project.workspaceGid);
+  target.searchParams.set("asanaProjectGid", project.gid);
+  return target.toString();
+}
+
+async function ensureAsanaProjectWebhook({
+  accessToken,
+  asanaProject,
+  origin,
+  userId,
+}: {
+  accessToken: string;
+  asanaProject: AsanaProjectOption;
+  origin: string;
+  userId: string;
+}) {
+  const targetUrl = asanaProjectWebhookTarget(origin, asanaProject);
+  const existing = await getAsanaProjectWebhookRecord(asanaProject.gid);
+  if (existing?.status === "active" && existing.targetUrl === targetUrl && existing.webhookGid) {
+    return { status: "active", webhookGid: existing.webhookGid };
+  }
+
+  try {
+    let remoteWebhook: AsanaWebhookRecord | null = null;
+    try {
+      remoteWebhook = await findExistingAsanaWebhook(accessToken, asanaProject, targetUrl);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        asanaProjectGid: asanaProject.gid,
+        event: "asana_project_webhook_lookup_failed",
+        error: error instanceof Error ? error.message : "Unknown Asana webhook lookup failure",
+      }));
+    }
+    const webhook = remoteWebhook ?? await createAsanaProjectWebhook(accessToken, asanaProject, targetUrl);
+    await upsertAsanaProjectWebhookRecord({
+      asanaProject,
+      status: "active",
+      targetUrl,
+      userId,
+      webhookGid: webhook.gid,
+    });
+    return { status: "active", webhookGid: webhook.gid };
+  } catch (error) {
+    return recordAsanaProjectWebhookFailure({
+      asanaProject,
+      error: error instanceof Error ? error.message : "Unknown Asana webhook setup failure",
+      origin,
+      userId,
+    });
+  }
+}
+
+async function recordAsanaProjectWebhookFailure({
+  asanaProject,
+  error,
+  origin,
+  userId,
+}: {
+  asanaProject: AsanaProjectOption;
+  error: string;
+  origin: string;
+  userId: string;
+}) {
+  await upsertAsanaProjectWebhookRecord({
+    asanaProject,
+    lastError: error,
+    status: "failed",
+    targetUrl: asanaProjectWebhookTarget(origin, asanaProject),
+    userId,
+    webhookGid: null,
+  });
+  console.warn(JSON.stringify({
+    asanaProjectGid: asanaProject.gid,
+    event: "asana_project_webhook_setup_failed",
+    error,
+  }));
+  return { status: "failed", webhookGid: null };
+}
+
+async function getAsanaProjectWebhookRecord(asanaProjectGid: string) {
+  return getDb()
+    .prepare(
+      `SELECT asana_project_gid as asanaProjectGid,
+              webhook_gid as webhookGid,
+              target_url as targetUrl,
+              status,
+              last_error as lastError
+       FROM asana_project_webhooks
+       WHERE asana_project_gid = ?
+       LIMIT 1`,
+    )
+    .bind(asanaProjectGid)
+    .first<{
+      asanaProjectGid: string;
+      webhookGid: string | null;
+      targetUrl: string;
+      status: "active" | "creating" | "failed" | "deleted";
+      lastError: string | null;
+    }>();
+}
+
+async function findExistingAsanaWebhook(accessToken: string, asanaProject: AsanaProjectOption, targetUrl: string) {
+  const webhooks = await asanaFetchPaginated<AsanaWebhookRecord>(
+    accessToken,
+    "/webhooks",
+    {
+      workspace: asanaProject.workspaceGid,
+      resource: asanaProject.gid,
+      opt_fields: "gid,active,target,resource.gid,resource.name",
+    },
+    10,
+  );
+  return webhooks.find((webhook) => webhook.target === targetUrl && webhook.active !== false) ?? null;
+}
+
+async function createAsanaProjectWebhook(accessToken: string, asanaProject: AsanaProjectOption, targetUrl: string) {
+  return asanaFetch<AsanaWebhookRecord>(accessToken, "/webhooks", {
+    method: "POST",
+    body: JSON.stringify({
+      data: {
+        resource: asanaProject.gid,
+        target: targetUrl,
+        filters: [
+          { resource_type: "task", action: "added" },
+          { resource_type: "task", action: "changed" },
+          { resource_type: "task", action: "removed" },
+          { resource_type: "task", action: "deleted" },
+          { resource_type: "task", action: "undeleted" },
+        ],
+      },
+    }),
+  });
+}
+
+async function upsertAsanaProjectWebhookRecord({
+  asanaProject,
+  lastError = null,
+  status,
+  targetUrl,
+  userId,
+  webhookGid,
+}: {
+  asanaProject: AsanaProjectOption;
+  lastError?: string | null;
+  status: "active" | "creating" | "failed" | "deleted";
+  targetUrl: string;
+  userId: string;
+  webhookGid: string | null;
+}) {
+  const now = Date.now();
+  await getDb()
+    .prepare(
+      `INSERT INTO asana_project_webhooks (
+        asana_project_gid,
+        asana_workspace_gid,
+        webhook_gid,
+        target_url,
+        status,
+        last_error,
+        created_by_user_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(asana_project_gid) DO UPDATE SET
+        asana_workspace_gid = excluded.asana_workspace_gid,
+        webhook_gid = excluded.webhook_gid,
+        target_url = excluded.target_url,
+        status = excluded.status,
+        last_error = excluded.last_error,
+        created_by_user_id = excluded.created_by_user_id,
+        updated_at = excluded.updated_at`,
+    )
+    .bind(
+      asanaProject.gid,
+      asanaProject.workspaceGid,
+      webhookGid,
+      targetUrl,
+      status,
+      lastError,
+      userId,
+      now,
+      now,
+    )
+    .run();
 }
 
 function dedupeAsanaPortfolios(portfolios: AsanaPortfolio[]) {

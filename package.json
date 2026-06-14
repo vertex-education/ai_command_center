@@ -26,6 +26,7 @@
     "r2:seed:remote": "powershell -ExecutionPolicy Bypass -File ./scripts/seed-r2.ps1 -Bucket ai-command-center-artifacts -Remote"
   },
   "dependencies": {
+    "@radix-ui/react-accordion": "^1.2.13",
     "@radix-ui/react-dialog": "^1.1.16",
     "@radix-ui/react-slot": "^1.2.5",
     "@tanstack/react-form": "^1.33.0",
@@ -39,6 +40,7 @@
     "clsx": "^2.1.1",
     "drizzle-orm": "0.45.2",
     "exceljs": "^4.4.0",
+    "hono": "^4.12.25",
     "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
     "pdfjs-dist": "^6.0.227",
