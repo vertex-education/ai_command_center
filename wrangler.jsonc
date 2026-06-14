@@ -96,6 +96,9 @@
 		"binding": "AI",
 		"remote": true
 	},
+	"vars": {
+		"CLOUDFLARE_AI_GATEWAY_ID": "default"
+	},
 	"send_email": [
 		{
 			"name": "EMAIL",

@@ -216,9 +216,10 @@ Asana account setup starts in Profile settings at `/profile/asana`.
 
 - `Connect Asana` starts the OAuth 2.0 authorization-code flow with PKCE and a server-side state check.
 - Access and refresh tokens are encrypted with AES-256-GCM and stored in the existing `MICROSOFT_TOKEN_VAULT` KV namespace under Asana-specific keys. Token material is not stored in D1 or exposed to the browser.
-- The wizard lists only projects where the connected Asana user has a project membership. Each project is probed for Asana membership write access and combined with the granted OAuth scopes.
+- The wizard lists projects discovered through the connected user's Asana team project memberships and portfolio memberships. Project write access is verified for selected mappings at save time and combined with the granted OAuth scopes.
 - Users can map an Asana project to an existing VertexAI project or scaffold a new VertexAI project and project chat from the selected Asana project.
 - Each saved mapping stores `can_write_tasks`. Task submission back to Asana is blocked unless the connected user has both `tasks:write` OAuth scope and confirmed Asana project-level write access.
+- Asana's project membership and portfolio discovery endpoints currently require the OAuth app's Full permissions mode for this integration. Set `ASANA_USE_FULL_PERMISSIONS=true` and reconnect after enabling Full permissions in the Asana developer console when the mapping wizard must enforce membership/write-access guardrails.
 
 Configure the Asana OAuth app with this redirect URI:
 
@@ -231,6 +232,7 @@ Create and manage required secrets with Wrangler:
 ```powershell
 "<asana-client-id>" | node ./scripts/run-wrangler.mjs secret put ASANA_CLIENT_ID --config=./wrangler.jsonc
 "<asana-client-secret>" | node ./scripts/run-wrangler.mjs secret put ASANA_CLIENT_SECRET --config=./wrangler.jsonc
+"true" | node ./scripts/run-wrangler.mjs secret put ASANA_USE_FULL_PERMISSIONS --config=./wrangler.jsonc
 ```
 
 The D1 schema for this flow lives in [drizzle/0013_asana_oauth_integration.sql](drizzle/0013_asana_oauth_integration.sql) and [db/schema.ts](db/schema.ts):

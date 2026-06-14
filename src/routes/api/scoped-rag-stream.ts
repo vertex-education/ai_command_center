@@ -8,6 +8,10 @@ async function handleScopedRagStream({ request }: { request: Request }) {
     teamId: url.searchParams.get("teamId") ?? "",
     workspaceId: url.searchParams.get("workspaceId") ?? "",
     projectId: url.searchParams.get("projectId") ?? "",
+    chatId: url.searchParams.get("chatId") ?? "",
+    asanaSearchEnabled: url.searchParams.get("asanaSearchEnabled") === "1",
+    reasoningLevel: normalizeReasoningLevel(url.searchParams.get("reasoningLevel")),
+    webSearchEnabled: url.searchParams.get("webSearchEnabled") === "1",
   };
 
   try {
@@ -15,6 +19,10 @@ async function handleScopedRagStream({ request }: { request: Request }) {
   } catch (error) {
     return createScopedRagErrorResponse(error instanceof Error ? error.message : "Scoped RAG stream failed.");
   }
+}
+
+function normalizeReasoningLevel(value: string | null) {
+  return value === "medium" || value === "high" ? value : "low";
 }
 
 function createScopedRagErrorResponse(message: string) {

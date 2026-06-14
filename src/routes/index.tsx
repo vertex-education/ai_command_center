@@ -86,6 +86,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { listAsanaTaskStatusCustomFields, type AsanaTaskStatusCustomFieldOption } from "@/lib/asana-integration";
 import { authClient } from "@/lib/auth-client";
 import { getSessionSnapshot } from "@/lib/auth-workflow";
 import type { ChatMessageInsertEvent, WorkspacePresenceUser } from "@/lib/chat-sync";
@@ -170,14 +171,18 @@ import {
   listMyScopedChats,
   listMyScopedProjects,
   listMyTeams,
+  persistScopedRagChatTurn,
+  updateScopedProjectInstructions,
   type CreateChatInput,
   type CreateProjectInput,
   type BranchChatInput,
   type DeleteChatInput,
   type DeleteProjectInput,
+  type PersistScopedRagChatInput,
   type RenameChatInput,
   type ScopedChatsResult,
   type TeamSummary,
+  type UpdateProjectInstructionsInput,
   renameScopedChat,
 } from "@/lib/team-workflow";
 
@@ -276,14 +281,30 @@ function appendChatMessageToCache(current: ScopedChatsResult | undefined, conver
   } satisfies ScopedChatsResult;
 }
 
-function updateChatMessageInCache(current: ScopedChatsResult | undefined, conversationKey: string, messageId: string, text: string) {
+function updateChatMessageInCache(
+  current: ScopedChatsResult | undefined,
+  conversationKey: string,
+  messageId: string,
+  text: string,
+  options?: { clientStatus?: ChatMessage["clientStatus"] | null },
+) {
   if (!current) return current;
   return {
     ...current,
     conversations: {
       ...current.conversations,
       [conversationKey]: (current.conversations[conversationKey] ?? []).map((message) =>
-        message.id === messageId ? { ...message, text } : message,
+        message.id === messageId
+          ? (() => {
+            const nextMessage = { ...message, text };
+            if (options?.clientStatus === null) {
+              delete nextMessage.clientStatus;
+            } else if (options?.clientStatus) {
+              nextMessage.clientStatus = options.clientStatus;
+            }
+            return nextMessage;
+          })()
+          : message,
       ),
     },
   } satisfies ScopedChatsResult;
@@ -622,6 +643,10 @@ function PMOCommandCenter() {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("vertex-chat-web-search") === "1";
   });
+  const [asanaSearchEnabled, setAsanaSearchEnabled] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem("vertex-chat-asana-search") !== "0";
+  });
   const [presenceUsers, setPresenceUsers] = useState<WorkspacePresenceUser[]>(() => [{
     id: session.user.id,
     name: session.user.name || session.user.email || "You",
@@ -638,6 +663,7 @@ function PMOCommandCenter() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isCreateTeamOpen, setIsCreateTeamOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
+  const [projectInstructionsProject, setProjectInstructionsProject] = useState<ProjectSummary | null>(null);
   const [createChatState, setCreateChatState] = useState<CreateChatDialogState>(null);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const [inputDialog, setInputDialog] = useState<InputDialogState>(null);
@@ -701,7 +727,7 @@ function PMOCommandCenter() {
     onSuccess: invalidateWorkspace,
   });
   const sendMessageMutation = useMutation({
-    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel; webSearchEnabled?: boolean; attachments?: ChatAttachment[] }) =>
+    mutationFn: (input: { mode: WorkspaceMode; teamId?: string | null; projectId: string | null; chatId: string; chatTitle: string; text: string; model: string; reasoningLevel: ChatReasoningLevel; webSearchEnabled?: boolean; asanaSearchEnabled?: boolean; attachments?: ChatAttachment[] }) =>
       sendChatMessage({ data: input }),
     onMutate: async (input) => {
       const queryKey = scopedChatsQueryKey;
@@ -972,11 +998,27 @@ function PMOCommandCenter() {
       await invalidateChats();
     },
   });
+  const updateProjectInstructionsMutation = useMutation({
+    mutationFn: (input: UpdateProjectInstructionsInput) => updateScopedProjectInstructions({ data: input }),
+    onSuccess: async () => {
+      await invalidateProjects();
+      await invalidateWorkspace();
+      await invalidateChats();
+    },
+    onError: (error) => updateToast(error instanceof Error ? error.message : "Could not update project instructions."),
+  });
   const createChatMutation = useMutation({
     mutationFn: (input: CreateChatInput) => createScopedChat({ data: input }),
     onSuccess: () => {
       void invalidateChats();
       void invalidateProjects();
+    },
+  });
+  const persistScopedRagTurnMutation = useMutation({
+    mutationFn: (input: PersistScopedRagChatInput) => persistScopedRagChatTurn({ data: input }),
+    onSettled: async () => {
+      await invalidateChats();
+      await invalidateProjects();
     },
   });
   const branchChatMutation = useMutation({
@@ -1191,6 +1233,10 @@ function PMOCommandCenter() {
   useEffect(() => {
     window.localStorage.setItem("vertex-chat-web-search", webSearchEnabled ? "1" : "0");
   }, [webSearchEnabled]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vertex-chat-asana-search", asanaSearchEnabled ? "1" : "0");
+  }, [asanaSearchEnabled]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -1579,40 +1625,62 @@ function PMOCommandCenter() {
   }
 
   async function runScopedRagStream({
+    chatId,
+    chatTitle,
     key,
+    mode,
     projectId,
     prompt,
+    reasoningLevel,
     teamId,
+    webSearchEnabled,
     workspaceId,
+    asanaSearchEnabled,
   }: {
+    chatId: string;
+    chatTitle: string;
     key: string;
+    mode: WorkspaceMode;
     projectId: string;
     prompt: string;
+    reasoningLevel: ChatReasoningLevel;
     teamId: string;
+    webSearchEnabled: boolean;
     workspaceId: string;
+    asanaSearchEnabled: boolean;
   }) {
+    const userMessageId = `msg-stream-user-${crypto.randomUUID()}`;
     const userMessage: ChatMessage = {
-      id: `optimistic-user-${Date.now()}`,
+      id: userMessageId,
       author: "You",
       role: "user",
       avatar: avatarAlex,
       time: clientTimeLabel(),
       text: prompt,
     };
-    const assistantMessageId = `streaming-assistant-${Date.now()}`;
+    const assistantMessageId = `msg-stream-assistant-${crypto.randomUUID()}`;
+    const streamingPlaceholder = asanaSearchEnabled || webSearchEnabled
+      ? "Preparing project context..."
+      : "Preparing response...";
     const assistantMessage: ChatMessage = {
       id: assistantMessageId,
       author: "VertexAI",
       role: "assistant",
       time: clientTimeLabel(),
-      text: "",
+      text: streamingPlaceholder,
+      clientStatus: "sending",
     };
     let tokenText = "";
     let citations: ChatWithScopedRagCitation[] = [];
+    let thinkingText = "";
+    let traceContext: LlmDevTrace["rawResponse"] | null = null;
+    let traceMessages: LlmDevTrace["request"]["messages"] = [{ role: "user", content: prompt }];
+    const startedAt = Date.now();
     const renderStreamingText = () => {
       const citationText = formatScopedRagCitations(citations);
       return `${tokenText}${citationText ? `\n\n${citationText}` : ""}`.trimStart();
     };
+    const renderStreamingTextOrPlaceholder = () => renderStreamingText() || streamingPlaceholder;
 
     await queryClient.cancelQueries({ queryKey: scopedChatsQueryKey });
     const previousScopedChats = queryClient.getQueryData<ScopedChatsResult>(scopedChatsQueryKey);
@@ -1622,17 +1690,24 @@ function PMOCommandCenter() {
     });
     setIsScopedRagStreaming(true);
     try {
-      await consumeScopedRagEventSource({ prompt, teamId, workspaceId, projectId }, {
+      await consumeScopedRagEventSource({ prompt, teamId, workspaceId, projectId, chatId, asanaSearchEnabled, reasoningLevel, webSearchEnabled }, {
+        onTrace: (trace) => {
+          traceMessages = trace.messages;
+          traceContext = trace.context;
+        },
         onCitations: (nextCitations) => {
           citations = nextCitations;
           queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
-            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText()),
+            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingTextOrPlaceholder()),
           );
+        },
+        onThinking: (thinking) => {
+          thinkingText += thinking;
         },
         onToken: (token) => {
           tokenText += token;
           queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
-            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText()),
+            updateChatMessageInCache(current, key, assistantMessageId, renderStreamingTextOrPlaceholder(), { clientStatus: null }),
           );
         },
         onError: (message) => {
@@ -1641,8 +1716,75 @@ function PMOCommandCenter() {
       });
 
       queryClient.setQueryData<ScopedChatsResult>(scopedChatsQueryKey, (current) =>
-        updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText() || "The model did not return a response."),
+        updateChatMessageInCache(current, key, assistantMessageId, renderStreamingText() || "The model did not return a response.", { clientStatus: null }),
       );
+      const responseText = renderStreamingText() || "The model did not return a response.";
+      const estimatedInputTokens = estimateTextTokens(prompt);
+      const estimatedOutputTokens = estimateTextTokens(responseText);
+      setLlmTraces((traces) => [{
+        id: `trace-stream-${crypto.randomUUID()}`,
+        timestamp: new Date().toISOString(),
+        durationMs: Date.now() - startedAt,
+        model: "Scoped RAG stream",
+        chatId,
+        chatTitle,
+        mode,
+        projectId,
+        asanaSearchEnabled,
+        webSearch: webSearchEnabled
+          ? {
+            enabled: true,
+            query: prompt,
+            provider: "scoped-rag-stream",
+            results: [],
+          }
+          : undefined,
+        request: {
+          messages: traceMessages,
+          max_completion_tokens: chatReasoningProfiles[reasoningLevel].maxCompletionTokens,
+          reasoningLevel,
+          reasoning_effort: chatReasoningProfiles[reasoningLevel].reasoningEffort,
+          timeoutMs: chatReasoningProfiles[reasoningLevel].timeoutMs,
+          temperature: 0.2,
+        },
+        responseText,
+        thinkingText,
+        diagnostics: {
+          finishReason: "stream-complete",
+          usage: {
+            streamed: true,
+            estimated: true,
+            citations: citations.length,
+            context: traceContext,
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            totalTokens: estimatedInputTokens + estimatedOutputTokens,
+          },
+          tokenUsage: {
+            inputTokens: estimatedInputTokens,
+            outputTokens: estimatedOutputTokens,
+            totalTokens: estimatedInputTokens + estimatedOutputTokens,
+          },
+          responseTextChars: responseText.length,
+          thinkingTextChars: thinkingText.length,
+        },
+        rawResponse: {
+          streamed: true,
+          context: traceContext,
+          estimatedTokenUsage: true,
+          citations,
+        },
+      }, ...traces].slice(0, 20));
+      await persistScopedRagTurnMutation.mutateAsync({
+        mode,
+        teamId,
+        projectId,
+        chatId,
+        userMessageId,
+        assistantMessageId,
+        prompt,
+        response: responseText,
+      });
     } catch (error) {
       queryClient.setQueryData(scopedChatsQueryKey, previousScopedChats ?? emptyScopedChatsResult);
       throw error;
@@ -1697,6 +1839,40 @@ function PMOCommandCenter() {
         updateToast(`${project.name} deleted`);
       },
     });
+  }
+
+  function handleEditProjectInstructions(project: ProjectSummary) {
+    if (!canEdit) {
+      updateToast("Viewer access is read-only");
+      return;
+    }
+    if (activeMode === "Team" && !selectedTeam) {
+      updateToast("Select a team before editing project instructions.");
+      return;
+    }
+    setProjectInstructionsProject(project);
+  }
+
+  async function handleProjectInstructionsSubmit(value: {
+    asanaTaskStatusCustomFieldGid: string | null;
+    asanaTaskStatusCustomFieldName: string | null;
+    asanaTaskStatusSource: ProjectSummary["asanaTaskStatusSource"];
+    description: string;
+    projectInstructions: string;
+  }) {
+    if (!projectInstructionsProject) return;
+    await updateProjectInstructionsMutation.mutateAsync({
+      mode: activeMode,
+      teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
+      projectId: projectInstructionsProject.id,
+      asanaTaskStatusCustomFieldGid: value.asanaTaskStatusCustomFieldGid,
+      asanaTaskStatusCustomFieldName: value.asanaTaskStatusCustomFieldName,
+      asanaTaskStatusSource: value.asanaTaskStatusSource,
+      description: value.description,
+      projectInstructions: value.projectInstructions,
+    });
+    updateToast(`${projectInstructionsProject.name} instructions saved`);
+    setProjectInstructionsProject(null);
   }
 
   function handleDeleteChat({
@@ -1931,32 +2107,32 @@ function PMOCommandCenter() {
       setActiveTab("Chat");
       setRightOpen(true);
       const teamId = activeMode === "Team" ? selectedTeam?.id ?? "" : "";
-      if (teamId && target.projectId && !webSearchEnabled && readyAttachments.length === 0) {
-        await runScopedRagStream({
-          key: targetConversationKey,
-          projectId: target.projectId,
-          prompt: text,
-          teamId,
-          workspaceId: `ws-${activeWorkspace.scope}`,
-        });
-        updateToast("Scoped RAG response streamed");
+      if (!target.projectId) {
+        updateToast("Streaming RAG chat is available in project chats. Select or create a project chat first.");
         return;
       }
-
-      usedSendMessageMutation = true;
-      await sendMessageMutation.mutateAsync({
-        mode: activeMode,
-        teamId: activeMode === "Team" ? selectedTeam?.id ?? null : null,
-        projectId: target.projectId,
+      if (readyAttachments.length > 0) {
+        updateToast("Streaming file attachment context is not wired yet. Remove attachments and send again.");
+        setChatInput(text);
+        setChatAttachments(readyAttachments);
+        return;
+      }
+      await runScopedRagStream({
         chatId: target.chat.id,
         chatTitle: target.chat.title,
-        text,
-        model: "Gemma 4 26B",
+        key: targetConversationKey,
+        mode: activeMode,
+        projectId: target.projectId,
+        prompt: text,
         reasoningLevel: chatReasoningLevel,
+        teamId,
         webSearchEnabled,
-        attachments: readyAttachments,
+        workspaceId: `ws-${activeWorkspace.scope}`,
+        asanaSearchEnabled,
       });
-      updateToast("VertexAI response added");
+      updateToast("VertexAI response streamed");
+      return;
+
     } catch (error) {
       setChatInput(text);
       setChatAttachments(readyAttachments);
@@ -2102,6 +2278,7 @@ function PMOCommandCenter() {
                     onCreateProject={handleCreateProject}
                     onDeleteChat={handleDeleteChat}
                     onDeleteProject={handleDeleteProject}
+                    onEditProjectInstructions={handleEditProjectInstructions}
                     onOpenWorkspaceChat={handleOpenWorkspaceChat}
                     onInviteProject={handleInviteProject}
                     onProjectSelect={handleProjectSelect}
@@ -2342,9 +2519,40 @@ function PMOCommandCenter() {
                           </span>
                           <span className="w-5 text-left">{webSearchEnabled ? "On" : "Off"}</span>
                         </button>
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {chatReasoningProfiles[chatReasoningLevel].maxCompletionTokens.toLocaleString()} tokens / {Math.round(chatReasoningProfiles[chatReasoningLevel].timeoutMs / 1000)}s
-                        </span>
+                        <button
+                          type="button"
+                          aria-pressed={asanaSearchEnabled}
+                          className={cn(
+                            "inline-flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs font-semibold transition-colors",
+                            asanaSearchEnabled
+                              ? "border-primary bg-primary text-primary-foreground"
+                              : "border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+                          )}
+                          title={asanaSearchEnabled ? "Asana search on: pull mapped project tasks, stories, and status updates into Gemma context" : "Asana search off: do not pull mapped Asana project context into Gemma"}
+                          onClick={() => setAsanaSearchEnabled((enabled) => !enabled)}
+                        >
+                          <span>Asana</span>
+                          <span
+                            aria-hidden="true"
+                            className={cn(
+                              "relative inline-flex h-4 w-7 items-center rounded-full transition-colors",
+                              asanaSearchEnabled ? "bg-primary-foreground/25" : "bg-muted",
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "block size-3 rounded-full bg-current transition-transform",
+                                asanaSearchEnabled ? "translate-x-3.5" : "translate-x-0.5",
+                              )}
+                            />
+                          </span>
+                          <span className="w-5 text-left">{asanaSearchEnabled ? "On" : "Off"}</span>
+                        </button>
+                        {showTokenUsage ? (
+                          <span className="ml-auto text-xs text-muted-foreground">
+                            {chatReasoningProfiles[chatReasoningLevel].maxCompletionTokens.toLocaleString()} tokens / {Math.round(chatReasoningProfiles[chatReasoningLevel].timeoutMs / 1000)}s
+                          </span>
+                        ) : null}
                       </div>
                       {chatAttachments.length > 0 ? (
                         <div className="col-span-3 flex flex-wrap gap-1.5">
@@ -2548,6 +2756,13 @@ function PMOCommandCenter() {
             teamName={activeMode === "Team" ? selectedTeam?.name : undefined}
             onOpenChange={setIsCreateProjectOpen}
             onSubmit={handleCreateProjectSubmit}
+          />
+          <ProjectInstructionsDialog
+            open={Boolean(projectInstructionsProject)}
+            pending={updateProjectInstructionsMutation.isPending}
+            project={projectInstructionsProject}
+            onOpenChange={(open) => !open && setProjectInstructionsProject(null)}
+            onSubmit={handleProjectInstructionsSubmit}
           />
           <CreateChatDialog
             contextLabel={createChatState?.section === "project" ? createChatState.projectName ?? "Project" : workspaceModeLabel(activeMode)}
@@ -2978,6 +3193,8 @@ function LlmDevtoolsPaneContent({ pane, trace }: { pane: LlmDevtoolsPane; trace:
         <LlmTraceDiagnostics trace={trace} />
         {trace.thinkingText ? (
           <pre className="whitespace-pre-wrap wrap-break-word rounded-md border bg-background p-3 font-mono text-xs italic leading-relaxed">{trace.thinkingText}</pre>
+        ) : trace.rawResponse && typeof trace.rawResponse === "object" && !Array.isArray(trace.rawResponse) && trace.rawResponse.streamed === true ? (
+          <p className="rounded-md border border-dashed p-3 text-sm italic text-muted-foreground">Streaming traces capture the final response text, but this provider stream does not expose a separate thinking field.</p>
         ) : (
           <p className="rounded-md border border-dashed p-3 text-sm italic text-muted-foreground">No thinking or reasoning field was returned by this model response.</p>
         )}
@@ -3472,6 +3689,7 @@ function ProjectNav({
   onCreateProject,
   onDeleteChat,
   onDeleteProject,
+  onEditProjectInstructions,
   onInviteProject,
   onOpenWorkspaceChat,
   onProjectSelect,
@@ -3488,6 +3706,7 @@ function ProjectNav({
   onCreateProject: () => void;
   onDeleteChat: (input: { chat: ChatSummary; project?: ProjectSummary; section: ChatSection }) => void;
   onDeleteProject: (project: ProjectSummary) => void;
+  onEditProjectInstructions: (project: ProjectSummary) => void;
   onInviteProject: (project: ProjectSummary) => void;
   onOpenWorkspaceChat: () => void;
   onProjectSelect: (project: ProjectSummary) => void;
@@ -3530,10 +3749,6 @@ function ProjectNav({
                   <MoreHorizontal className="size-4" />
                 </summary>
                 <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
-                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs font-semibold uppercase text-muted-foreground">
-                    <ShieldCheck className="size-3.5" />
-                    Project
-                  </div>
                   <button
                     className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
                     type="button"
@@ -3541,6 +3756,14 @@ function ProjectNav({
                   >
                     <MessageCircle className="size-4" />
                     New chat
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-accent"
+                    type="button"
+                    onClick={() => onEditProjectInstructions(project)}
+                  >
+                    <Settings className="size-4" />
+                    Project instructions
                   </button>
                   {showProjectInvite ? (
                     <button
@@ -3998,6 +4221,7 @@ function ChatView({
   }, [messages, isTyping]);
 
   const showEmptyChatPlaceholder = messages.length === 0 && !isTyping;
+  const showTypingIndicator = isTyping && !messages.some((message) => message.role === "assistant" && message.clientStatus === "sending");
 
   return (
     <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
@@ -4128,7 +4352,7 @@ function ChatView({
           </article>
         );
       })}
-      {isTyping ? (
+      {showTypingIndicator ? (
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <div className="grid size-9 place-items-center rounded-full bg-primary text-sm font-semibold text-primary-foreground">V</div>
           <div className="rounded-2xl rounded-bl-sm border bg-muted/60 px-4 py-3">
@@ -4171,26 +4395,50 @@ function TokenUsageBadge({ usage }: { usage: MessageTokenUsage }) {
   );
 }
 
+function estimateTextTokens(value: string) {
+  return Math.max(1, Math.ceil(value.trim().length / 4));
+}
+
 type ScopedRagSseHandlers = {
   onCitations: (citations: ChatWithScopedRagCitation[]) => void;
   onError: (message: string) => void;
+  onThinking: (thinking: string) => void;
   onToken: (token: string) => void;
+  onTrace: (trace: {
+    context: LlmDevTrace["rawResponse"];
+    messages: LlmDevTrace["request"]["messages"];
+  }) => void;
 };
 
 function consumeScopedRagEventSource(input: {
+  asanaSearchEnabled: boolean;
+  chatId: string;
   projectId: string;
   prompt: string;
+  reasoningLevel: ChatReasoningLevel;
   teamId: string;
+  webSearchEnabled: boolean;
   workspaceId: string;
 }, handlers: ScopedRagSseHandlers) {
   return new Promise<void>((resolve, reject) => {
     const eventSource = new EventSource(scopedRagStreamUrl(input));
     let completed = false;
 
+    eventSource.addEventListener("trace", (event) => {
+      const trace = parseScopedRagTracePayload(parseScopedRagSsePayload(event as MessageEvent));
+      if (trace) handlers.onTrace(trace);
+    });
+
     eventSource.addEventListener("citations", (event) => {
       const payload = parseScopedRagSsePayload(event as MessageEvent);
       const citations = typeof payload === "object" && payload ? (payload as { citations?: unknown }).citations : null;
       if (Array.isArray(citations)) handlers.onCitations(citations.filter(isScopedRagCitation));
+    });
+
+    eventSource.addEventListener("thinking", (event) => {
+      const payload = parseScopedRagSsePayload(event as MessageEvent);
+      const thinking = typeof payload === "object" && payload ? (payload as { thinking?: unknown }).thinking : payload;
+      if (typeof thinking === "string") handlers.onThinking(thinking);
     });
 
     eventSource.addEventListener("token", (event) => {
@@ -4231,9 +4479,13 @@ function consumeScopedRagEventSource(input: {
 }
 
 function scopedRagStreamUrl(input: {
+  asanaSearchEnabled: boolean;
+  chatId: string;
   projectId: string;
   prompt: string;
+  reasoningLevel: ChatReasoningLevel;
   teamId: string;
+  webSearchEnabled: boolean;
   workspaceId: string;
 }) {
   const params = new URLSearchParams({
@@ -4241,6 +4493,10 @@ function scopedRagStreamUrl(input: {
     teamId: input.teamId,
     workspaceId: input.workspaceId,
     projectId: input.projectId,
+    chatId: input.chatId,
+    asanaSearchEnabled: input.asanaSearchEnabled ? "1" : "0",
+    reasoningLevel: input.reasoningLevel,
+    webSearchEnabled: input.webSearchEnabled ? "1" : "0",
   });
   return `/api/scoped-rag-stream?${params.toString()}`;
 }
@@ -4253,6 +4509,43 @@ function parseScopedRagSsePayload(event: MessageEvent) {
     payload = event.data;
   }
   return payload;
+}
+
+function parseScopedRagTracePayload(payload: unknown): {
+  context: LlmDevTrace["rawResponse"];
+  messages: LlmDevTrace["request"]["messages"];
+} | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  const request = record.request;
+  const messages = request && typeof request === "object" && !Array.isArray(request)
+    ? (request as { messages?: unknown }).messages
+    : null;
+  if (!Array.isArray(messages)) return null;
+
+  const parsedMessages = messages
+    .map((message) => {
+      if (!message || typeof message !== "object" || Array.isArray(message)) return null;
+      const item = message as { role?: unknown; content?: unknown };
+      if (item.role !== "system" && item.role !== "user" && item.role !== "assistant") return null;
+      if (typeof item.content !== "string") return null;
+      return { role: item.role, content: item.content };
+    })
+    .filter((message): message is LlmDevTrace["request"]["messages"][number] => Boolean(message));
+  if (parsedMessages.length === 0) return null;
+
+  return {
+    context: isJsonValue(record.context) ? record.context : null,
+    messages: parsedMessages,
+  };
+}
+
+function isJsonValue(value: unknown): value is LlmDevTrace["rawResponse"] {
+  if (value === null) return true;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (typeof value !== "object") return false;
+  return Object.values(value as Record<string, unknown>).every(isJsonValue);
 }
 
 function isScopedRagCitation(value: unknown): value is ChatWithScopedRagCitation {
@@ -6465,6 +6758,177 @@ function CreateProjectDialog({
             <Button type="submit" disabled={pending || !name.trim()}>
               <Plus />
               Create project
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ProjectInstructionsDialog({
+  open,
+  pending,
+  project,
+  onOpenChange,
+  onSubmit,
+}: {
+  open: boolean;
+  pending: boolean;
+  project: ProjectSummary | null;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (value: {
+    asanaTaskStatusCustomFieldGid: string | null;
+    asanaTaskStatusCustomFieldName: string | null;
+    asanaTaskStatusSource: ProjectSummary["asanaTaskStatusSource"];
+    description: string;
+    projectInstructions: string;
+  }) => Promise<void>;
+}) {
+  const [description, setDescription] = useState("");
+  const [projectInstructions, setProjectInstructions] = useState("");
+  const [asanaTaskStatusSource, setAsanaTaskStatusSource] = useState<ProjectSummary["asanaTaskStatusSource"]>("native");
+  const [asanaTaskStatusCustomFieldGid, setAsanaTaskStatusCustomFieldGid] = useState("");
+  const customFieldsQuery = useQuery({
+    enabled: open && Boolean(project?.id),
+    queryKey: ["asana", "task-status-custom-fields", project?.id ?? ""],
+    queryFn: () => listAsanaTaskStatusCustomFields({ data: { vertexProjectId: project?.id ?? "" } }),
+    retry: false,
+  });
+
+  useEffect(() => {
+    setDescription(project?.description ?? "");
+    setProjectInstructions(project?.projectInstructions ?? "");
+    setAsanaTaskStatusSource(project?.asanaTaskStatusSource ?? "native");
+    setAsanaTaskStatusCustomFieldGid(project?.asanaTaskStatusCustomFieldGid ?? "");
+  }, [project]);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const selectedCustomField = (customFieldsQuery.data ?? []).find((field) => field.gid === asanaTaskStatusCustomFieldGid)
+      ?? (project?.asanaTaskStatusCustomFieldGid === asanaTaskStatusCustomFieldGid && project.asanaTaskStatusCustomFieldName
+        ? {
+          gid: project.asanaTaskStatusCustomFieldGid,
+          name: project.asanaTaskStatusCustomFieldName,
+          type: null,
+        } satisfies AsanaTaskStatusCustomFieldOption
+        : null);
+    await onSubmit({
+      asanaTaskStatusCustomFieldGid: asanaTaskStatusSource === "custom_field" ? selectedCustomField?.gid ?? null : null,
+      asanaTaskStatusCustomFieldName: asanaTaskStatusSource === "custom_field" ? selectedCustomField?.name ?? null : null,
+      asanaTaskStatusSource,
+      description: description.trim(),
+      projectInstructions: projectInstructions.trim(),
+    });
+  }
+
+  const customFields = customFieldsQuery.data ?? [];
+  const selectedFieldMissingFromOptions = Boolean(
+    project?.asanaTaskStatusCustomFieldGid
+      && project.asanaTaskStatusCustomFieldName
+      && !customFields.some((field) => field.gid === project.asanaTaskStatusCustomFieldGid),
+  );
+  const customFieldOptions = selectedFieldMissingFromOptions
+    ? [{
+      gid: project?.asanaTaskStatusCustomFieldGid ?? "",
+      name: project?.asanaTaskStatusCustomFieldName ?? "Saved custom field",
+      type: null,
+    }, ...customFields]
+    : customFields;
+  const canUseCustomField = customFieldOptions.length > 0;
+  const customFieldRequired = asanaTaskStatusSource === "custom_field" && !asanaTaskStatusCustomFieldGid;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Project instructions</DialogTitle>
+          <DialogDescription>
+            Set chat guidance for {project?.name ?? "this project"}.
+          </DialogDescription>
+        </DialogHeader>
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          <FieldBlock label="Description">
+            <Textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="What this project is responsible for."
+            />
+          </FieldBlock>
+          <FieldBlock label="Instructions">
+            <Textarea
+              className="min-h-36"
+              value={projectInstructions}
+              onChange={(event) => setProjectInstructions(event.target.value)}
+              placeholder="Example: For Ramp status questions, use the Implementation Status field as the source of truth. Treat blank status as Not Started."
+              autoFocus
+            />
+          </FieldBlock>
+          <FieldBlock label="Asana task status source">
+            <div className="grid gap-3 rounded-md border bg-muted/30 p-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3 text-sm">
+                  <input
+                    className="mt-1"
+                    type="radio"
+                    checked={asanaTaskStatusSource === "native"}
+                    onChange={() => setAsanaTaskStatusSource("native")}
+                  />
+                  <span>
+                    <span className="block font-medium">Native completion</span>
+                    <span className="block text-xs text-muted-foreground">Use Asana completed/open state.</span>
+                  </span>
+                </label>
+                <label className={cn("flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3 text-sm", !canUseCustomField && "cursor-not-allowed opacity-60")}>
+                  <input
+                    className="mt-1"
+                    type="radio"
+                    checked={asanaTaskStatusSource === "custom_field"}
+                    disabled={!canUseCustomField}
+                    onChange={() => setAsanaTaskStatusSource("custom_field")}
+                  />
+                  <span>
+                    <span className="block font-medium">Custom field</span>
+                    <span className="block text-xs text-muted-foreground">Use a selected Asana task custom field as status.</span>
+                  </span>
+                </label>
+              </div>
+              {asanaTaskStatusSource === "custom_field" ? (
+                <>
+                  <select
+                    aria-label="Asana task status custom field"
+                    title="Asana task status custom field"
+                    className="h-10 rounded-md border bg-background px-3 text-sm"
+                    disabled={!canUseCustomField}
+                    value={asanaTaskStatusCustomFieldGid}
+                    onChange={(event) => setAsanaTaskStatusCustomFieldGid(event.target.value)}
+                  >
+                    <option value="">
+                      {customFieldsQuery.isLoading ? "Loading Asana fields..." : canUseCustomField ? "Select custom field" : "No mapped Asana fields found"}
+                    </option>
+                    {customFieldOptions.map((field) => (
+                      <option key={field.gid} value={field.gid}>
+                        {field.name}{field.type ? ` (${field.type})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {customFieldsQuery.isError ? (
+                    <p className="text-xs text-destructive">Could not load Asana custom fields for this project.</p>
+                  ) : null}
+                  {customFieldRequired ? (
+                    <p className="text-xs text-destructive">Select a custom field or switch back to native completion.</p>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
+          </FieldBlock>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={pending || !project || customFieldRequired}>
+              <Settings />
+              Save instructions
             </Button>
           </DialogFooter>
         </form>

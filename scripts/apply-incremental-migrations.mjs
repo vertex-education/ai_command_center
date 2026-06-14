@@ -403,6 +403,37 @@ const migrations = [
       "CREATE INDEX IF NOT EXISTS asana_project_mappings_user_idx ON asana_project_mappings (user_id, updated_at);",
     ],
   },
+  {
+    name: "0014_project_instructions",
+    isComplete: () => columnExists("projects", "project_instructions"),
+    steps: [
+      {
+        isComplete: () => columnExists("projects", "project_instructions"),
+        statement: "ALTER TABLE projects ADD COLUMN project_instructions text DEFAULT '' NOT NULL;",
+      },
+    ],
+  },
+  {
+    name: "0015_project_asana_task_status_source",
+    isComplete: () =>
+      columnExists("projects", "asana_task_status_source") &&
+      columnExists("projects", "asana_task_status_custom_field_gid") &&
+      columnExists("projects", "asana_task_status_custom_field_name"),
+    steps: [
+      {
+        isComplete: () => columnExists("projects", "asana_task_status_source"),
+        statement: "ALTER TABLE projects ADD COLUMN asana_task_status_source text DEFAULT 'native' NOT NULL;",
+      },
+      {
+        isComplete: () => columnExists("projects", "asana_task_status_custom_field_gid"),
+        statement: "ALTER TABLE projects ADD COLUMN asana_task_status_custom_field_gid text;",
+      },
+      {
+        isComplete: () => columnExists("projects", "asana_task_status_custom_field_name"),
+        statement: "ALTER TABLE projects ADD COLUMN asana_task_status_custom_field_name text;",
+      },
+    ],
+  },
 ];
 
 ensureMigrationTable();

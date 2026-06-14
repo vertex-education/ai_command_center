@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { ArrowLeft, CheckCircle2, ExternalLink, Link2, Plug, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ExternalLink, Plug, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getSessionSnapshot } from "@/lib/auth-workflow";
 import {
@@ -25,6 +26,11 @@ type DraftSelection = {
   vertexProjectId: string;
 };
 
+type ScaffoldDialogState = {
+  projectGid: string;
+  projectName: string;
+} | null;
+
 export const Route = createFileRoute("/profile/asana")({
   loader: async () => {
     const session = await getSessionSnapshot();
@@ -42,9 +48,12 @@ function AsanaIntegrationPage() {
   const summaryQuery = useQuery({
     queryKey: ["asana", "connection-summary"],
     queryFn: () => getAsanaConnectionSummary(),
+    retry: false,
   });
   const [targetMode, setTargetMode] = useState<WorkspaceMode>("Team");
   const [targetTeamId, setTargetTeamId] = useState("");
+  const [scaffoldDialog, setScaffoldDialog] = useState<ScaffoldDialogState>(null);
+  const [savingProjectGid, setSavingProjectGid] = useState<string | null>(null);
   const [draftSelections, setDraftSelections] = useState<Record<string, DraftSelection>>({});
 
   const summary = summaryQuery.data;
@@ -86,12 +95,15 @@ function AsanaIntegrationPage() {
   const saveMutation = useMutation({
     mutationFn: (selections: AsanaMappingSelection[]) => saveAsanaProjectMappings({ data: { selections } }),
     onSuccess: () => {
+      setScaffoldDialog(null);
       void summaryQuery.refetch();
+    },
+    onSettled: () => {
+      setSavingProjectGid(null);
     },
   });
 
-  const selectedCount = Object.values(draftSelections).filter((selection) => selection.action !== "ignore").length;
-  const canSave = selectedCount > 0 && !saveMutation.isPending;
+  const canConfirmScaffold = targetMode !== "Team" || Boolean(targetTeamId);
 
   function updateSelection(projectGid: string, selection: Partial<DraftSelection>) {
     setDraftSelections((current) => ({
@@ -103,17 +115,43 @@ function AsanaIntegrationPage() {
     }));
   }
 
-  function saveMappings() {
-    const selections: AsanaMappingSelection[] = Object.entries(draftSelections)
-      .filter(([, selection]) => selection.action !== "ignore")
-      .map(([asanaProjectGid, selection]) => ({
-        asanaProjectGid,
-        action: selection.action,
-        vertexProjectId: selection.action === "map" ? selection.vertexProjectId : null,
-        targetMode: selection.action === "scaffold" ? targetMode : undefined,
-        targetTeamId: selection.action === "scaffold" && targetMode === "Team" ? targetTeamId : null,
-      }));
-    saveMutation.mutate(selections);
+  function saveSelection(selection: AsanaMappingSelection) {
+    setSavingProjectGid(selection.asanaProjectGid);
+    saveMutation.mutate([selection]);
+  }
+
+  function handleActionChange(project: AsanaProjectOption, action: DraftSelection["action"]) {
+    const existingVertexProjectId = draftSelections[project.gid]?.vertexProjectId ?? "";
+    updateSelection(project.gid, { action, vertexProjectId: action === "map" ? existingVertexProjectId : "" });
+    if (action === "scaffold") setScaffoldDialog({ projectGid: project.gid, projectName: project.name });
+    if (action === "map" && existingVertexProjectId) {
+      saveSelection({
+        asanaProjectGid: project.gid,
+        action: "map",
+        vertexProjectId: existingVertexProjectId,
+      });
+    }
+  }
+
+  function handleMapProject(projectGid: string, vertexProjectId: string) {
+    updateSelection(projectGid, { action: "map", vertexProjectId });
+    if (!vertexProjectId) return;
+    saveSelection({
+      asanaProjectGid: projectGid,
+      action: "map",
+      vertexProjectId,
+    });
+  }
+
+  function confirmScaffoldTarget() {
+    if (!canConfirmScaffold || !scaffoldDialog) return;
+    saveSelection({
+      asanaProjectGid: scaffoldDialog.projectGid,
+      action: "scaffold",
+      vertexProjectId: null,
+      targetMode,
+      targetTeamId: targetMode === "Team" ? targetTeamId : null,
+    });
   }
 
   return (
@@ -169,28 +207,24 @@ function AsanaIntegrationPage() {
                     {summary.connected ? (
                       <>
                         <ScopeState requiredScopes={summary.requiredScopes} missingScopes={summary.missingScopes} />
-                        <MappingControls
-                          targetMode={targetMode}
-                          targetTeamId={targetTeamId}
-                          teams={summary.teams}
-                          onTargetModeChange={setTargetMode}
-                          onTargetTeamIdChange={setTargetTeamId}
-                        />
+                        {summary.projectDiscoveryIssue ? (
+                          <div className="rounded-md border border-warning/30 bg-warning/10 p-4 text-sm text-warning-foreground">
+                            <p className="font-medium">Asana project permission check is blocked</p>
+                            <p className="mt-1">{summary.projectDiscoveryIssue}</p>
+                            <p className="mt-1 text-muted-foreground">If this is a rate limit, wait a few minutes and refresh. If this is a permission error, confirm Full permissions are enabled in the Asana developer app and reconnect Asana.</p>
+                          </div>
+                        ) : null}
                         <ProjectMappingTable
                           asanaProjects={summary.asanaProjects}
                           draftSelections={draftSelections}
+                          onActionChange={handleActionChange}
+                          onMapProject={handleMapProject}
                           vertexProjects={summary.vertexProjects}
                           vertexProjectById={vertexProjectById}
-                          onChange={updateSelection}
+                          savingProjectGid={savingProjectGid}
                         />
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background p-3">
-                          <p className="text-sm text-muted-foreground">
-                            {selectedCount} project{selectedCount === 1 ? "" : "s"} selected for mapping or scaffolding.
-                          </p>
-                          <Button type="button" disabled={!canSave} onClick={saveMappings}>
-                            <Link2 className="size-4" />
-                            {saveMutation.isPending ? "Saving..." : "Save mappings"}
-                          </Button>
+                        <div className="rounded-md border bg-background p-3 text-sm text-muted-foreground">
+                          Mapping changes save one Asana project at a time.
                         </div>
                       </>
                     ) : (
@@ -202,6 +236,20 @@ function AsanaIntegrationPage() {
                 )}
               </CardContent>
             </Card>
+            <ScaffoldTargetDialog
+              projectName={scaffoldDialog?.projectName ?? ""}
+              isPending={saveMutation.isPending}
+              onConfirm={confirmScaffoldTarget}
+              onOpenChange={(open) => {
+                if (!open) setScaffoldDialog(null);
+              }}
+              onTargetModeChange={setTargetMode}
+              onTargetTeamIdChange={setTargetTeamId}
+              open={Boolean(scaffoldDialog)}
+              targetMode={targetMode}
+              targetTeamId={targetTeamId}
+              teams={summary?.teams ?? []}
+            />
           </div>
         </section>
       </div>
@@ -274,47 +322,90 @@ function ScopeState({ missingScopes, requiredScopes }: { requiredScopes: string[
   );
 }
 
-function MappingControls({
+function ScaffoldTargetDialog({
+  isPending,
+  onConfirm,
+  onOpenChange,
   onTargetModeChange,
   onTargetTeamIdChange,
+  open,
+  projectName,
   targetMode,
   targetTeamId,
   teams,
 }: {
+  isPending: boolean;
+  open: boolean;
+  projectName: string;
   targetMode: WorkspaceMode;
   targetTeamId: string;
   teams: Array<{ id: string; name: string }>;
+  onConfirm: () => void;
+  onOpenChange: (open: boolean) => void;
   onTargetModeChange: (mode: WorkspaceMode) => void;
   onTargetTeamIdChange: (teamId: string) => void;
 }) {
+  const requiresTeam = targetMode === "Team";
+  const canConfirm = !isPending && (!requiresTeam || Boolean(targetTeamId));
+
   return (
-    <div className="grid gap-3 rounded-md border bg-background p-4 md:grid-cols-[minmax(0,1fr)_180px_220px]">
-      <div>
-        <p className="font-medium">Scaffold target</p>
-        <p className="text-sm text-muted-foreground">Used when a selected Asana project does not already exist in VertexAI.</p>
-      </div>
-      <label className="grid gap-1 text-sm">
-        <span className="text-xs font-medium text-muted-foreground">Workspace</span>
-        <select className="h-9 rounded-md border bg-background px-3" value={targetMode} onChange={(event) => onTargetModeChange(event.target.value as WorkspaceMode)}>
-          <option value="Personal">Personal</option>
-          <option value="Team">Team</option>
-          <option value="Org">Org</option>
-        </select>
-      </label>
-      <label className="grid gap-1 text-sm">
-        <span className="text-xs font-medium text-muted-foreground">Team</span>
-        <select className="h-9 rounded-md border bg-background px-3" value={targetTeamId} disabled={targetMode !== "Team"} onChange={(event) => onTargetTeamIdChange(event.target.value)}>
-          {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-        </select>
-      </label>
-    </div>
+    <Dialog open={open} onOpenChange={(nextOpen) => !isPending && onOpenChange(nextOpen)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Place scaffolded projects</DialogTitle>
+          <DialogDescription>
+            Choose where to create {projectName || "this Asana project"} in VertexAI.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <label className="grid gap-1 text-sm">
+            <span className="text-xs font-medium text-muted-foreground">Workspace</span>
+            <select
+              className="h-9 rounded-md border bg-background px-3"
+              value={targetMode}
+              onChange={(event) => onTargetModeChange(event.target.value as WorkspaceMode)}
+            >
+              <option value="Personal">Personal</option>
+              <option value="Team">Team</option>
+              <option value="Org">Org</option>
+            </select>
+          </label>
+
+          {requiresTeam ? (
+            <label className="grid gap-1 text-sm">
+              <span className="text-xs font-medium text-muted-foreground">Team</span>
+              <select
+                className="h-9 rounded-md border bg-background px-3"
+                value={targetTeamId}
+                onChange={(event) => onTargetTeamIdChange(event.target.value)}
+              >
+                <option value="">Select team</option>
+                {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+              </select>
+            </label>
+          ) : null}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={isPending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button type="button" disabled={!canConfirm} onClick={onConfirm}>
+            {isPending ? "Saving..." : "Create projects"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function ProjectMappingTable({
   asanaProjects,
   draftSelections,
-  onChange,
+  onActionChange,
+  onMapProject,
+  savingProjectGid,
   vertexProjectById,
   vertexProjects,
 }: {
@@ -322,7 +413,9 @@ function ProjectMappingTable({
   draftSelections: Record<string, DraftSelection>;
   vertexProjects: VertexProjectOption[];
   vertexProjectById: Map<string, VertexProjectOption>;
-  onChange: (projectGid: string, selection: Partial<DraftSelection>) => void;
+  savingProjectGid: string | null;
+  onActionChange: (project: AsanaProjectOption, action: DraftSelection["action"]) => void;
+  onMapProject: (projectGid: string, vertexProjectId: string) => void;
 }) {
   if (!asanaProjects.length) {
     return (
@@ -347,26 +440,32 @@ function ProjectMappingTable({
           {asanaProjects.map((project) => {
             const selection = draftSelections[project.gid] ?? { action: "ignore", vertexProjectId: "" };
             const selectedVertexProject = vertexProjectById.get(selection.vertexProjectId);
+            const sourceLabel = project.portfolioName
+              ? `${project.workspaceName} / Portfolio: ${project.portfolioName}`
+              : `${project.workspaceName}${project.teamName ? ` / ${project.teamName}` : ""}`;
+            const permissionLabel = project.canWriteTasks ? "Task write" : project.permissionLevel === "unknown" ? "Verify on save" : "Read only";
+            const isSaving = savingProjectGid === project.gid;
             return (
               <TableRow key={project.gid}>
                 <TableCell>
                   <div className="grid gap-1">
                     <span className="font-medium">{project.name}</span>
-                    <span className="text-xs text-muted-foreground">{project.workspaceName}{project.teamName ? ` / ${project.teamName}` : ""}</span>
+                    <span className="text-xs text-muted-foreground">{sourceLabel}</span>
                   </div>
                 </TableCell>
                 <TableCell>
                   <Badge variant={project.canWriteTasks ? "default" : "secondary"}>
                     {project.canWriteTasks ? <ShieldCheck className="mr-1 size-3" /> : <ShieldAlert className="mr-1 size-3" />}
-                    {project.canWriteTasks ? "Task write" : "Read only"}
+                    {permissionLabel}
                   </Badge>
                   <p className="mt-1 max-w-64 text-xs text-muted-foreground">{project.permissionSource}</p>
                 </TableCell>
                 <TableCell>
                   <select
                     className="h-9 rounded-md border bg-background px-3 text-sm"
+                    disabled={isSaving}
                     value={selection.action}
-                    onChange={(event) => onChange(project.gid, { action: event.target.value as DraftSelection["action"] })}
+                    onChange={(event) => onActionChange(project, event.target.value as DraftSelection["action"])}
                   >
                     <option value="ignore">Ignore</option>
                     <option value="map">Map existing</option>
@@ -377,8 +476,9 @@ function ProjectMappingTable({
                   {selection.action === "map" ? (
                     <select
                       className="h-9 w-full min-w-56 rounded-md border bg-background px-3 text-sm"
+                      disabled={isSaving}
                       value={selection.vertexProjectId}
-                      onChange={(event) => onChange(project.gid, { vertexProjectId: event.target.value })}
+                      onChange={(event) => onMapProject(project.gid, event.target.value)}
                     >
                       <option value="">Select project</option>
                       {vertexProjects.map((vertexProject) => (
@@ -388,7 +488,9 @@ function ProjectMappingTable({
                       ))}
                     </select>
                   ) : selection.action === "scaffold" ? (
-                    <span className="text-sm text-muted-foreground">Create "{project.name}" in the scaffold target.</span>
+                    <Button type="button" variant="outline" disabled={isSaving} onClick={() => onActionChange(project, "scaffold")}>
+                      {isSaving ? "Creating..." : "Choose destination"}
+                    </Button>
                   ) : selectedVertexProject ? (
                     <span className="text-sm text-muted-foreground">Currently mapped to {selectedVertexProject.name}</span>
                   ) : (

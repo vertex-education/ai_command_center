@@ -1,4 +1,4 @@
-import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedAiGateway } from "@/lib/ai-gateway";
 import { vertexAiModelId } from "@/lib/prompts";
 
 type BriefingProjectRow = {
@@ -358,7 +358,7 @@ async function generateBriefing({
   ].join("\n");
 
   try {
-    const result = await runTrackedWorkersAiWithGateway(env.AI, vertexAiModelId, {
+    const result = await runTrackedAiGateway(env.AI, vertexAiModelId, {
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: prompt },

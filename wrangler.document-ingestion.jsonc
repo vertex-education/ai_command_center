@@ -33,6 +33,9 @@
 		"binding": "AI",
 		"remote": true
 	},
+	"vars": {
+		"CLOUDFLARE_AI_GATEWAY_ID": "default"
+	},
 	"queues": {
 		"consumers": [
 			{

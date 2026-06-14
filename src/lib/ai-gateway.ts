@@ -6,6 +6,7 @@ type AiGatewayMetadata = Record<string, string | number | boolean | null | bigin
 
 type AiGatewayRunOptions = {
   gatewayId?: string | null;
+  env?: Pick<Env, "CLOUDFLARE_AI_GATEWAY_ID"> | null;
   metadata?: AiGatewayMetadata;
   signal?: AbortSignal;
   skipCache?: boolean;
@@ -45,9 +46,10 @@ const usageIndexesSql = [
   "CREATE INDEX IF NOT EXISTS admin_usage_events_chat_idx ON admin_usage_events (chat_id, created_at)",
 ];
 
-function gatewayIdFromEnv() {
-  const value = typeof process !== "undefined" ? process.env.CLOUDFLARE_AI_GATEWAY_ID : undefined;
-  return value?.trim() || defaultAiGatewayId;
+function gatewayIdFromEnv(runtimeEnv?: Pick<Env, "CLOUDFLARE_AI_GATEWAY_ID"> | null) {
+  const bindingValue = runtimeEnv?.CLOUDFLARE_AI_GATEWAY_ID ?? (env as Env & { CLOUDFLARE_AI_GATEWAY_ID?: string }).CLOUDFLARE_AI_GATEWAY_ID;
+  const processValue = typeof process !== "undefined" ? process.env.CLOUDFLARE_AI_GATEWAY_ID : undefined;
+  return bindingValue?.trim() || processValue?.trim() || defaultAiGatewayId;
 }
 
 function compactMetadata(metadata: AiGatewayMetadata | undefined) {
@@ -163,7 +165,7 @@ async function recordWorkersAiGatewayUsageEvent({
       )
       .bind(
         `usage-${crypto.randomUUID()}`,
-        "cloudflare-workers-ai",
+        "ai-gateway",
         error ? `${feature}-error` : feature,
         model ?? null,
         null,
@@ -192,7 +194,7 @@ async function recordWorkersAiGatewayUsageEvent({
   }
 }
 
-export function runWorkersAiWithGateway(
+export function runAiGateway(
   ai: Ai,
   model: string,
   inputs: Record<string, unknown>,
@@ -201,19 +203,19 @@ export function runWorkersAiWithGateway(
   return ai.run(model, inputs, {
     signal: options.signal,
     gateway: {
-      id: options.gatewayId?.trim() || gatewayIdFromEnv(),
+      id: options.gatewayId?.trim() || gatewayIdFromEnv(options.env),
       skipCache: options.skipCache ?? true,
       cacheTtl: options.cacheTtl,
       metadata: compactMetadata({
         app: "ai-command-center",
-        feature: "workers-ai",
+        feature: "ai-gateway",
         ...options.metadata,
       }),
     },
   });
 }
 
-export async function runTrackedWorkersAiWithGateway(
+export async function runTrackedAiGateway(
   ai: Ai,
   model: string,
   inputs: Record<string, unknown>,
@@ -221,7 +223,7 @@ export async function runTrackedWorkersAiWithGateway(
 ) {
   const startedAt = Date.now();
   try {
-    const result = await runWorkersAiWithGateway(ai, model, inputs, options);
+    const result = await runAiGateway(ai, model, inputs, options);
     await recordWorkersAiGatewayUsageEvent({
       ai,
       durationMs: Date.now() - startedAt,
@@ -251,3 +253,6 @@ export async function runTrackedWorkersAiWithGateway(
     throw error;
   }
 }
+
+export const runWorkersAiWithGateway = runAiGateway;
+export const runTrackedWorkersAiWithGateway = runTrackedAiGateway;

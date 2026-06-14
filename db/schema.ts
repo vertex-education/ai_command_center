@@ -236,6 +236,10 @@ export const projects = sqliteTable(
     name: text("name").notNull(),
     description: text("description").notNull(),
     status: text("status", { enum: ["Active", "Watch", "Planning", "Blocked", "In Progress"] }).notNull(),
+    projectInstructions: text("project_instructions").notNull().default(""),
+    asanaTaskStatusSource: text("asana_task_status_source", { enum: ["native", "custom_field"] }).notNull().default("native"),
+    asanaTaskStatusCustomFieldGid: text("asana_task_status_custom_field_gid"),
+    asanaTaskStatusCustomFieldName: text("asana_task_status_custom_field_name"),
     sortOrder: integer("sort_order").notNull().default(0),
   },
   (table) => ({

@@ -1,6 +1,6 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
-import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedAiGateway } from "@/lib/ai-gateway";
 
 export type ScopeLevel = "org" | "team" | "personal";
 
@@ -235,7 +235,7 @@ async function embedTexts(
 
   for (let index = 0; index < texts.length; index += embeddingBatchSize) {
     const batch = texts.slice(index, index + embeddingBatchSize);
-    const result = (await runTrackedWorkersAiWithGateway(env.AI, embeddingModelId, { text: batch, pooling: "cls" }, {
+    const result = (await runTrackedAiGateway(env.AI, embeddingModelId, { text: batch, pooling: "cls" }, {
       feature: scope.feature,
       usageDb: env.DB,
       teamId: scope.teamId,

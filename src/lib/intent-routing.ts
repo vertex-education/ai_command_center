@@ -1,4 +1,4 @@
-import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedAiGateway } from "@/lib/ai-gateway";
 
 export const intentRoutingModelId = "@cf/meta/llama-3-8b-instruct";
 
@@ -77,7 +77,7 @@ export function inferPromptIntentFallback(prompt: string): PromptIntent {
 
 export async function classifyPromptIntent(prompt: string, ai: Ai): Promise<PromptIntent> {
   try {
-    const result = await runTrackedWorkersAiWithGateway(ai, intentRoutingModelId, {
+    const result = await runTrackedAiGateway(ai, intentRoutingModelId, {
       messages: [
         {
           role: "system",

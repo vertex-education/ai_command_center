@@ -209,8 +209,8 @@ function AdminDashboardPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Cloudflare Token Usage</CardTitle>
-            <CardDescription>Gemma and Workers AI token totals where the runtime returns usage diagnostics.</CardDescription>
+            <CardTitle>AI Gateway Token Usage</CardTitle>
+            <CardDescription>Gemma token totals from AI Gateway usage events and Gateway logs.</CardDescription>
           </CardHeader>
           <CardContent>
             <SectionRefreshButton isFetching={providerUsageQuery.isFetching} label="Refresh token usage" onRefresh={() => void providerUsageQuery.refetch()} />
@@ -496,7 +496,7 @@ function formatCompactDateTime(value: number) {
 }
 
 function providerLabel(provider: string) {
-  if (provider === "cloudflare-workers-ai") return "Workers AI";
+  if (provider === "cloudflare-workers-ai") return "AI Gateway";
   if (provider === "ai-gateway") return "AI Gateway";
   if (provider === "tavily") return "Tavily";
   if (provider === "firecrawl") return "Firecrawl";

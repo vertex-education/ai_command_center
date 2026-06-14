@@ -1,6 +1,7 @@
 import { getRequest } from "@tanstack/start-server-core";
 import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
+import { vertexAiModelId } from "@/lib/prompts";
 
 type AdminSession = {
   user?: {
@@ -9,7 +10,7 @@ type AdminSession = {
   };
 };
 
-export type AdminUsageProvider = "cloudflare-workers-ai" | "tavily" | "firecrawl" | "vectorize";
+export type AdminUsageProvider = "ai-gateway" | "cloudflare-workers-ai" | "tavily" | "firecrawl" | "vectorize";
 
 export type AdminUsageEventInput = {
   provider: AdminUsageProvider;
@@ -44,6 +45,8 @@ type UsageRow = {
   durationMs: number | null;
   latestAt: number | null;
 };
+
+const aiGatewayUsageProviders = ["ai-gateway", "cloudflare-workers-ai"] as const;
 
 type ActivityRow = {
   name: string;
@@ -118,6 +121,7 @@ const gatewayLogSampleLimit = 20;
 
 function getRuntimeEnv() {
   return env as Env & {
+    CLOUDFLARE_AI_GATEWAY_ID?: string;
     FIRECRAWL_API_KEY?: string;
     TAVILY_API_KEY?: string;
     VECTORIZE?: Vectorize;
@@ -352,7 +356,7 @@ async function getUsageRows(since: number) {
   await ensureUsageTable();
   const result = await (await getDb())
     .prepare(
-      `SELECT provider,
+      `SELECT CASE WHEN provider = 'cloudflare-workers-ai' THEN 'ai-gateway' ELSE provider END as provider,
               COUNT(*) as requests,
               SUM(credits_used) as creditsUsed,
               SUM(input_tokens) as inputTokens,
@@ -362,7 +366,7 @@ async function getUsageRows(since: number) {
               MAX(created_at) as latestAt
        FROM admin_usage_events
        WHERE created_at >= ?
-       GROUP BY provider
+       GROUP BY CASE WHEN provider = 'cloudflare-workers-ai' THEN 'ai-gateway' ELSE provider END
        ORDER BY provider ASC`,
     )
     .bind(since)
@@ -373,6 +377,27 @@ async function getUsageRows(since: number) {
 
 async function getProviderUsageRow(provider: AdminUsageProvider, since: number) {
   await ensureUsageTable();
+  if (provider === "ai-gateway") {
+    return await (await getDb())
+      .prepare(
+        `SELECT 'ai-gateway' as provider,
+                COUNT(*) as requests,
+                SUM(credits_used) as creditsUsed,
+                SUM(input_tokens) as inputTokens,
+                SUM(output_tokens) as outputTokens,
+                SUM(total_tokens) as totalTokens,
+                AVG(duration_ms) as durationMs,
+                MAX(created_at) as latestAt
+         FROM admin_usage_events
+         WHERE created_at >= ?
+           AND provider IN ('ai-gateway', 'cloudflare-workers-ai')
+         GROUP BY CASE WHEN provider IN ('ai-gateway', 'cloudflare-workers-ai') THEN 'ai-gateway' END
+         LIMIT 1`,
+      )
+      .bind(since)
+      .first<UsageRow>();
+  }
+
   return await (await getDb())
     .prepare(
       `SELECT provider,
@@ -393,12 +418,35 @@ async function getProviderUsageRow(provider: AdminUsageProvider, since: number) 
     .first<UsageRow>();
 }
 
+async function getAiGatewayModelUsageRow(model: string, since: number) {
+  await ensureUsageTable();
+  return await (await getDb())
+    .prepare(
+      `SELECT 'ai-gateway' as provider,
+              COUNT(*) as requests,
+              SUM(credits_used) as creditsUsed,
+              SUM(input_tokens) as inputTokens,
+              SUM(output_tokens) as outputTokens,
+              SUM(total_tokens) as totalTokens,
+              AVG(duration_ms) as durationMs,
+              MAX(created_at) as latestAt
+       FROM admin_usage_events
+       WHERE created_at >= ?
+         AND provider IN ('ai-gateway', 'cloudflare-workers-ai')
+         AND model = ?
+       GROUP BY model
+       LIMIT 1`,
+    )
+    .bind(since, model)
+    .first<UsageRow>();
+}
+
 async function getRecentUsageRows() {
   await ensureUsageTable();
   const result = await (await getDb())
     .prepare(
       `SELECT id,
-              provider,
+              CASE WHEN provider = 'cloudflare-workers-ai' THEN 'ai-gateway' ELSE provider END as provider,
               feature,
               model,
               credits_used as creditsUsed,
@@ -426,10 +474,11 @@ async function getGatewayUsageSummary() {
     .prepare(
       `SELECT metadata_json as metadataJson, created_at as createdAt
        FROM admin_usage_events
-       WHERE provider = 'cloudflare-workers-ai'
+       WHERE provider IN (${aiGatewayUsageProviders.map(() => "?").join(", ")})
        ORDER BY created_at DESC
        LIMIT 50`,
     )
+    .bind(...aiGatewayUsageProviders)
     .all<{ metadataJson: string; createdAt: number }>();
 
   const logIds = Array.from(new Set((result.results ?? [])
@@ -486,12 +535,15 @@ async function buildSingleMetricCard(metricId: string): Promise<MetricCard> {
       return { id: metricId, label: "Total chats initiated", value: totalChats.toLocaleString(), detail: `${totalMessages.toLocaleString()} messages stored`, status: "ok" };
     }
     case "gemma-token-usage": {
-      const usage = await getProviderUsageRow("cloudflare-workers-ai", thirtyDaysAgo);
-      return { id: metricId, label: "Gemma 4 token usage", value: formatNumber(usage?.totalTokens), detail: `${usage?.requests ?? 0} Workers AI requests in 30 days`, status: usage ? "ok" : "watch" };
+      const usage = await getAiGatewayModelUsageRow(vertexAiModelId, thirtyDaysAgo);
+      return { id: metricId, label: "Gemma 4 token usage", value: formatNumber(usage?.totalTokens), detail: `${usage?.requests ?? 0} Gemma 4 requests in 30 days`, status: usage ? "ok" : "watch" };
     }
     case "ai-gateway-token-usage": {
-      const gatewayUsage = await getGatewayUsageSummary();
-      return { id: metricId, label: "AI Gateway tokens", value: formatNumber(gatewayUsage.totalTokens), detail: `${gatewayUsage.requests.toLocaleString()} Gateway logs sampled; ${gatewayUsage.cached.toLocaleString()} cached`, status: gatewayUsage.requests ? "ok" : "watch" };
+      const [usage, gatewayUsage] = await Promise.all([
+        getProviderUsageRow("ai-gateway", thirtyDaysAgo),
+        getGatewayUsageSummary(),
+      ]);
+      return { id: metricId, label: "AI Gateway tokens", value: formatNumber(usage?.totalTokens), detail: `${usage?.requests ?? 0} AI Gateway requests in 30 days; ${gatewayUsage.requests.toLocaleString()} logs sampled`, status: usage ? "ok" : "watch" };
     }
     case "ai-gateway-cost": {
       const gatewayUsage = await getGatewayUsageSummary();
@@ -566,6 +618,7 @@ async function getHealthMetrics() {
     mostActiveProject,
     mostActiveTeam,
     usageRows,
+    gemmaUsage,
     gatewayUsage,
     recentUsage,
   ] = await Promise.all([
@@ -587,6 +640,7 @@ async function getHealthMetrics() {
     getMostActiveProject(thirtyDaysAgo),
     getMostActiveTeam(thirtyDaysAgo),
     getUsageRows(thirtyDaysAgo),
+    getAiGatewayModelUsageRow(vertexAiModelId, thirtyDaysAgo),
     getGatewayUsageSummary(),
     getRecentUsageRows(),
   ]);
@@ -594,7 +648,7 @@ async function getHealthMetrics() {
   const totalStoredFiles = totalArtifacts + legacyDocumentFiles + v2ArtifactFiles;
   const estimatedAverageConcurrentUsers = Math.round((activeUsers + sessionsUpdatedToday / 24) * 10) / 10;
   const providerRowsByName = new Map(usageRows.map((row) => [row.provider, row]));
-  const cloudflareUsage = providerRowsByName.get("cloudflare-workers-ai");
+  const aiGatewayEventUsage = providerRowsByName.get("ai-gateway");
   const tavilyUsage = providerRowsByName.get("tavily");
   const firecrawlUsage = providerRowsByName.get("firecrawl");
   const recentGatewayLogs = await getAiGatewayLogs(
@@ -610,8 +664,8 @@ async function getHealthMetrics() {
     { id: "average-concurrent-users", label: "Avg concurrent users", value: estimatedAverageConcurrentUsers.toLocaleString(), detail: "Estimated from active sessions and 24h session updates", status: "muted" },
     { id: "max-concurrent-users", label: "Max concurrent users", value: activeSessions.toLocaleString(), detail: "Highest observable from current active sessions until sampling is added", status: "muted" },
     { id: "total-chats-initiated", label: "Total chats initiated", value: totalChats.toLocaleString(), detail: `${totalMessages.toLocaleString()} messages stored`, status: "ok" },
-    { id: "gemma-token-usage", label: "Gemma 4 token usage", value: formatNumber(cloudflareUsage?.totalTokens), detail: `${cloudflareUsage?.requests ?? 0} Workers AI requests in 30 days`, status: cloudflareUsage ? "ok" : "watch" },
-    { id: "ai-gateway-token-usage", label: "AI Gateway tokens", value: formatNumber(gatewayUsage.totalTokens), detail: `${gatewayUsage.requests.toLocaleString()} Gateway logs sampled; ${gatewayUsage.cached.toLocaleString()} cached`, status: gatewayUsage.requests ? "ok" : "watch" },
+    { id: "gemma-token-usage", label: "Gemma 4 token usage", value: formatNumber(gemmaUsage?.totalTokens), detail: `${gemmaUsage?.requests ?? 0} Gemma 4 requests in 30 days`, status: gemmaUsage ? "ok" : "watch" },
+    { id: "ai-gateway-token-usage", label: "AI Gateway tokens", value: formatNumber(aiGatewayEventUsage?.totalTokens), detail: `${aiGatewayEventUsage?.requests ?? 0} AI Gateway requests in 30 days; ${gatewayUsage.requests.toLocaleString()} logs sampled`, status: aiGatewayEventUsage ? "ok" : "watch" },
     { id: "ai-gateway-cost", label: "AI Gateway cost", value: formatCurrency(gatewayUsage.cost), detail: `${gatewayUsage.success.toLocaleString()} successful Gateway requests sampled`, status: gatewayUsage.requests ? "ok" : "watch" },
     { id: "tavily-credits-used", label: "Tavily credits used", value: formatNumber(tavilyUsage?.creditsUsed), detail: `${tavilyUsage?.requests ?? 0} searches tracked in 30 days`, status: tavilyUsage ? "ok" : "watch" },
     { id: "firecrawl-credits-used", label: "Firecrawl credits used", value: formatNumber(firecrawlUsage?.creditsUsed), detail: `${firecrawlUsage?.requests ?? 0} searches tracked in 30 days`, status: firecrawlUsage ? "ok" : "watch" },
@@ -625,23 +679,24 @@ async function getHealthMetrics() {
   return {
     generatedAt: new Date(now).toISOString(),
     cards,
-    providerUsage: ["cloudflare-workers-ai", "ai-gateway", "tavily", "firecrawl", "vectorize"].map((provider) => {
+    providerUsage: ["ai-gateway", "tavily", "firecrawl", "vectorize"].map((provider) => {
       if (provider === "ai-gateway") {
+        const row = aiGatewayEventUsage;
         return {
           provider,
-          requests: gatewayUsage.requests,
+          requests: row?.requests ?? 0,
           creditsUsed: gatewayUsage.cost,
-          inputTokens: gatewayUsage.tokensIn,
-          outputTokens: gatewayUsage.tokensOut,
-          totalTokens: gatewayUsage.totalTokens,
-          averageDuration: null,
-          latestAt: gatewayUsage.latestAt,
+          inputTokens: row?.inputTokens ?? gatewayUsage.tokensIn ?? null,
+          outputTokens: row?.outputTokens ?? gatewayUsage.tokensOut ?? null,
+          totalTokens: row?.totalTokens ?? gatewayUsage.totalTokens ?? null,
+          averageDuration: row?.durationMs ?? null,
+          latestAt: gatewayUsage.latestAt ?? row?.latestAt ?? null,
           creditsLabel: formatCurrency(gatewayUsage.cost),
-          inputTokensLabel: formatNumber(gatewayUsage.tokensIn),
-          outputTokensLabel: formatNumber(gatewayUsage.tokensOut),
-          totalTokensLabel: formatNumber(gatewayUsage.totalTokens),
-          averageDurationLabel: "Gateway log",
-          latestLabel: formatDateTime(gatewayUsage.latestAt),
+          inputTokensLabel: formatNumber(row?.inputTokens ?? gatewayUsage.tokensIn),
+          outputTokensLabel: formatNumber(row?.outputTokens ?? gatewayUsage.tokensOut),
+          totalTokensLabel: formatNumber(row?.totalTokens ?? gatewayUsage.totalTokens),
+          averageDurationLabel: formatMs(row?.durationMs),
+          latestLabel: formatDateTime(gatewayUsage.latestAt ?? row?.latestAt),
           cacheLabel: `${gatewayUsage.cached.toLocaleString()} cached`,
           successLabel: `${gatewayUsage.success.toLocaleString()} successful`,
         };
@@ -675,8 +730,7 @@ async function getHealthMetrics() {
       pendingInvites,
       recentEvents,
       configuredServices: [
-        { label: "Workers AI", configured: Boolean(runtime.AI) },
-        { label: "AI Gateway", configured: Boolean(runtime.AI) },
+        { label: "AI Gateway", configured: Boolean(runtime.AI && runtime.CLOUDFLARE_AI_GATEWAY_ID) },
         { label: "Vectorize", configured: Boolean(runtime.VECTORIZE) },
         { label: "R2 artifacts", configured: Boolean(runtime.ARTIFACTS_BUCKET) },
         { label: "Tavily", configured: Boolean(runtime.TAVILY_API_KEY) },

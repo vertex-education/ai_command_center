@@ -17,6 +17,7 @@ export type DynamicWorkspacePromptContext = {
   workspaceName: string;
   projectName?: string | null;
   projectDescription?: string | null;
+  projectInstructions?: string | null;
   projectStatus?: string | null;
 };
 
@@ -30,6 +31,7 @@ export function buildDynamicWorkspaceContextHeader(context: DynamicWorkspaceProm
   const projectName = context.projectName?.trim() || "No active project selected.";
   const projectStatus = context.projectStatus?.trim() || "No active project status recorded.";
   const projectDescription = context.projectDescription?.trim() || "No project description is recorded.";
+  const projectInstructions = context.projectInstructions?.trim() || "No project-specific instructions are recorded.";
 
   return [
     "=== PRIORITY WORKSPACE CONTEXT - READ BEFORE ALL OTHER CONTEXT ===",
@@ -37,6 +39,7 @@ export function buildDynamicWorkspaceContextHeader(context: DynamicWorkspaceProm
     `Active project: ${projectName}`,
     `Active project status: ${projectStatus}`,
     `Detailed project description: ${projectDescription}`,
+    `Project-specific instructions: ${projectInstructions}`,
     "Treat this workspace context as the controlling organizational frame for the response before considering RAG chunks, web context, attachments, chat history, or the user's latest prompt.",
     "=== END PRIORITY WORKSPACE CONTEXT ===",
   ].join("\n");

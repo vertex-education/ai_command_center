@@ -4,7 +4,8 @@ import { env } from "cloudflare:workers";
 import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
-import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedAiGateway } from "@/lib/ai-gateway";
+import { fetchAsanaProjectContextForCurrentUser } from "@/lib/asana-integration.server";
 import { getAuth } from "@/lib/auth";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
@@ -32,6 +33,7 @@ export type WorkspaceScope = "personal" | "team" | "org";
 export type ChatSection = "project" | "workspace";
 export type ChatReasoningLevel = "low" | "medium" | "high";
 export type ProjectStatus = "Active" | "Watch" | "Planning" | "Blocked" | "In Progress";
+export type AsanaTaskStatusSource = "native" | "custom_field";
 
 export type ChatSummary = {
   id: string;
@@ -43,6 +45,10 @@ export type ProjectSummary = {
   id: string;
   name: string;
   description: string;
+  projectInstructions: string;
+  asanaTaskStatusSource: AsanaTaskStatusSource;
+  asanaTaskStatusCustomFieldGid: string | null;
+  asanaTaskStatusCustomFieldName: string | null;
   status: ProjectStatus;
   projectChats: ChatSummary[];
 };
@@ -228,6 +234,7 @@ export type LlmDevTrace = {
   mode: WorkspaceMode;
   projectId: string | null;
   webSearch?: WebSearchTrace;
+  asanaSearchEnabled?: boolean;
   request: {
     messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
     max_completion_tokens: number;
@@ -268,6 +275,7 @@ type SendChatMessageInput = {
   model: string;
   reasoningLevel?: ChatReasoningLevel;
   webSearchEnabled?: boolean;
+  asanaSearchEnabled?: boolean;
   attachments?: ChatAttachment[];
 };
 
@@ -275,6 +283,7 @@ type ChatDynamicWorkspaceContext = {
   workspaceName: string;
   projectName: string | null;
   projectDescription: string | null;
+  projectInstructions: string | null;
   projectStatus: string | null;
 };
 
@@ -343,7 +352,7 @@ async function generateChatTitleFromInitialMessage(context: unknown, text: strin
 
   try {
     const result = await withAiTimeout(
-      (signal) => runTrackedWorkersAiWithGateway(
+      (signal) => runTrackedAiGateway(
         ai,
         lightweightChatTitleModelId,
         {
@@ -474,8 +483,10 @@ function buildReasoningInstruction(level: ChatReasoningLevel) {
   if (level === "high") {
     return [
       "Reasoning depth: High.",
-      "Use comprehensive analysis for non-trivial requests.",
-      "Include assumptions, relevant evidence, tradeoffs, alternatives, risks, edge cases, a recommendation, and confidence when those elements are useful.",
+      "Use exhaustive, comprehensive analysis for non-trivial requests.",
+      "Prefer a complete answer over brevity: cover the user's question from multiple angles, include relevant evidence, explain the reasoning path, and make implicit project context explicit.",
+      "Include assumptions, constraints, relevant evidence, tradeoffs, alternatives, risks, edge cases, implementation implications, a recommendation, next steps, and confidence when those elements are useful.",
+      "Use clear sections, bullets, tables, or step-by-step structure when they make the answer easier to scan.",
       "If required information is missing, state what is missing instead of guessing.",
     ].join(" ");
   }
@@ -483,9 +494,10 @@ function buildReasoningInstruction(level: ChatReasoningLevel) {
   if (level === "medium") {
     return [
       "Reasoning depth: Medium.",
-      "Use balanced analysis for non-trivial requests.",
-      "Include key assumptions, main tradeoffs, and a practical recommendation when useful.",
-      "Keep the answer focused and avoid exhaustive coverage unless the user asks for it.",
+      "Use thorough analysis for non-trivial requests.",
+      "Provide enough context that the answer can stand alone: include key assumptions, relevant evidence, main tradeoffs, practical implications, and a recommendation when useful.",
+      "Cover the important caveats and next steps, but reserve exhaustive edge-case enumeration for High reasoning or when the user asks for it.",
+      "Use concise sections or bullets instead of compressing the answer into a short paragraph.",
     ].join(" ");
   }
 
@@ -840,7 +852,7 @@ async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"
   ].join("\n");
   try {
     const result = await withAiTimeout(
-      (signal) => runTrackedWorkersAiWithGateway(
+      (signal) => runTrackedAiGateway(
         ai,
         vertexAiModelId,
         {
@@ -896,7 +908,7 @@ async function generateWorkflowSuggestionTitle(kind: "approval" | "decision" | "
   if (!ai) return fallback;
   try {
     const result = await withAiTimeout(
-      (signal) => runTrackedWorkersAiWithGateway(
+      (signal) => runTrackedAiGateway(
         ai,
         lightweightChatTitleModelId,
         {
@@ -1184,6 +1196,14 @@ function buildWebSearchPromptContext(search: WebSearchTrace) {
   return lines.join("\n");
 }
 
+function chatSafeAiErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : "Workers AI request failed.";
+  if (/<html[\s>]/i.test(raw) || /504 Gateway Time-out/i.test(raw)) {
+    return "Workers AI gateway timed out before returning a response.";
+  }
+  return raw.replace(/\s+/g, " ").trim() || "Workers AI request failed.";
+}
+
 async function runGemmaChat({
   context,
   data,
@@ -1204,12 +1224,18 @@ async function runGemmaChat({
     chatTitle: data.chatTitle,
   });
   const webSearchContext = buildWebSearchPromptContext(webSearch);
+  const asanaContext = await fetchAsanaProjectContextForCurrentUser({
+    enabled: data.asanaSearchEnabled,
+    prompt: data.text,
+    vertexProjectId: data.projectId,
+  });
   const workspaceContext: ChatDynamicWorkspaceContext = data.projectId
     ? await getDb()
       .prepare(
         `SELECT w.name as workspaceName,
                 p.name as projectName,
                 p.description as projectDescription,
+                COALESCE(p.project_instructions, '') as projectInstructions,
                 p.status as projectStatus
          FROM projects p
          INNER JOIN workspaces w ON w.id = p.workspace_id
@@ -1221,6 +1247,7 @@ async function runGemmaChat({
         workspaceName: `${workspaceModeLabel(data.mode)} Workspace`,
         projectName: null,
         projectDescription: null,
+        projectInstructions: null,
         projectStatus: null,
       }
     : {
@@ -1230,6 +1257,7 @@ async function runGemmaChat({
       .first<{ workspaceName: string }>() ?? { workspaceName: `${workspaceModeLabel(data.mode)} Workspace` }),
       projectName: null,
       projectDescription: null,
+      projectInstructions: null,
       projectStatus: null,
     };
   const recentMessages: Array<{ role: "user" | "assistant"; content: string }> = existingMessages.slice(-8).map((message) => ({
@@ -1261,6 +1289,7 @@ async function runGemmaChat({
             workspaceName: workspaceContext.workspaceName,
             projectName: workspaceContext.projectName,
             projectDescription: workspaceContext.projectDescription,
+            projectInstructions: workspaceContext.projectInstructions,
             projectStatus: workspaceContext.projectStatus,
           },
         ),
@@ -1273,6 +1302,12 @@ async function runGemmaChat({
         ? [{
           role: "user" as const,
           content: `Current web context:\n${webSearchContext}`,
+        }]
+        : []),
+      ...(asanaContext
+        ? [{
+          role: "user" as const,
+          content: `Current Asana project context:\n${asanaContext}`,
         }]
         : []),
       ...(attachmentContext
@@ -1306,6 +1341,7 @@ async function runGemmaChat({
     mode: data.mode,
     projectId: data.projectId,
     webSearch,
+    asanaSearchEnabled: Boolean(data.asanaSearchEnabled),
     request: requestPayload,
   };
   const ai = (context as CloudflareContext).cloudflare?.env?.AI;
@@ -1348,7 +1384,7 @@ async function runGemmaChat({
   const startedAt = Date.now();
   try {
     const result = await withAiTimeout(
-      (signal) => runTrackedWorkersAiWithGateway(
+      (signal) => runTrackedAiGateway(
         ai,
         vertexAiModelId,
         requestPayload,
@@ -1395,7 +1431,7 @@ async function runGemmaChat({
       trace,
     };
   } catch (error) {
-    const detail = error instanceof Error ? error.message : "Workers AI request failed.";
+    const detail = chatSafeAiErrorMessage(error);
     console.error("[VertexAI] Workers AI request failed", {
       chatId: data.chatId,
       message: detail,
@@ -1471,14 +1507,15 @@ async function loadIdeaAssessmentContext(mode: WorkspaceMode, projectId: string 
     .first<{ name: string }>();
   const project = projectId
     ? await getDb()
-      .prepare("SELECT name, description, status FROM projects WHERE id = ? LIMIT 1")
+      .prepare("SELECT name, description, status, COALESCE(project_instructions, '') as projectInstructions FROM projects WHERE id = ? LIMIT 1")
       .bind(projectId)
-      .first<{ name: string; description: string; status: string }>()
+      .first<{ name: string; description: string; status: string; projectInstructions: string }>()
     : null;
   return {
     workspaceName: workspace?.name ?? `${workspaceModeLabel(mode)} Workspace`,
     projectName: project?.name ?? null,
     projectDescription: project?.description ?? null,
+    projectInstructions: project?.projectInstructions ?? null,
     projectStatus: project?.status ?? null,
   };
 }
@@ -1532,7 +1569,7 @@ async function assessIdeaWithGemma({
 
   try {
     const result = await withAiTimeout(
-      (signal) => runTrackedWorkersAiWithGateway(
+      (signal) => runTrackedAiGateway(
         ai,
         vertexAiModelId,
         {

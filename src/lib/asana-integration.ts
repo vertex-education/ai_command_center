@@ -15,6 +15,7 @@ export type AsanaConnectionSummary = {
   } | null;
   requiredScopes: string[];
   missingScopes: string[];
+  projectDiscoveryIssue: string | null;
   asanaProjects: AsanaProjectOption[];
   vertexProjects: VertexProjectOption[];
   mappings: AsanaProjectMappingView[];
@@ -28,6 +29,8 @@ export type AsanaProjectOption = {
   workspaceName: string;
   teamGid: string | null;
   teamName: string | null;
+  portfolioGid: string | null;
+  portfolioName: string | null;
   canWriteTasks: boolean;
   permissionLevel: "write" | "read" | "unknown";
   permissionSource: string;
@@ -72,6 +75,12 @@ export type AsanaMappingSelection = {
   targetTeamId?: string | null;
 };
 
+export type AsanaTaskStatusCustomFieldOption = {
+  gid: string;
+  name: string;
+  type: string | null;
+};
+
 export const startAsanaConnection = createServerFn({ method: "POST" }).handler(async () => {
   const { startAsanaConnectionForCurrentUser } = await import("@/lib/asana-integration.server");
   return startAsanaConnectionForCurrentUser();
@@ -99,4 +108,11 @@ export const createAsanaTaskForMappedProject = createServerFn({ method: "POST" }
   .handler(async ({ data }) => {
     const { createAsanaTaskForMappedProjectForCurrentUser } = await import("@/lib/asana-integration.server");
     return createAsanaTaskForMappedProjectForCurrentUser(data);
+  });
+
+export const listAsanaTaskStatusCustomFields = createServerFn({ method: "POST" })
+  .validator((data: { vertexProjectId: string }) => data)
+  .handler(async ({ data }): Promise<AsanaTaskStatusCustomFieldOption[]> => {
+    const { listAsanaTaskStatusCustomFieldsForCurrentUser } = await import("@/lib/asana-integration.server");
+    return listAsanaTaskStatusCustomFieldsForCurrentUser(data);
   });

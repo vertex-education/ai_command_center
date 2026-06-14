@@ -1,9 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
-import { runTrackedWorkersAiWithGateway } from "@/lib/ai-gateway";
+import { runTrackedAiGateway } from "@/lib/ai-gateway";
 import { getAuth } from "@/lib/auth";
+import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { lightweightChatTitleModelId } from "@/lib/prompts";
-import { getConversationKey, parseChatAttachments, type ChatMessage, type ChatSection, type ChatSummary, type ProjectSummary, type WorkspaceMode } from "@/lib/pmo-data";
+import { avatarAlex, getConversationKey, parseChatAttachments, type ChatMessage, type ChatSection, type ChatSummary, type ProjectSummary, type WorkspaceMode } from "@/lib/pmo-data";
 import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
 import { getRequest } from "@tanstack/start-server-core";
 
@@ -47,6 +48,14 @@ export type DeleteProjectInput = {
   projectId: string;
 };
 
+export type UpdateProjectInstructionsInput = DeleteProjectInput & {
+  asanaTaskStatusCustomFieldGid?: string | null;
+  asanaTaskStatusCustomFieldName?: string | null;
+  asanaTaskStatusSource: ProjectSummary["asanaTaskStatusSource"];
+  description: string;
+  projectInstructions: string;
+};
+
 export type ScopedChatsResult = {
   workspaceChats: ChatSummary[];
   projectChatsByProjectId: Record<string, ChatSummary[]>;
@@ -81,6 +90,17 @@ export type BranchChatInput = DeleteChatInput & {
 export type BranchChatResult = {
   chat: ChatSummary;
   rootMessage: ChatMessage;
+};
+
+export type PersistScopedRagChatInput = {
+  mode: WorkspaceMode;
+  teamId?: string | null;
+  projectId: string;
+  chatId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  prompt: string;
+  response: string;
 };
 
 function getDb() {
@@ -127,9 +147,92 @@ function chatId(title: string) {
   return `chat-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 44) || "untitled"}-${crypto.randomUUID()}`;
 }
 
+function messageId(prefix: string, value: string) {
+  const trimmed = value.trim();
+  return trimmed && /^[a-zA-Z0-9_-]{8,120}$/.test(trimmed) ? trimmed : `msg-${prefix}-${crypto.randomUUID()}`;
+}
+
+function nowLabel() {
+  return new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+
 function normalizeChatTitle(title: string) {
   const trimmed = title.trim().replace(/\s+/g, " ").slice(0, 60);
   return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
+}
+
+function conciseChatTitleFromRequest(text: string) {
+  const cleaned = text
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\b(please|can you|could you|would you|help me|i need|we need)\b/gi, " ")
+    .replace(/\b(create|make|build|write|generate|give|tell|show|summarize)\s+(me\s+)?\b/gi, " ")
+    .replace(/[^a-z0-9\s&/+-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const words = cleaned
+    .split(" ")
+    .map((word) => word.trim())
+    .filter(Boolean)
+    .slice(0, 6);
+  const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
+  const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
+  return normalizeChatTitle(conciseTitle) || "New Request";
+}
+
+function normalizeGeneratedInitialChatTitle(title: string, fallback: string) {
+  const cleaned = title
+    .split("\n")[0]
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/^["'`]+|["'`.]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalizeChatTitle(cleaned && cleaned.length >= 3 ? cleaned : fallback) || fallback;
+}
+
+async function generateInitialChatTitle(context: unknown, text: string) {
+  const fallback = conciseChatTitleFromRequest(text);
+  const ai = (context as CloudflareContext).cloudflare?.env?.AI ?? (env as Env & { AI?: Ai }).AI;
+  if (!ai) return fallback;
+
+  try {
+    const result = await Promise.race([
+      runTrackedAiGateway(ai, lightweightChatTitleModelId, {
+        messages: [
+          {
+            role: "system",
+            content: [
+              "Name this chat from the user's initial message.",
+              "Return only a concise title, no quotes, no punctuation at the end.",
+              "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+            ].join(" "),
+          },
+          { role: "user", content: text.slice(0, 2_000) },
+        ],
+        max_completion_tokens: 24,
+        temperature: 0.1,
+      }, {
+        feature: "stream-chat-title",
+        metadata: {
+          feature: "stream-chat-title",
+          model: lightweightChatTitleModelId,
+        },
+      }),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Chat title model timed out.")), 5_000);
+      }),
+    ]);
+    return normalizeGeneratedInitialChatTitle(extractGeneratedText(result), fallback);
+  } catch (error) {
+    console.warn("[VertexAI] Stream chat title generation fell back", {
+      model: lightweightChatTitleModelId,
+      message: error instanceof Error ? error.message : "Unknown title generation error.",
+    });
+    return fallback;
+  }
+}
+
+function shouldAutoRenameInitialChat(chat: { title: string; description: string | null }) {
+  return /\sAI Chat$/i.test(chat.title.trim()) && /^AI chatbot scoped to .+\.$/i.test((chat.description ?? "").trim());
 }
 
 function branchContextTitle(messageText: string) {
@@ -190,7 +293,7 @@ async function generateBranchChatTitle(context: unknown, sourceChatTitle: string
 
   try {
     const result = await Promise.race([
-      runTrackedWorkersAiWithGateway(ai, lightweightChatTitleModelId, {
+      runTrackedAiGateway(ai, lightweightChatTitleModelId, {
         messages: [
           {
             role: "system",
@@ -306,6 +409,82 @@ async function requireProjectMember(userId: string, projectId: string, teamId?: 
   if (!membership) throw new Error("You are not assigned to this project.");
 }
 
+function chatSyncScopeKey({
+  mode,
+  teamId,
+  userId,
+  workspaceId,
+}: {
+  mode: WorkspaceMode;
+  teamId: string | null;
+  userId: string;
+  workspaceId: string;
+}) {
+  if (mode === "Team") return `${workspaceId}:team:${teamId ?? ""}`;
+  if (mode === "Org") return `${workspaceId}:org`;
+  return `${workspaceId}:user:${userId}`;
+}
+
+async function insertScopedChatMessage({
+  chatId,
+  message,
+  mode,
+  projectId,
+  workspaceId,
+}: {
+  chatId: string;
+  workspaceId: string;
+  projectId: string | null;
+  mode: WorkspaceMode;
+  message: ChatMessage;
+}): Promise<ChatMessageInsertEvent> {
+  await getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO chat_messages (
+        id,
+        chat_id,
+        parent_id,
+        workspace_id,
+        author,
+        role,
+        avatar,
+        message_time,
+        body,
+        artifact_title,
+        artifact_type,
+        artifact_meta,
+        attachments_json,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      message.id,
+      chatId,
+      message.parentId ?? null,
+      workspaceId,
+      message.author,
+      message.role,
+      message.avatar ?? null,
+      message.time,
+      message.text,
+      message.artifact?.title ?? null,
+      message.artifact?.type ?? null,
+      message.artifact?.meta ?? null,
+      message.attachments?.length ? JSON.stringify(message.attachments) : null,
+      new Date().toISOString(),
+    )
+    .run();
+
+  return {
+    id: message.id,
+    chatId,
+    workspaceId,
+    projectId,
+    mode,
+    message,
+  };
+}
+
 export const listMyTeams = createServerFn({ method: "GET" }).handler(async () => {
   const user = await currentUser();
   const result = await getDb()
@@ -358,7 +537,14 @@ export const listMyScopedProjects = createServerFn({ method: "POST" })
     const teamId = data.mode === "Team" ? data.teamId ?? "" : null;
     const result = await getDb()
       .prepare(
-        `SELECT p.id, p.name, p.description, p.status
+        `SELECT p.id,
+                p.name,
+                p.description,
+                p.status,
+                COALESCE(p.project_instructions, '') as projectInstructions,
+                COALESCE(p.asana_task_status_source, 'native') as asanaTaskStatusSource,
+                p.asana_task_status_custom_field_gid as asanaTaskStatusCustomFieldGid,
+                p.asana_task_status_custom_field_name as asanaTaskStatusCustomFieldName
          FROM projects p
          INNER JOIN workspaces w ON w.id = p.workspace_id
          INNER JOIN project_members pm ON pm.project_id = p.id
@@ -404,8 +590,14 @@ export const createScopedProject = createServerFn({ method: "POST" })
 
     const id = projectId(name);
     await getDb()
-      .prepare("INSERT INTO projects (id, workspace_id, name, description, status, sort_order) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(id, workspace.id, name, description, data.status, sort?.sortOrder ?? 1)
+      .prepare(
+        `INSERT INTO projects (
+          id, workspace_id, name, description, status, project_instructions,
+          asana_task_status_source, asana_task_status_custom_field_gid,
+          asana_task_status_custom_field_name, sort_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(id, workspace.id, name, description, data.status, "", "native", null, null, sort?.sortOrder ?? 1)
       .run();
     await getDb()
       .prepare("INSERT OR IGNORE INTO project_members (project_id, user_id, team_id, created_at) VALUES (?, ?, ?, ?)")
@@ -427,8 +619,81 @@ export const createScopedProject = createServerFn({ method: "POST" })
       id,
       name,
       description,
+      projectInstructions: "",
+      asanaTaskStatusSource: "native",
+      asanaTaskStatusCustomFieldGid: null,
+      asanaTaskStatusCustomFieldName: null,
       status: data.status,
       projectChats: [],
+    } satisfies ProjectSummary;
+  });
+
+export const updateScopedProjectInstructions = createServerFn({ method: "POST" })
+  .validator((data: UpdateProjectInstructionsInput) => data)
+  .handler(async ({ data }) => {
+    const user = await requireManager();
+    if (!data.projectId) throw new Error("Project is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before editing a team project.");
+
+    await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+
+    const description = data.description.trim();
+    const projectInstructions = data.projectInstructions.trim();
+    const asanaTaskStatusSource = data.asanaTaskStatusSource === "custom_field" ? "custom_field" : "native";
+    const asanaTaskStatusCustomFieldGid = asanaTaskStatusSource === "custom_field" ? data.asanaTaskStatusCustomFieldGid?.trim() || null : null;
+    const asanaTaskStatusCustomFieldName = asanaTaskStatusSource === "custom_field" ? data.asanaTaskStatusCustomFieldName?.trim() || null : null;
+    if (asanaTaskStatusSource === "custom_field" && !asanaTaskStatusCustomFieldGid && !asanaTaskStatusCustomFieldName) {
+      throw new Error("Select an Asana custom field before using custom field task status.");
+    }
+    await getDb()
+      .prepare(
+        `UPDATE projects
+         SET description = ?,
+             project_instructions = ?,
+             asana_task_status_source = ?,
+             asana_task_status_custom_field_gid = ?,
+             asana_task_status_custom_field_name = ?
+         WHERE id = ?`,
+      )
+      .bind(description, projectInstructions, asanaTaskStatusSource, asanaTaskStatusCustomFieldGid, asanaTaskStatusCustomFieldName, data.projectId)
+      .run();
+
+    const project = await getDb()
+      .prepare(
+        `SELECT p.id,
+                p.name,
+                p.description,
+                p.workspace_id as workspaceId,
+                p.status,
+                COALESCE(p.project_instructions, '') as projectInstructions,
+                COALESCE(p.asana_task_status_source, 'native') as asanaTaskStatusSource,
+                p.asana_task_status_custom_field_gid as asanaTaskStatusCustomFieldGid,
+                p.asana_task_status_custom_field_name as asanaTaskStatusCustomFieldName
+         FROM projects p
+         WHERE p.id = ?
+         LIMIT 1`,
+      )
+      .bind(data.projectId)
+      .first<Omit<ProjectSummary, "projectChats"> & { workspaceId: string }>();
+    if (!project) throw new Error("Project was not found.");
+    const { workspaceId, ...projectSummary } = project;
+
+    await recordScopedMutation({
+      entity: "project",
+      entityId: data.projectId,
+      invalidates: ["projects", "chats", "workspace"],
+      mode: data.mode,
+      operation: "update",
+      projectId: data.projectId,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
+
+    const projectChatsByProjectId = await listProjectChatsForUser(user.id, data.mode, data.teamId ?? null);
+    return {
+      ...projectSummary,
+      projectChats: projectChatsByProjectId[projectSummary.id] ?? [],
     } satisfies ProjectSummary;
   });
 
@@ -648,6 +913,122 @@ export const listMyScopedChats = createServerFn({ method: "POST" })
       projectChatsByProjectId,
       conversations: await listMessagesForChats({ mode: data.mode, projectChatsByProjectId, workspaceChats }),
     } satisfies ScopedChatsResult;
+  });
+
+export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
+  .validator((data: PersistScopedRagChatInput) => data)
+  .handler(async ({ context, data }) => {
+    const user = await currentUser();
+    if (!canManage(user)) throw new Error("Viewer accounts have view-only access.");
+
+    const prompt = data.prompt.trim();
+    const response = data.response.trim() || "The model did not return a response.";
+    if (!prompt) throw new Error("Prompt is required.");
+    if (!data.chatId.trim()) throw new Error("Chat is required.");
+    if (!data.projectId.trim()) throw new Error("Project is required.");
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before using this team project chat.");
+
+    const workspaceId = await getWorkspaceId(data.mode);
+    await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? data.teamId ?? null : null);
+    const chat = await getDb()
+      .prepare(
+        `SELECT id,
+                title,
+                description,
+                (SELECT COUNT(*)
+                 FROM chat_messages
+                 WHERE chat_id = chats.id) as messageCount
+         FROM chats
+         WHERE id = ?
+           AND workspace_id = ?
+           AND section = 'project'
+           AND project_id = ?
+         LIMIT 1`,
+      )
+      .bind(data.chatId, workspaceId, data.projectId)
+      .first<{ id: string; title: string; description: string | null; messageCount: number }>();
+    if (!chat) throw new Error("Chat was not found in this project.");
+
+    const generatedTitle = chat.messageCount === 0 && shouldAutoRenameInitialChat(chat)
+      ? await generateInitialChatTitle(context, prompt)
+      : null;
+    if (generatedTitle && generatedTitle !== chat.title) {
+      await getDb()
+        .prepare("UPDATE chats SET title = ? WHERE id = ?")
+        .bind(generatedTitle, data.chatId)
+        .run();
+    }
+
+    const userMessage: ChatMessage = {
+      id: messageId("stream-user", data.userMessageId),
+      author: "You",
+      role: "user",
+      avatar: avatarAlex,
+      time: nowLabel(),
+      text: prompt,
+    };
+    const assistantMessage: ChatMessage = {
+      id: messageId("stream-assistant", data.assistantMessageId),
+      author: "VertexAI",
+      role: "assistant",
+      time: nowLabel(),
+      text: response,
+    };
+    const insertedMessages = [
+      await insertScopedChatMessage({
+        chatId: data.chatId,
+        workspaceId,
+        projectId: data.projectId,
+        mode: data.mode,
+        message: userMessage,
+      }),
+      await insertScopedChatMessage({
+        chatId: data.chatId,
+        workspaceId,
+        projectId: data.projectId,
+        mode: data.mode,
+        message: assistantMessage,
+      }),
+    ];
+
+    await publishChatMessageInserts(
+      (env as Env).CHAT_SYNC,
+      chatSyncScopeKey({
+        mode: data.mode,
+        teamId: data.teamId ?? null,
+        userId: user.id,
+        workspaceId,
+      }),
+      insertedMessages,
+    );
+    await recordScopedMutation({
+      chatId: data.chatId,
+      entity: "chat_message",
+      entityId: assistantMessage.id,
+      invalidates: ["chats", "projects"],
+      mode: data.mode,
+      operation: "insert",
+      projectId: data.projectId,
+      sourceUserId: user.id,
+      teamId: data.teamId ?? null,
+      workspaceId,
+    });
+    if (generatedTitle && generatedTitle !== chat.title) {
+      await recordScopedMutation({
+        chatId: data.chatId,
+        entity: "chat",
+        entityId: data.chatId,
+        invalidates: ["chats", "projects"],
+        mode: data.mode,
+        operation: "rename",
+        projectId: data.projectId,
+        sourceUserId: user.id,
+        teamId: data.teamId ?? null,
+        workspaceId,
+      });
+    }
+
+    return { chatTitle: generatedTitle ?? chat.title, messages: insertedMessages };
   });
 
 export const createScopedChat = createServerFn({ method: "POST" })
