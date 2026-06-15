@@ -1,6 +1,11 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
-import { ingestScopedRagMarkdownDocument, type DocumentIngestionEnv, type VectorMetadata } from "@/lib/document-ingestion-queue";
+import {
+  ingestKnowledgeMarkdownDocument,
+  type DocumentIngestionEnv,
+  type ScopeLevel,
+  type VectorMetadata,
+} from "@/lib/document-ingestion-queue";
 
 export const autonomousResearchQueueName = "autonomous-research-queue";
 export const autonomousResearchMetadataSource = "autonomous_research";
@@ -157,6 +162,10 @@ export function buildAutonomousResearchJob(input: AutonomousResearchTriggerInput
   };
 }
 
+function workspaceModeToScopeLevel(mode: AutonomousResearchWorkspaceMode): ScopeLevel {
+  return mode.toLowerCase() as ScopeLevel;
+}
+
 export async function publishAutonomousResearchTrigger(env: AutonomousResearchProducerEnv, input: AutonomousResearchTriggerInput) {
   const queue = env.AUTONOMOUS_RESEARCH_QUEUE;
   if (!queue) {
@@ -238,22 +247,29 @@ export async function processAutonomousResearchJob(env: AutonomousResearchEnv, j
   const documents = [...documentsByUrl.values()];
   if (documents.length === 0) throw new PermanentAutonomousResearchError("Firecrawl did not return usable external markdown.");
 
-  const teamId = job.teamId ?? job.workspaceId;
+  const teamId = job.teamId?.trim() || null;
   const projectId = job.projectId ?? job.entityId;
+  const workspaceScope = workspaceModeToScopeLevel(job.workspaceMode);
 
   for (const document of documents) {
-    await ingestScopedRagMarkdownDocument(env, {
+    await ingestKnowledgeMarkdownDocument(env, {
       rawText: formatAutonomousResearchMarkdown(job, document),
-      documentName: document.title,
-      r2Key: document.url,
+      title: document.title,
+      itemType: job.entityType === "project" ? "project" : "idea",
+      sourceType: "rag",
+      sourceUrl: document.url,
       workspaceId: job.workspaceId,
-      teamId,
+      workspaceScope,
+      teamId: workspaceScope === "team" ? teamId : null,
       projectId,
-      feature: "autonomous-research-embedding",
-      embeddingMetadata: {
+      embeddingFeature: "autonomous-research-embedding",
+      metadata: {
         entityType: job.entityType,
         entityId: job.entityId,
         source: autonomousResearchMetadataSource,
+        sourceUrl: document.url,
+        sourceDomain: hostnameFromUrl(document.url),
+        searchQuery: document.query,
       },
       vectorMetadata: buildAutonomousResearchVectorMetadata(job, document),
     });
@@ -323,7 +339,6 @@ export function buildAutonomousResearchVectorMetadata(job: AutonomousResearchJob
     entity_id: job.entityId,
     workspace_id: job.workspaceId,
     workspace_mode: job.workspaceMode,
-    team_id: job.teamId ?? job.workspaceId,
     project_id: job.projectId ?? job.entityId,
     source_url: document.url,
     source_domain: hostnameFromUrl(document.url),
@@ -331,6 +346,7 @@ export function buildAutonomousResearchVectorMetadata(job: AutonomousResearchJob
     research_request_id: job.requestId,
     research_requested_at: job.requestedAt,
     tags: job.tags.join(","),
+    ...(job.teamId ? { team_id: job.teamId } : {}),
   };
 }
 

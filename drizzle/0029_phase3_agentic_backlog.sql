@@ -17,11 +17,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS vector_tenant_map_tenant_key_idx
 CREATE INDEX IF NOT EXISTS vector_tenant_map_scope_idx
   ON vector_tenant_map (workspace_id, team_id, project_id);
 --> statement-breakpoint
-ALTER TABLE document_chunks ADD COLUMN vector_tenant_id INTEGER REFERENCES vector_tenant_map(id) ON DELETE SET NULL;
---> statement-breakpoint
-CREATE INDEX IF NOT EXISTS document_chunks_vector_tenant_idx
-  ON document_chunks (vector_tenant_id, project_id, team_id);
---> statement-breakpoint
 CREATE TABLE IF NOT EXISTS extracted_tasks (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,

@@ -103,7 +103,7 @@ type ModifiedArtifactRow = {
   parentArtifactId: string | null;
   commitMessage: string | null;
   modifiedAt: string;
-  source: "artifacts" | "artifacts_registry";
+  source: "artifacts" | "knowledge_items";
 };
 
 type BriefingGenerationInput = {
@@ -466,56 +466,52 @@ async function briefingExists(db: AppDb, chatId: string, marker: string) {
   return Boolean(rows[0]?.id);
 }
 
-async function listModifiedRegistryArtifacts(d1: D1Database, project: BriefingProjectRow, windowStart: Date, windowEnd: Date) {
-  try {
-    const result = await d1
-      .prepare(
-        `SELECT id,
-                original_filename as title,
-                document_type as fileType,
-                uploaded_by_user_id as owner,
-                status,
-                error_message as summary,
-                r2_key as r2Key,
-                updated_at as updatedAt
-         FROM artifacts_registry
-         WHERE project_id = ?
-           AND updated_at >= ?
-           AND updated_at <= ?
-         ORDER BY updated_at ASC
-         LIMIT ?`,
-      )
-      .bind(project.id, windowStart.toISOString(), windowEnd.toISOString(), contextLimits.artifacts)
-      .all<{
-        id: string;
-        title: string;
-        fileType: string;
-        owner: string | null;
-        status: string;
-        summary: string | null;
-        r2Key: string;
-        updatedAt: string;
-      }>();
+async function listModifiedKnowledgeItems(d1: D1Database, project: BriefingProjectRow, windowStart: Date, windowEnd: Date) {
+  const result = await d1
+    .prepare(
+      `SELECT id,
+              title,
+              item_type as itemType,
+              source_type as sourceType,
+              status,
+              error_message as summary,
+              COALESCE(r2_key, source_url, '') as r2Key,
+              updated_at as updatedAt
+       FROM knowledge_items
+       WHERE project_id = ?
+         AND updated_at >= ?
+         AND updated_at <= ?
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+    )
+    .bind(project.id, windowStart.toISOString(), windowEnd.toISOString(), contextLimits.artifacts)
+    .all<{
+      id: string;
+      title: string;
+      itemType: string;
+      sourceType: string;
+      status: string;
+      summary: string | null;
+      r2Key: string;
+      updatedAt: string;
+    }>();
 
-    return (result.results ?? []).map(
-      (row): ModifiedArtifactRow => ({
-        id: row.id,
-        title: row.title,
-        fileType: row.fileType,
-        owner: row.owner,
-        status: row.status,
-        summary: row.summary ?? "",
-        r2Key: row.r2Key,
-        version: null,
-        parentArtifactId: null,
-        commitMessage: "Uploaded artifact registry row updated",
-        modifiedAt: row.updatedAt,
-        source: "artifacts_registry",
-      }),
-    );
-  } catch {
-    return [];
-  }
+  return (result.results ?? []).map(
+    (row): ModifiedArtifactRow => ({
+      id: row.id,
+      title: row.title,
+      fileType: row.itemType,
+      owner: row.sourceType,
+      status: row.status,
+      summary: row.summary ?? "",
+      r2Key: row.r2Key,
+      version: null,
+      parentArtifactId: null,
+      commitMessage: `Knowledge archive item updated from ${row.sourceType}`,
+      modifiedAt: row.updatedAt,
+      source: "knowledge_items",
+    }),
+  );
 }
 
 async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow, windowStart: Date, windowEnd: Date, d1: D1Database) {
@@ -671,8 +667,8 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         source: "artifacts",
       }),
     );
-  const registryArtifacts = await listModifiedRegistryArtifacts(d1, project, windowStart, windowEnd);
-  const modifiedArtifacts = [...localModifiedArtifacts, ...registryArtifacts].sort(
+  const knowledgeItems = await listModifiedKnowledgeItems(d1, project, windowStart, windowEnd);
+  const modifiedArtifacts = [...localModifiedArtifacts, ...knowledgeItems].sort(
     (left, right) => Date.parse(left.modifiedAt) - Date.parse(right.modifiedAt),
   );
 

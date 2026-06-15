@@ -34,6 +34,12 @@ type AuthSession = {
   };
 };
 
+function vertexModeToKnowledgeScope(mode: WorkspaceMode | string) {
+  const normalized = mode.toLowerCase();
+  if (normalized === "personal" || normalized === "team" || normalized === "org") return normalized;
+  throw new Error(`Unsupported workspace mode for knowledge indexing: ${mode}`);
+}
+
 type AsanaTokenResponse = {
   access_token?: string;
   refresh_token?: string;
@@ -2025,11 +2031,11 @@ function parseSnapshot(value: string | null | undefined) {
 }
 
 function snapshotTeamId(mapping: { vertexTeamId: string | null; vertexWorkspaceId: string }) {
-  return mapping.vertexTeamId?.trim() || `workspace-${mapping.vertexWorkspaceId}`;
+  return mapping.vertexTeamId?.trim() || null;
 }
 
-function asanaSnapshotR2Key(teamId: string, projectId: string, hash: string) {
-  return `rag-asana/${teamId}/${projectId}/${Date.now()}-${hash.slice(0, 12)}.md`;
+function asanaSnapshotR2Key(teamId: string | null, workspaceId: string, projectId: string, hash: string) {
+  return `rag-asana/${teamId ?? workspaceId}/${projectId}/${Date.now()}-${hash.slice(0, 12)}.md`;
 }
 
 async function persistAsanaSnapshotForRag({
@@ -2073,7 +2079,7 @@ async function persistAsanaSnapshotForRag({
     const capturedAt = new Date().toISOString();
     const diffSummary = buildSnapshotDiffSummary(diff);
     const teamId = snapshotTeamId(mapping);
-    const r2Key = asanaSnapshotR2Key(teamId, mapping.vertexProjectId, snapshotHash);
+    const r2Key = asanaSnapshotR2Key(teamId, mapping.vertexWorkspaceId, mapping.vertexProjectId, snapshotHash);
     const documentName = `Asana Snapshot - ${mapping.asanaProjectName} - ${capturedAt.slice(0, 10)}.md`;
     const documentText = buildAsanaSnapshotDocument({ capturedAt, current: snapshot, diff, mapping });
     const snapshotEnv = integrationEnv();
@@ -2083,7 +2089,9 @@ async function persistAsanaSnapshotForRag({
       await snapshotEnv.ARTIFACTS_BUCKET.put(r2Key, documentText, {
         httpMetadata: { contentType: "text/markdown; charset=utf-8" },
         customMetadata: {
-          team_id: teamId,
+          workspace_id: mapping.vertexWorkspaceId,
+          workspace_scope: vertexModeToKnowledgeScope(mapping.vertexMode),
+          team_id: teamId ?? "",
           project_id: mapping.vertexProjectId,
           document_name: documentName,
           source: "asana-snapshot",
@@ -2093,11 +2101,26 @@ async function persistAsanaSnapshotForRag({
         },
       });
       await snapshotEnv.DOCUMENT_INGESTION_QUEUE.send({
-        kind: "scoped-rag-generated-artifact",
-        r2Key,
-        documentName,
+        kind: "knowledge-item-upsert",
+        itemId: `asana-snapshot-${snapshotHash}`,
+        itemType: "asana_snapshot",
+        sourceType: "asana",
+        title: documentName,
+        workspaceId: mapping.vertexWorkspaceId,
+        workspaceScope: vertexModeToKnowledgeScope(mapping.vertexMode),
         teamId,
         projectId: mapping.vertexProjectId,
+        r2Key,
+        contentType: "text/markdown; charset=utf-8",
+        sensitivityLabel: "Standard",
+        restricted: false,
+        metadata: {
+          asanaProjectGid: mapping.asanaProjectGid,
+          asanaProjectName: mapping.asanaProjectName,
+          snapshotHash,
+          source: "asana-snapshot",
+        },
+        embeddingFeature: "asana-snapshot-embedding",
       });
       queued = true;
     } else {

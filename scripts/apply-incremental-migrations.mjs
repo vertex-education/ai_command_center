@@ -243,18 +243,8 @@ const migrations = [
   },
   {
     name: "0009_rbac_inference_guardrails",
-    isComplete: () => columnExists("document_chunks", "sensitivity_label") && columnExists("document_chunks", "restricted"),
-    steps: [
-      {
-        isComplete: () => columnExists("document_chunks", "sensitivity_label"),
-        statement:
-          "ALTER TABLE document_chunks ADD COLUMN sensitivity_label TEXT NOT NULL DEFAULT 'Standard' CHECK (sensitivity_label IN ('Standard', 'Confidential'));",
-      },
-      {
-        isComplete: () => columnExists("document_chunks", "restricted"),
-        statement: "ALTER TABLE document_chunks ADD COLUMN restricted INTEGER NOT NULL DEFAULT 0;",
-      },
-    ],
+    isComplete: () => true,
+    statements: [],
   },
   {
     name: "0010_workflow_persistence",
@@ -859,13 +849,11 @@ const migrations = [
     isComplete: () =>
       columnExists("workspace_actions", "outbound_status") &&
       columnExists("workspace_actions", "sync_status") &&
-      columnExists("document_chunks", "vector_tenant_id") &&
       tableExists("vector_tenant_map") &&
       tableExists("extracted_tasks") &&
       tableExists("project_risks") &&
       tableExists("briefings") &&
       indexExists("workspace_actions_sync_status_idx") &&
-      indexExists("document_chunks_vector_tenant_idx") &&
       indexExists("vector_tenant_map_tenant_key_idx") &&
       indexExists("extracted_tasks_workspace_idx") &&
       indexExists("project_risks_project_idx") &&
@@ -897,15 +885,6 @@ const migrations = [
       {
         isComplete: () => indexExists("vector_tenant_map_scope_idx"),
         statement: "CREATE INDEX IF NOT EXISTS vector_tenant_map_scope_idx ON vector_tenant_map (workspace_id, team_id, project_id);",
-      },
-      {
-        isComplete: () => columnExists("document_chunks", "vector_tenant_id"),
-        statement: "ALTER TABLE document_chunks ADD COLUMN vector_tenant_id INTEGER REFERENCES vector_tenant_map(id) ON DELETE SET NULL;",
-      },
-      {
-        isComplete: () => indexExists("document_chunks_vector_tenant_idx"),
-        statement:
-          "CREATE INDEX IF NOT EXISTS document_chunks_vector_tenant_idx ON document_chunks (vector_tenant_id, project_id, team_id);",
       },
       {
         isComplete: () => tableExists("extracted_tasks"),
@@ -972,6 +951,84 @@ const migrations = [
         isComplete: () => indexExists("workspace_actions_sync_status_idx"),
         statement: "CREATE INDEX IF NOT EXISTS workspace_actions_sync_status_idx ON workspace_actions (workspace_id, kind, sync_status);",
       },
+    ],
+  },
+  {
+    name: "0030_knowledge_archive",
+    isComplete: () =>
+      tableExists("knowledge_items") &&
+      tableExists("knowledge_chunks") &&
+      indexExists("knowledge_items_scope_idx") &&
+      indexExists("knowledge_items_source_idx") &&
+      indexExists("knowledge_items_status_idx") &&
+      indexExists("knowledge_chunks_tenant_idx") &&
+      indexExists("knowledge_chunks_vector_idx") &&
+      indexExists("knowledge_chunks_item_chunk_idx") &&
+      indexExists("knowledge_chunks_scope_idx") &&
+      indexExists("knowledge_chunks_item_idx") &&
+      indexExists("knowledge_chunks_r2_key_idx"),
+    statements: [
+      `CREATE TABLE IF NOT EXISTS knowledge_items (
+  id TEXT PRIMARY KEY,
+  item_type TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  title TEXT NOT NULL,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_scope TEXT NOT NULL CHECK (workspace_scope IN ('org', 'team', 'personal')),
+  team_id TEXT,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  r2_key TEXT,
+  source_url TEXT,
+  content_hash TEXT,
+  version_label TEXT,
+  sensitivity_label TEXT NOT NULL DEFAULT 'Standard' CHECK (sensitivity_label IN ('Standard', 'Confidential')),
+  restricted INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'processing' CHECK (status IN ('processing', 'completed', 'failed')),
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  indexed_at TEXT,
+  error_message TEXT
+);`,
+      "CREATE INDEX IF NOT EXISTS knowledge_items_scope_idx ON knowledge_items (workspace_id, workspace_scope, team_id, project_id, updated_at);",
+      "CREATE INDEX IF NOT EXISTS knowledge_items_source_idx ON knowledge_items (source_type, item_type, updated_at);",
+      "CREATE INDEX IF NOT EXISTS knowledge_items_status_idx ON knowledge_items (status, updated_at);",
+      `CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  vector_id TEXT NOT NULL UNIQUE,
+  vector_tenant_id INTEGER REFERENCES vector_tenant_map(id) ON DELETE SET NULL,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_scope TEXT NOT NULL CHECK (workspace_scope IN ('org', 'team', 'personal')),
+  team_id TEXT,
+  project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+  title TEXT NOT NULL,
+  r2_key TEXT,
+  source_type TEXT NOT NULL,
+  item_type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  sensitivity_label TEXT NOT NULL DEFAULT 'Standard' CHECK (sensitivity_label IN ('Standard', 'Confidential')),
+  restricted INTEGER NOT NULL DEFAULT 0,
+  token_count INTEGER,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (item_id, chunk_index)
+);`,
+      "CREATE INDEX IF NOT EXISTS knowledge_chunks_tenant_idx ON knowledge_chunks (vector_tenant_id, project_id, team_id);",
+      "CREATE UNIQUE INDEX IF NOT EXISTS knowledge_chunks_vector_idx ON knowledge_chunks (vector_id);",
+      "CREATE UNIQUE INDEX IF NOT EXISTS knowledge_chunks_item_chunk_idx ON knowledge_chunks (item_id, chunk_index);",
+      "CREATE INDEX IF NOT EXISTS knowledge_chunks_scope_idx ON knowledge_chunks (workspace_id, workspace_scope, team_id, project_id, created_at);",
+      "CREATE INDEX IF NOT EXISTS knowledge_chunks_item_idx ON knowledge_chunks (item_id, chunk_index);",
+      "CREATE INDEX IF NOT EXISTS knowledge_chunks_r2_key_idx ON knowledge_chunks (r2_key);",
+    ],
+  },
+  {
+    name: "0031_deprecate_legacy_rag",
+    isComplete: () => !tableExists("document_chunks_v2") && !tableExists("artifacts_registry") && !tableExists("document_chunks"),
+    statements: [
+      "DROP TABLE IF EXISTS document_chunks_v2;",
+      "DROP TABLE IF EXISTS artifacts_registry;",
+      "DROP TABLE IF EXISTS document_chunks;",
     ],
   },
 ];

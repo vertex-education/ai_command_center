@@ -41,6 +41,28 @@ const localKindIcons: Record<WorkspaceSearchLocalResultKind, ComponentType<{ cla
   Task: CheckCircle2,
 };
 
+type UnifiedSearchResult = {
+  description: string;
+  icon: ComponentType<{ className?: string }>;
+  id: string;
+  meta: string;
+  restricted: boolean;
+  score: number | null;
+  sourceLabel: string;
+  title: string;
+  typeLabel: string;
+  onSelect: () => void;
+};
+
+const semanticSourceLabels: Record<ScopedKnowledgeSearchResult["sourceType"], string> = {
+  asana: "Asana",
+  chat: "Chat",
+  r2: "R2",
+  rag: "RAG",
+  upload: "Upload",
+  workspace: "Workspace",
+};
+
 export function WorkspaceSearchDialog({
   localResults,
   open,
@@ -73,6 +95,46 @@ export function WorkspaceSearchDialog({
   const hasSearchableQuery = normalizedQuery.length >= 2;
   const localCount = hasSearchableQuery ? localResults.length : 0;
   const semanticCount = hasSearchableQuery ? semanticResults.length : 0;
+  const unifiedResults = useMemo<UnifiedSearchResult[]>(() => {
+    if (!hasSearchableQuery) return [];
+
+    const localMatches = localResults.map((result) => ({
+      description: result.description,
+      icon: localKindIcons[result.kind],
+      id: `workspace-${result.kind}-${result.id}`,
+      meta: result.meta,
+      restricted: false,
+      score: result.score,
+      sourceLabel: "Workspace" as const,
+      title: result.title,
+      typeLabel: result.kind,
+      onSelect: result.onSelect,
+    }));
+    const semanticMatches = semanticResults.map((result) => ({
+      description: result.excerpt,
+      icon: Sparkles,
+      id: `rag-${result.id}`,
+      meta: `${projectNameById[result.projectId] ?? "Project"} / ${result.r2Key}`,
+      restricted: result.sensitivityLabel === "Confidential" || result.restricted,
+      score: result.score === null ? null : Math.round(result.score * 100),
+      sourceLabel: semanticSourceLabels[result.sourceType] ?? "RAG",
+      title: result.documentName,
+      typeLabel: result.itemType
+        .split("_")
+        .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+        .join(" "),
+      onSelect: () => onSelectSemanticResult(result),
+    }));
+
+    return [...localMatches, ...semanticMatches]
+      .sort((left, right) => {
+        const leftScore = left.score ?? -1;
+        const rightScore = right.score ?? -1;
+        if (leftScore === rightScore) return left.title.localeCompare(right.title);
+        return rightScore - leftScore;
+      })
+      .slice(0, 20);
+  }, [hasSearchableQuery, localResults, onSelectSemanticResult, projectNameById, semanticResults]);
   const statusLabel = useMemo(() => {
     if (!hasSearchableQuery) return "Ready";
     if (semanticPending) return "Searching";
@@ -108,23 +170,16 @@ export function WorkspaceSearchDialog({
           </label>
         </DialogHeader>
 
-        <div className="grid max-h-[72vh] min-h-[420px] gap-0 overflow-hidden lg:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-          <section className="min-h-0 overflow-auto border-r p-4">
-            <SearchSectionHeader count={localCount} title="Workspace Records" />
-            {!hasSearchableQuery ? <EmptySearchState /> : null}
-            {hasSearchableQuery && localResults.length === 0 ? <EmptyResults label="No matching workspace records." /> : null}
-            <div className="space-y-2">
-              {localResults.map((result) => (
-                <LocalSearchResultButton key={`${result.kind}-${result.id}`} result={result} />
-              ))}
-            </div>
-          </section>
-
-          <section className="min-h-0 overflow-auto bg-muted/20 p-4">
-            <SearchSectionHeader count={semanticCount} title="Vector / RAG Matches" />
+        <div className="max-h-[72vh] min-h-[420px] overflow-hidden">
+          <section className="min-h-0 max-h-[72vh] overflow-auto p-4">
+            <SearchSectionHeader
+              count={hasSearchableQuery ? unifiedResults.length : 0}
+              title="Results"
+              summary={hasSearchableQuery ? `${localCount} workspace / ${semanticCount} RAG` : undefined}
+            />
             {!hasSearchableQuery ? <EmptySearchState /> : null}
             {hasSearchableQuery && semanticPending ? (
-              <div className="grid min-h-44 place-items-center rounded-md border border-dashed bg-background text-sm text-muted-foreground">
+              <div className="mb-3 grid min-h-16 place-items-center rounded-md border border-dashed bg-background text-sm text-muted-foreground">
                 <span className="inline-flex items-center gap-2">
                   <Loader2 className="size-4 animate-spin" />
                   Searching indexed knowledge
@@ -132,19 +187,16 @@ export function WorkspaceSearchDialog({
               </div>
             ) : null}
             {hasSearchableQuery && semanticError ? (
-              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">{semanticError}</div>
+              <div className="mb-3 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {semanticError}
+              </div>
             ) : null}
-            {hasSearchableQuery && !semanticPending && !semanticError && semanticResults.length === 0 ? (
-              <EmptyResults label="No vector matches in the selected scope." />
+            {hasSearchableQuery && !semanticPending && !semanticError && unifiedResults.length === 0 ? (
+              <EmptyResults label="No matches in this scope." />
             ) : null}
             <div className="space-y-2">
-              {semanticResults.map((result) => (
-                <SemanticSearchResultButton
-                  key={result.id}
-                  projectName={projectNameById[result.projectId] ?? "Project"}
-                  result={result}
-                  onSelect={() => onSelectSemanticResult(result)}
-                />
+              {unifiedResults.map((result) => (
+                <UnifiedSearchResultButton key={result.id} result={result} />
               ))}
             </div>
             {issues.length ? (
@@ -161,10 +213,13 @@ export function WorkspaceSearchDialog({
   );
 }
 
-function SearchSectionHeader({ count, title }: { count: number; title: string }) {
+function SearchSectionHeader({ count, summary, title }: { count: number; summary?: string; title: string }) {
   return (
     <div className="mb-3 flex min-w-0 items-center justify-between gap-2">
-      <h3 className="truncate text-sm font-semibold">{title}</h3>
+      <div className="min-w-0">
+        <h3 className="truncate text-sm font-semibold">{title}</h3>
+        {summary ? <p className="truncate text-xs text-muted-foreground">{summary}</p> : null}
+      </div>
       <Badge variant="secondary">{count}</Badge>
     </div>
   );
@@ -186,75 +241,52 @@ function EmptyResults({ label }: { label: string }) {
   );
 }
 
-function LocalSearchResultButton({ result }: { result: WorkspaceSearchLocalResult }) {
-  const Icon = localKindIcons[result.kind];
+function UnifiedSearchResultButton({ result }: { result: UnifiedSearchResult }) {
+  const Icon = result.icon;
   return (
     <button
       type="button"
       className="grid w-full grid-cols-[34px_minmax(0,1fr)_auto] gap-3 rounded-md border bg-background p-3 text-left shadow-xs transition-colors hover:border-primary/40 hover:bg-accent/30"
       onClick={result.onSelect}
     >
-      <span className="grid size-8 place-items-center rounded-md bg-primary/10 text-primary">
+      <span
+        className={
+          result.sourceLabel === "RAG"
+            ? "grid size-8 place-items-center rounded-md bg-primary text-primary-foreground"
+            : "grid size-8 place-items-center rounded-md bg-primary/10 text-primary"
+        }
+      >
         <Icon className="size-4" />
       </span>
       <span className="min-w-0">
         <span className="flex min-w-0 flex-wrap items-center gap-2">
           <strong className="truncate text-sm">{result.title}</strong>
           <Badge variant="outline" className="rounded-md">
-            {result.kind}
+            {result.sourceLabel}
           </Badge>
-        </span>
-        <span className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{result.description}</span>
-        <span className="mt-1 block truncate text-xs text-muted-foreground">{result.meta}</span>
-      </span>
-      <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{result.score}</span>
-    </button>
-  );
-}
-
-function SemanticSearchResultButton({
-  projectName,
-  result,
-  onSelect,
-}: {
-  projectName: string;
-  result: ScopedKnowledgeSearchResult;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="grid w-full grid-cols-[34px_minmax(0,1fr)] gap-3 rounded-md border bg-background p-3 text-left shadow-xs transition-colors hover:border-primary/40 hover:bg-accent/30"
-      onClick={onSelect}
-    >
-      <span className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground">
-        <Sparkles className="size-4" />
-      </span>
-      <span className="min-w-0">
-        <span className="flex min-w-0 flex-wrap items-center gap-2">
-          <strong className="truncate text-sm">{result.documentName}</strong>
           <Badge variant="outline" className="rounded-md">
-            {formatScore(result.score)}
+            {result.typeLabel}
           </Badge>
-          {result.sensitivityLabel === "Confidential" || result.restricted ? (
+          {result.restricted ? (
             <Badge variant="destructive" className="rounded-md">
               Restricted
             </Badge>
           ) : null}
         </span>
-        <span className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">{result.excerpt}</span>
+        <span className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">{result.description}</span>
         <span className="mt-2 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
           <FileText className="size-3.5 shrink-0" />
-          <span className="truncate">
-            {projectName} / {result.r2Key}
-          </span>
+          <span className="truncate">{result.meta}</span>
         </span>
+      </span>
+      <span className="rounded-md border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
+        {formatScore(result.score)}
       </span>
     </button>
   );
 }
 
 function formatScore(score: number | null) {
-  if (score === null) return "Score n/a";
-  return `Score ${Math.round(score * 100)}`;
+  if (score === null) return "n/a";
+  return String(score);
 }

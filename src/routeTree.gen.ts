@@ -9,12 +9,12 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as WorkspaceRouteImport } from './routes/workspace'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AcceptInviteRouteImport } from './routes/accept-invite'
-import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProfileIndexRouteImport } from './routes/profile/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as SseWorkspaceEventsRouteImport } from './routes/sse/workspace-events'
@@ -33,6 +33,11 @@ import { Route as ApiGraphWebhooksRouteImport } from './routes/api/graph/webhook
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiAsanaOauthCallbackRouteImport } from './routes/api/asana/oauth/callback'
 
+const WorkspaceRoute = WorkspaceRouteImport.update({
+  id: '/workspace',
+  path: '/workspace',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignInRoute = SignInRouteImport.update({
   id: '/sign-in',
   path: '/sign-in',
@@ -56,11 +61,6 @@ const AdminRoute = AdminRouteImport.update({
 const AcceptInviteRoute = AcceptInviteRouteImport.update({
   id: '/accept-invite',
   path: '/accept-invite',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ProfileIndexRoute = ProfileIndexRouteImport.update({
@@ -150,12 +150,12 @@ const ApiAsanaOauthCallbackRoute = ApiAsanaOauthCallbackRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/admin': typeof AdminRouteWithChildren
   '/docs': typeof DocsRoute
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
   '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
@@ -175,10 +175,10 @@ export interface FileRoutesByFullPath {
   '/api/asana/oauth/callback': typeof ApiAsanaOauthCallbackRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/docs': typeof DocsRoute
   '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
   '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
@@ -199,12 +199,12 @@ export interface FileRoutesByTo {
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/admin': typeof AdminRouteWithChildren
   '/docs': typeof DocsRoute
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/workspace': typeof WorkspaceRoute
   '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
@@ -226,12 +226,12 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | '/'
     | '/accept-invite'
     | '/admin'
     | '/docs'
     | '/profile'
     | '/sign-in'
+    | '/workspace'
     | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
@@ -251,10 +251,10 @@ export interface FileRouteTypes {
     | '/api/asana/oauth/callback'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/accept-invite'
     | '/docs'
     | '/sign-in'
+    | '/workspace'
     | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
@@ -274,12 +274,12 @@ export interface FileRouteTypes {
     | '/api/asana/oauth/callback'
   id:
     | '__root__'
-    | '/'
     | '/accept-invite'
     | '/admin'
     | '/docs'
     | '/profile'
     | '/sign-in'
+    | '/workspace'
     | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
@@ -300,12 +300,12 @@ export interface FileRouteTypes {
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
   AcceptInviteRoute: typeof AcceptInviteRoute
   AdminRoute: typeof AdminRouteWithChildren
   DocsRoute: typeof DocsRoute
   ProfileRoute: typeof ProfileRouteWithChildren
   SignInRoute: typeof SignInRoute
+  WorkspaceRoute: typeof WorkspaceRoute
   ApiArtifactsRoute: typeof ApiArtifactsRoute
   ApiAsanaWebhookRoute: typeof ApiAsanaWebhookRoute
   ApiChatEventsRoute: typeof ApiChatEventsRoute
@@ -319,6 +319,13 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/workspace': {
+      id: '/workspace'
+      path: '/workspace'
+      fullPath: '/workspace'
+      preLoaderRoute: typeof WorkspaceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sign-in': {
       id: '/sign-in'
       path: '/sign-in'
@@ -352,13 +359,6 @@ declare module '@tanstack/react-router' {
       path: '/accept-invite'
       fullPath: '/accept-invite'
       preLoaderRoute: typeof AcceptInviteRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/profile/': {
@@ -517,12 +517,12 @@ const ProfileRouteWithChildren =
   ProfileRoute._addFileChildren(ProfileRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
   AcceptInviteRoute: AcceptInviteRoute,
   AdminRoute: AdminRouteWithChildren,
   DocsRoute: DocsRoute,
   ProfileRoute: ProfileRouteWithChildren,
   SignInRoute: SignInRoute,
+  WorkspaceRoute: WorkspaceRoute,
   ApiArtifactsRoute: ApiArtifactsRoute,
   ApiAsanaWebhookRoute: ApiAsanaWebhookRoute,
   ApiChatEventsRoute: ApiChatEventsRoute,

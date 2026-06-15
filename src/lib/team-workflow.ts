@@ -285,10 +285,14 @@ function topicalChatTitle(text: string, fallback = "New request") {
     .map((word) => word.trim())
     .filter(Boolean);
   const topicalWords = words.filter((word) => !chatTitleStopWords.has(word.toLowerCase()));
-  const title =
-    (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || fallback;
+  const title = (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || fallback;
   if (title.length <= chatTitleMaxCharacters) return title;
-  return title.slice(0, chatTitleMaxCharacters).trim().replace(/\s+\S*$/, "") || title;
+  return (
+    title
+      .slice(0, chatTitleMaxCharacters)
+      .trim()
+      .replace(/\s+\S*$/, "") || title
+  );
 }
 
 function assertProjectChatTitleIsNotReserved(title: string, section: ChatSection) {

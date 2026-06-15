@@ -429,11 +429,13 @@ export function conciseChatTitleFromRequest(text: string) {
     .map((word) => word.trim())
     .filter(Boolean);
   const topicalWords = words.filter((word) => !chatTitleStopWords.has(word.toLowerCase()));
-  const title =
-    (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || "New request";
+  const title = (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || "New request";
   const conciseTitle =
     title.length > chatTitleMaxCharacters
-      ? title.slice(0, chatTitleMaxCharacters).trim().replace(/\s+\S*$/, "") || title
+      ? title
+          .slice(0, chatTitleMaxCharacters)
+          .trim()
+          .replace(/\s+\S*$/, "") || title
       : title;
   return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
 }

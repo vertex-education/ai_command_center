@@ -20,16 +20,16 @@ CREATE TABLE IF NOT EXISTS knowledge_items (
   indexed_at TEXT,
   error_message TEXT
 );
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_items_scope_idx
   ON knowledge_items (workspace_id, workspace_scope, team_id, project_id, updated_at);
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_items_source_idx
   ON knowledge_items (source_type, item_type, updated_at);
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_items_status_idx
   ON knowledge_items (status, updated_at);
-
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
   id TEXT PRIMARY KEY,
   item_id TEXT NOT NULL REFERENCES knowledge_items(id) ON DELETE CASCADE,
@@ -51,21 +51,21 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   UNIQUE (item_id, chunk_index)
 );
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_chunks_tenant_idx
   ON knowledge_chunks (vector_tenant_id, project_id, team_id);
-
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_chunks_vector_idx
   ON knowledge_chunks (vector_id);
-
+--> statement-breakpoint
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_chunks_item_chunk_idx
   ON knowledge_chunks (item_id, chunk_index);
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_chunks_scope_idx
   ON knowledge_chunks (workspace_id, workspace_scope, team_id, project_id, created_at);
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_chunks_item_idx
   ON knowledge_chunks (item_id, chunk_index);
-
+--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS knowledge_chunks_r2_key_idx
   ON knowledge_chunks (r2_key);

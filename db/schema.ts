@@ -509,29 +509,6 @@ export const artifacts = sqliteTable(
   }),
 );
 
-export const documentChunks = sqliteTable(
-  "document_chunks",
-  {
-    id: text("id").primaryKey(),
-    vectorTenantId: integer("vector_tenant_id").references(() => vectorTenantMap.id, { onDelete: "set null" }),
-    teamId: text("team_id").notNull(),
-    projectId: text("project_id").notNull(),
-    documentName: text("document_name").notNull(),
-    r2Key: text("r2_key").notNull(),
-    content: text("content").notNull(),
-    sensitivityLabel: text("sensitivity_label", { enum: ["Standard", "Confidential"] })
-      .notNull()
-      .default("Standard"),
-    restricted: integer("restricted", { mode: "boolean" }).notNull().default(false),
-    createdAt: text("created_at").notNull(),
-  },
-  (table) => ({
-    tenantIdx: index("document_chunks_vector_tenant_idx").on(table.vectorTenantId, table.projectId, table.teamId),
-    scopeIdx: index("document_chunks_scope_idx").on(table.teamId, table.projectId, table.createdAt),
-    r2KeyIdx: index("document_chunks_r2_key_idx").on(table.r2Key),
-  }),
-);
-
 export const vectorTenantMap = sqliteTable(
   "vector_tenant_map",
   {
@@ -549,6 +526,121 @@ export const vectorTenantMap = sqliteTable(
   (table) => ({
     tenantKeyIdx: uniqueIndex("vector_tenant_map_tenant_key_idx").on(table.tenantKey),
     scopeIdx: index("vector_tenant_map_scope_idx").on(table.workspaceId, table.teamId, table.projectId),
+  }),
+);
+
+export const knowledgeItems = sqliteTable(
+  "knowledge_items",
+  {
+    id: text("id").primaryKey(),
+    itemType: text("item_type", {
+      enum: [
+        "approval",
+        "artifact",
+        "asana_snapshot",
+        "chat_message",
+        "decision",
+        "idea",
+        "project",
+        "r2_object",
+        "risk",
+        "task",
+        "workspace_record",
+      ],
+    }).notNull(),
+    sourceType: text("source_type", { enum: ["asana", "chat", "r2", "rag", "upload", "workspace"] }).notNull(),
+    title: text("title").notNull(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceScope: text("workspace_scope", { enum: ["org", "team", "personal"] }).notNull(),
+    teamId: text("team_id"),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+    r2Key: text("r2_key"),
+    sourceUrl: text("source_url"),
+    contentHash: text("content_hash"),
+    versionLabel: text("version_label"),
+    sensitivityLabel: text("sensitivity_label", { enum: ["Standard", "Confidential"] })
+      .notNull()
+      .default("Standard"),
+    restricted: integer("restricted", { mode: "boolean" }).notNull().default(false),
+    status: text("status", { enum: ["processing", "completed", "failed"] })
+      .notNull()
+      .default("processing"),
+    metadataJson: text("metadata_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    indexedAt: text("indexed_at"),
+    errorMessage: text("error_message"),
+  },
+  (table) => ({
+    scopeIdx: index("knowledge_items_scope_idx").on(
+      table.workspaceId,
+      table.workspaceScope,
+      table.teamId,
+      table.projectId,
+      table.updatedAt,
+    ),
+    sourceIdx: index("knowledge_items_source_idx").on(table.sourceType, table.itemType, table.updatedAt),
+    statusIdx: index("knowledge_items_status_idx").on(table.status, table.updatedAt),
+  }),
+);
+
+export const knowledgeChunks = sqliteTable(
+  "knowledge_chunks",
+  {
+    id: text("id").primaryKey(),
+    itemId: text("item_id")
+      .notNull()
+      .references(() => knowledgeItems.id, { onDelete: "cascade" }),
+    chunkIndex: integer("chunk_index").notNull(),
+    vectorId: text("vector_id").notNull(),
+    vectorTenantId: integer("vector_tenant_id").references(() => vectorTenantMap.id, { onDelete: "set null" }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceScope: text("workspace_scope", { enum: ["org", "team", "personal"] }).notNull(),
+    teamId: text("team_id"),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    r2Key: text("r2_key"),
+    sourceType: text("source_type", { enum: ["asana", "chat", "r2", "rag", "upload", "workspace"] }).notNull(),
+    itemType: text("item_type", {
+      enum: [
+        "approval",
+        "artifact",
+        "asana_snapshot",
+        "chat_message",
+        "decision",
+        "idea",
+        "project",
+        "r2_object",
+        "risk",
+        "task",
+        "workspace_record",
+      ],
+    }).notNull(),
+    content: text("content").notNull(),
+    sensitivityLabel: text("sensitivity_label", { enum: ["Standard", "Confidential"] })
+      .notNull()
+      .default("Standard"),
+    restricted: integer("restricted", { mode: "boolean" }).notNull().default(false),
+    tokenCount: integer("token_count"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => ({
+    vectorIdx: uniqueIndex("knowledge_chunks_vector_idx").on(table.vectorId),
+    itemChunkIdx: uniqueIndex("knowledge_chunks_item_chunk_idx").on(table.itemId, table.chunkIndex),
+    tenantIdx: index("knowledge_chunks_tenant_idx").on(table.vectorTenantId, table.projectId, table.teamId),
+    scopeIdx: index("knowledge_chunks_scope_idx").on(
+      table.workspaceId,
+      table.workspaceScope,
+      table.teamId,
+      table.projectId,
+      table.createdAt,
+    ),
+    itemIdx: index("knowledge_chunks_item_idx").on(table.itemId, table.chunkIndex),
+    r2KeyIdx: index("knowledge_chunks_r2_key_idx").on(table.r2Key),
   }),
 );
 

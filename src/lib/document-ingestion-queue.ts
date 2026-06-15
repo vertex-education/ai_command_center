@@ -5,30 +5,43 @@ import { ensureVectorTenantId } from "@/lib/vector-tenant-map";
 
 export type ScopeLevel = "org" | "team" | "personal";
 
-export type RegistryDocumentIngestionJob = {
-  kind: "artifact-registry-upload";
-  artifactId: string;
-  r2Key: string;
-  originalFilename: string;
-  mimeType: string;
-  fileSize: number;
-  scopeLevel: ScopeLevel;
-  scopeId: string;
-  projectId: string | null;
-  documentType: string;
-  customTags: string[];
+export type KnowledgeItemType =
+  | "approval"
+  | "artifact"
+  | "asana_snapshot"
+  | "chat_message"
+  | "decision"
+  | "idea"
+  | "project"
+  | "r2_object"
+  | "risk"
+  | "task"
+  | "workspace_record";
+
+export type KnowledgeSourceType = "asana" | "chat" | "r2" | "rag" | "upload" | "workspace";
+
+export type KnowledgeItemUpsertJob = {
+  kind: "knowledge-item-upsert";
+  itemId: string;
+  itemType: KnowledgeItemType;
+  sourceType: KnowledgeSourceType;
+  title: string;
+  workspaceId: string;
+  workspaceScope: ScopeLevel;
+  teamId?: string | null;
+  projectId?: string | null;
+  r2Key?: string | null;
+  sourceUrl?: string | null;
+  rawText?: string | null;
+  contentType?: string | null;
+  sensitivityLabel?: "Standard" | "Confidential";
+  restricted?: boolean;
+  versionLabel?: string | null;
+  metadata?: Record<string, string | number | boolean | null>;
+  embeddingFeature?: string;
 };
 
-export type ScopedRagDocumentIngestionJob = {
-  kind: "scoped-rag-generated-artifact";
-  r2Key: string;
-  documentName: string;
-  workspaceId?: string;
-  teamId: string;
-  projectId: string;
-};
-
-export type DocumentIngestionJob = RegistryDocumentIngestionJob | ScopedRagDocumentIngestionJob;
+export type DocumentIngestionJob = KnowledgeItemUpsertJob;
 
 type EmbeddingResponse = {
   data?: number[][];
@@ -36,17 +49,24 @@ type EmbeddingResponse = {
 
 export type VectorMetadataValue = string | number | boolean | string[];
 export type VectorMetadata = Record<string, VectorMetadataValue>;
-export type ScopedRagMarkdownDocumentInput = {
+export type KnowledgeMarkdownDocumentInput = {
   rawText: string;
-  documentName: string;
-  r2Key: string;
-  workspaceId?: string;
-  teamId: string;
-  projectId: string;
-  feature: string;
+  title: string;
+  itemType: KnowledgeItemType;
+  sourceType: KnowledgeSourceType;
+  workspaceId: string;
+  workspaceScope: ScopeLevel;
+  teamId?: string | null;
+  projectId?: string | null;
+  itemId?: string | null;
+  r2Key?: string | null;
+  sourceUrl?: string | null;
+  contentType?: string | null;
+  versionLabel?: string | null;
   sensitivityLabel?: "Standard" | "Confidential";
   restricted?: boolean;
-  embeddingMetadata?: Record<string, string | number | boolean | null>;
+  metadata?: Record<string, string | number | boolean | null>;
+  embeddingFeature?: string;
   vectorMetadata?: VectorMetadata;
 };
 
@@ -74,6 +94,40 @@ const stringMetadataTrimOrder = [
   "chunk_id",
 ];
 const removableMetadataKeys = ["custom_tags", "document_name", "r2_key", "document_type", "chunk_id", "artifact_id"];
+
+function normalizedTeamId(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed || null;
+}
+
+function vectorMetadataString(value: string | null | undefined) {
+  const trimmed = value?.trim();
+  return trimmed || undefined;
+}
+
+function vectorScopeMetadata({
+  projectId,
+  teamId,
+  workspaceId,
+}: {
+  projectId?: string | null;
+  teamId?: string | null;
+  workspaceId: string;
+}) {
+  const metadata: VectorMetadata = {
+    workspace_id: workspaceId,
+  };
+  const scopedTeamId = vectorMetadataString(teamId);
+  const scopedProjectId = vectorMetadataString(projectId);
+  if (scopedTeamId) metadata.team_id = scopedTeamId;
+  if (scopedProjectId) metadata.project_id = scopedProjectId;
+  return metadata;
+}
+
+async function sha256Hex(value: string) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 function fileExtension(fileName: string) {
   const match = fileName.toLowerCase().match(/\.([a-z0-9]{1,16})$/);
@@ -242,6 +296,13 @@ export function customTagsIndexValue(customTags: string[]) {
     .join(",");
 }
 
+function scalarMetadataFromVectorMetadata(metadata: VectorMetadata | undefined) {
+  if (!metadata) return {};
+  return Object.fromEntries(
+    Object.entries(metadata).map(([key, value]) => [key, Array.isArray(value) ? value.join(",") : value]),
+  ) satisfies Record<string, string | number | boolean | null>;
+}
+
 export function isConfidentialTag(value: string) {
   const normalized = value.trim().toLowerCase();
   return /(^|[^a-z])(confidential|restricted)([^a-z]|$)/.test(normalized);
@@ -327,78 +388,173 @@ export function clampVectorMetadata(metadata: VectorMetadata, byteLimit = maxVec
   throw new Error(`Vectorize metadata exceeds ${byteLimit} bytes after clamping.`);
 }
 
-async function updateArtifactStatus(
+async function upsertKnowledgeItemStatus(
   env: DocumentIngestionEnv,
-  artifactId: string,
+  job: KnowledgeItemUpsertJob,
   status: "processing" | "completed" | "failed",
-  errorMessage?: string,
-  chunkCount = 0,
+  {
+    contentHash,
+    errorMessage,
+    indexedAt,
+  }: {
+    contentHash?: string | null;
+    errorMessage?: string | null;
+    indexedAt?: string | null;
+  } = {},
 ) {
-  const completedAt = status === "completed" ? new Date().toISOString() : null;
+  const now = new Date().toISOString();
   await env.DB.prepare(
-    `UPDATE artifacts_registry
-     SET status = ?,
-         error_message = ?,
-         chunk_count = CASE WHEN ? > 0 THEN ? ELSE chunk_count END,
-         updated_at = ?,
-         completed_at = COALESCE(?, completed_at)
-     WHERE id = ?`,
+    `INSERT INTO knowledge_items (
+      id,
+      item_type,
+      source_type,
+      title,
+      workspace_id,
+      workspace_scope,
+      team_id,
+      project_id,
+      r2_key,
+      source_url,
+      content_hash,
+      version_label,
+      sensitivity_label,
+      restricted,
+      status,
+      metadata_json,
+      created_at,
+      updated_at,
+      indexed_at,
+      error_message
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      item_type = excluded.item_type,
+      source_type = excluded.source_type,
+      title = excluded.title,
+      workspace_id = excluded.workspace_id,
+      workspace_scope = excluded.workspace_scope,
+      team_id = excluded.team_id,
+      project_id = excluded.project_id,
+      r2_key = excluded.r2_key,
+      source_url = excluded.source_url,
+      content_hash = COALESCE(excluded.content_hash, knowledge_items.content_hash),
+      version_label = excluded.version_label,
+      sensitivity_label = excluded.sensitivity_label,
+      restricted = excluded.restricted,
+      status = excluded.status,
+      metadata_json = excluded.metadata_json,
+      updated_at = excluded.updated_at,
+      indexed_at = COALESCE(excluded.indexed_at, knowledge_items.indexed_at),
+      error_message = excluded.error_message`,
   )
-    .bind(status, errorMessage ?? null, chunkCount, chunkCount, new Date().toISOString(), completedAt, artifactId)
+    .bind(
+      job.itemId,
+      job.itemType,
+      job.sourceType,
+      job.title,
+      job.workspaceId,
+      job.workspaceScope,
+      normalizedTeamId(job.teamId),
+      job.projectId?.trim() || null,
+      job.r2Key?.trim() || null,
+      job.sourceUrl?.trim() || null,
+      contentHash ?? null,
+      job.versionLabel?.trim() || null,
+      job.sensitivityLabel ?? "Standard",
+      job.restricted || job.sensitivityLabel === "Confidential" ? 1 : 0,
+      status,
+      JSON.stringify(job.metadata ?? {}),
+      now,
+      now,
+      indexedAt ?? null,
+      errorMessage ?? null,
+    )
     .run();
 }
 
-async function processRegistryUploadJob(env: DocumentIngestionEnv, job: RegistryDocumentIngestionJob) {
-  await updateArtifactStatus(env, job.artifactId, "processing");
+async function resolveKnowledgeItemText(env: DocumentIngestionEnv, job: KnowledgeItemUpsertJob) {
+  const rawText = job.rawText?.trim();
+  if (rawText) return rawText;
+  if (!job.r2Key) throw new Error("Knowledge item requires raw text or an R2 key.");
 
   const object = await env.ARTIFACTS_BUCKET.get(job.r2Key);
   if (!object) throw new Error(`R2 object not found: ${job.r2Key}`);
-
   const fileBuffer = await object.arrayBuffer();
-  const extractedText = await extractText(fileBuffer, fileExtension(job.originalFilename));
-  const chunks = chunkText(extractedText);
+  return extractText(fileBuffer, fileExtension(job.title || job.r2Key));
+}
+
+async function removePreviousKnowledgeChunks(env: DocumentIngestionEnv, itemId: string) {
+  const previous = await env.DB.prepare("SELECT vector_id as vectorId FROM knowledge_chunks WHERE item_id = ?")
+    .bind(itemId)
+    .all<{ vectorId: string }>();
+  const vectorIds = (previous.results ?? []).map((row) => row.vectorId).filter(Boolean);
+  if (vectorIds.length > 0) {
+    try {
+      await env.VECTORIZE.deleteByIds(vectorIds);
+    } catch (error) {
+      console.warn("Previous knowledge vectors could not be deleted.", {
+        itemId,
+        message: error instanceof Error ? error.message : "Unknown Vectorize delete failure",
+      });
+    }
+  }
+  await env.DB.prepare("DELETE FROM knowledge_chunks WHERE item_id = ?").bind(itemId).run();
+}
+
+export async function processKnowledgeItemUpsertJob(env: DocumentIngestionEnv, job: KnowledgeItemUpsertJob) {
+  await upsertKnowledgeItemStatus(env, job, "processing");
+
+  const rawText = await resolveKnowledgeItemText(env, job);
+  const chunks = chunkText(rawText);
   if (chunks.length === 0) throw new Error("No text chunks were created.");
 
+  const contentHash = await sha256Hex(rawText);
+  const sensitivityLabel = job.sensitivityLabel ?? "Standard";
+  const restricted = job.restricted || sensitivityLabel === "Confidential";
+  const teamId = normalizedTeamId(job.teamId);
+  const projectId = job.projectId?.trim() || null;
+  const vectorTenantId = await ensureVectorTenantId(env.DB, {
+    workspaceId: job.workspaceId,
+    teamId,
+    projectId,
+  });
   const embeddings = await embedTexts(env, chunks, {
-    feature: "document-embedding",
-    projectId: job.projectId,
+    feature: job.embeddingFeature ?? "knowledge-item-embedding",
+    teamId,
+    projectId,
     metadata: {
-      scopeLevel: job.scopeLevel,
-      scopeId: job.scopeId,
-      documentType: job.documentType,
-      artifactId: job.artifactId,
+      itemId: job.itemId,
+      itemType: job.itemType,
+      sourceType: job.sourceType,
     },
   });
   const createdAt = new Date().toISOString();
   const rows = chunks.map((content, index) => ({
-    id: `chunk-${crypto.randomUUID()}`,
-    vectorId: `vector-${job.artifactId}-${index}`,
+    id: `knowledge-chunk-${crypto.randomUUID()}`,
+    vectorId: `knowledge-vector-${crypto.randomUUID()}`,
     chunkIndex: index,
     content,
     embedding: embeddings[index],
   }));
-  const customTags = customTagsIndexValue(job.customTags);
-  const sensitivityLabel = inferSensitivityLabel({
-    customTags: job.customTags,
-    documentName: job.originalFilename,
-    metadata: object.customMetadata,
-  });
-  const restricted = sensitivityLabel === "Confidential";
 
+  await removePreviousKnowledgeChunks(env, job.itemId);
   await env.VECTORIZE.upsert(
     rows.map((row) => ({
       id: row.vectorId,
       values: row.embedding,
       metadata: clampVectorMetadata({
-        artifact_id: job.artifactId,
-        chunk_id: row.id,
-        r2_key: job.r2Key,
-        document_name: job.originalFilename,
-        scope_level: job.scopeLevel,
-        scope_id: job.scopeId,
-        project_id: job.projectId ?? "",
-        document_type: job.documentType,
-        custom_tags: customTags,
+        ...vectorScopeMetadata({
+          workspaceId: job.workspaceId,
+          teamId,
+          projectId,
+        }),
+        vector_tenant_id: vectorTenantId,
+        item_id: job.itemId,
+        item_type: job.itemType,
+        source_type: job.sourceType,
+        workspace_scope: job.workspaceScope,
+        document_name: job.title,
+        r2_key: job.r2Key ?? "",
+        source_url: job.sourceUrl ?? "",
         confidentiality: sensitivityLabel,
         restricted,
         chunk_index: row.chunkIndex,
@@ -409,171 +565,132 @@ async function processRegistryUploadJob(env: DocumentIngestionEnv, job: Registry
   await env.DB.batch(
     rows.map((row) =>
       env.DB.prepare(
-        `INSERT INTO document_chunks_v2 (
+        `INSERT INTO knowledge_chunks (
           id,
-          artifact_id,
+          item_id,
           chunk_index,
           vector_id,
-          r2_key,
-          content,
-          scope_level,
-          scope_id,
+          vector_tenant_id,
+          workspace_id,
+          workspace_scope,
+          team_id,
           project_id,
-          document_type,
-          custom_tags_json,
+          title,
+          r2_key,
+          source_type,
+          item_type,
+          content,
+          sensitivity_label,
+          restricted,
           token_count,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
-        job.artifactId,
+        job.itemId,
         row.chunkIndex,
         row.vectorId,
-        job.r2Key,
+        vectorTenantId,
+        job.workspaceId,
+        job.workspaceScope,
+        teamId,
+        projectId,
+        job.title,
+        job.r2Key?.trim() || null,
+        job.sourceType,
+        job.itemType,
         row.content,
-        job.scopeLevel,
-        job.scopeId,
-        job.projectId,
-        job.documentType,
-        JSON.stringify(job.customTags),
+        sensitivityLabel,
+        restricted ? 1 : 0,
         Math.ceil(row.content.length / 4),
         createdAt,
       ),
     ),
   );
 
-  await updateArtifactStatus(env, job.artifactId, "completed", undefined, rows.length);
+  await upsertKnowledgeItemStatus(env, job, "completed", {
+    contentHash,
+    indexedAt: createdAt,
+  });
 }
 
-async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, job: ScopedRagDocumentIngestionJob) {
-  const object = await env.ARTIFACTS_BUCKET.get(job.r2Key);
-  if (!object) throw new Error(`R2 object not found: ${job.r2Key}`);
+export async function ingestKnowledgeMarkdownDocument(env: DocumentIngestionEnv, input: KnowledgeMarkdownDocumentInput) {
+  const itemId =
+    input.itemId?.trim() ||
+    `knowledge-${input.sourceType}-${(
+      await sha256Hex(
+        [
+          input.workspaceId,
+          input.workspaceScope,
+          input.teamId ?? "",
+          input.projectId ?? "",
+          input.sourceType,
+          input.itemType,
+          input.r2Key ?? "",
+          input.sourceUrl ?? "",
+          input.title,
+        ].join("|"),
+      )
+    ).slice(0, 32)}`;
 
-  const rawText = await object.text();
-  await ingestScopedRagMarkdownDocument(env, {
-    rawText,
-    documentName: job.documentName,
-    r2Key: job.r2Key,
-    workspaceId: job.workspaceId,
-    teamId: job.teamId,
-    projectId: job.projectId,
-    feature: "scoped-rag-generated-artifact-embedding",
-    sensitivityLabel: inferSensitivityLabel({
-      documentName: job.documentName,
-      metadata: object.customMetadata,
-    }),
-    embeddingMetadata: {
-      documentName: job.documentName,
+  await processKnowledgeItemUpsertJob(env, {
+    kind: "knowledge-item-upsert",
+    itemId,
+    itemType: input.itemType,
+    sourceType: input.sourceType,
+    title: input.title,
+    workspaceId: input.workspaceId,
+    workspaceScope: input.workspaceScope,
+    teamId: input.teamId,
+    projectId: input.projectId,
+    r2Key: input.r2Key,
+    sourceUrl: input.sourceUrl,
+    rawText: input.rawText,
+    contentType: input.contentType,
+    sensitivityLabel: input.sensitivityLabel,
+    restricted: input.restricted,
+    versionLabel: input.versionLabel,
+    metadata: {
+      ...(input.metadata ?? {}),
+      ...scalarMetadataFromVectorMetadata(input.vectorMetadata),
     },
-  });
-}
-
-export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv, input: ScopedRagMarkdownDocumentInput) {
-  const chunks = chunkText(input.rawText);
-  if (chunks.length === 0) throw new Error("No text chunks were created.");
-  const sensitivityLabel = input.sensitivityLabel ?? "Standard";
-  const restricted = input.restricted ?? sensitivityLabel === "Confidential";
-  const workspaceId = input.workspaceId ?? (await resolveWorkspaceIdForProject(env.DB, input.projectId));
-  const vectorTenantId = await ensureVectorTenantId(env.DB, {
-    workspaceId,
-    teamId: input.teamId,
-    projectId: input.projectId,
+    embeddingFeature: input.embeddingFeature,
   });
 
-  const embeddings = await embedTexts(env, chunks, {
-    feature: input.feature,
-    teamId: input.teamId,
-    projectId: input.projectId,
-    metadata: input.embeddingMetadata,
-  });
-  const createdAt = new Date().toISOString();
-  const rows = chunks.map((content, index) => ({
-    id: `chunk-${crypto.randomUUID()}`,
-    content,
-    embedding: embeddings[index],
-    chunkIndex: index,
-  }));
-
-  await env.VECTORIZE.upsert(
-    rows.map((row) => ({
-      id: row.id,
-      values: row.embedding,
-      metadata: clampVectorMetadata({
-        team_id: input.teamId,
-        project_id: input.projectId,
-        vector_tenant_id: vectorTenantId,
-        document_name: input.documentName,
-        r2_key: input.r2Key,
-        confidentiality: sensitivityLabel,
-        restricted,
-        chunk_index: row.chunkIndex,
-        ...(input.vectorMetadata ?? {}),
-      }),
-    })),
-  );
-
-  await env.DB.batch(
-    rows.map((row) =>
-      env.DB.prepare(
-        `INSERT INTO document_chunks (
-          id,
-          vector_tenant_id,
-          team_id,
-          project_id,
-          document_name,
-          r2_key,
-          content,
-          sensitivity_label,
-          restricted,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        row.id,
-        vectorTenantId,
-        input.teamId,
-        input.projectId,
-        input.documentName,
-        input.r2Key,
-        row.content,
-        sensitivityLabel,
-        restricted ? 1 : 0,
-        createdAt,
-      ),
-    ),
-  );
+  return { itemId };
 }
 
-async function resolveWorkspaceIdForProject(db: D1Database, projectId: string) {
-  const row = await db
-    .prepare("SELECT workspace_id as workspaceId FROM projects WHERE id = ? LIMIT 1")
-    .bind(projectId)
-    .first<{ workspaceId: string }>();
-  if (!row) throw new Error("Project was not found for Vectorize tenant mapping.");
-  return row.workspaceId;
-}
-
-function isScopedRagGeneratedArtifactJob(job: DocumentIngestionJob): job is ScopedRagDocumentIngestionJob {
-  return job.kind === "scoped-rag-generated-artifact";
+function isKnowledgeItemUpsertJob(job: DocumentIngestionJob): job is KnowledgeItemUpsertJob {
+  return job.kind === "knowledge-item-upsert";
 }
 
 export async function processDocumentIngestionJob(env: DocumentIngestionEnv, job: DocumentIngestionJob) {
-  if (isScopedRagGeneratedArtifactJob(job)) {
-    await processScopedRagGeneratedArtifactJob(env, job);
+  if (isKnowledgeItemUpsertJob(job)) {
+    await processKnowledgeItemUpsertJob(env, job);
     return;
   }
 
-  await processRegistryUploadJob(env, job);
+  throw new Error(`Unsupported document ingestion job kind: ${(job as { kind?: string } | null)?.kind ?? "unknown"}`);
 }
 
 export async function handleDocumentIngestionQueue(batch: MessageBatch<DocumentIngestionJob>, env: DocumentIngestionEnv) {
   for (const message of batch.messages) {
     try {
+      if (!isKnowledgeItemUpsertJob(message.body)) {
+        console.warn("Dropping deprecated document ingestion job.", {
+          kind: (message.body as { kind?: string } | null)?.kind ?? "unknown",
+        });
+        message.ack();
+        continue;
+      }
       await processDocumentIngestionJob(env, message.body);
       message.ack();
     } catch (error) {
       const job = message.body;
-      if (job && !isScopedRagGeneratedArtifactJob(job) && job.artifactId) {
-        await updateArtifactStatus(env, job.artifactId, "failed", error instanceof Error ? error.message : "Unknown ingestion failure");
+      if (job && isKnowledgeItemUpsertJob(job)) {
+        await upsertKnowledgeItemStatus(env, job, "failed", {
+          errorMessage: error instanceof Error ? error.message : "Unknown knowledge ingestion failure",
+        });
       }
       message.retry();
     }

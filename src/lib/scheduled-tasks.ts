@@ -282,7 +282,7 @@ async function runArtifactValidationTask(env: Env, task: ScheduledTaskRow, sched
   const payload = parseJsonRecord(task.payloadJson);
   const staleAfterHours = numberFromPayload(payload.staleAfterHours) ?? 24;
   const staleBeforeIso = new Date(scheduledAt.getTime() - staleAfterHours * 60 * 60 * 1000).toISOString();
-  const [artifactMetadataIssues, registryPending, registryFailures] = await Promise.all([
+  const [artifactMetadataIssues, knowledgeProcessing, knowledgeFailures] = await Promise.all([
     countRows(
       env.DB,
       `SELECT COUNT(*) AS count
@@ -294,23 +294,23 @@ async function runArtifactValidationTask(env: Env, task: ScheduledTaskRow, sched
     optionalCountRows(
       env.DB,
       `SELECT COUNT(*) AS count
-       FROM artifacts_registry
-       WHERE status IN ('pending', 'processing')
+       FROM knowledge_items
+       WHERE status = 'processing'
          AND updated_at < ?`,
       staleBeforeIso,
     ),
-    optionalCountRows(env.DB, "SELECT COUNT(*) AS count FROM artifacts_registry WHERE status = 'failed'"),
+    optionalCountRows(env.DB, "SELECT COUNT(*) AS count FROM knowledge_items WHERE status = 'failed'"),
   ]);
 
   return {
     handledAt: scheduledAt.toISOString(),
     taskId: task.id,
     taskType: task.type,
-    summary: "Artifact metadata and ingestion registry health were checked.",
+    summary: "Artifact metadata and knowledge archive health were checked.",
     metadata: {
       artifactMetadataIssues,
-      registryFailures,
-      registryPending,
+      knowledgeFailures,
+      knowledgeProcessing,
       staleAfterHours,
     },
   };

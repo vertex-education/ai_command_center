@@ -31,7 +31,7 @@ Required bindings for the scoped RAG path:
 - `DB`: stores workspace, project, chat, artifact, and document chunk rows.
 - `ARTIFACTS_BUCKET`: stores raw generated or uploaded artifact text and files.
 - `VECTORIZE`: indexes embedded document chunks with `team_id`, `project_id`, `confidentiality`, and `restricted` metadata filters.
-- `DOCUMENT_INGESTION_QUEUE`: receives `scoped-rag-generated-artifact` jobs for chunking and indexing.
+- `DOCUMENT_INGESTION_QUEUE`: receives `knowledge-item-upsert` jobs for chunking and indexing.
 - `AUTONOMOUS_RESEARCH_QUEUE`: receives project and idea research jobs for Firecrawl-backed background indexing.
 - `GRAPH_WEBHOOK_QUEUE`: receives Microsoft Graph Teams and Outlook change notifications from `/api/graph/webhooks`.
 - `AI`: runs embeddings, intent routing, and streamed chat generation through the configured Cloudflare AI Gateway. Gateway requests include identity/scope metadata headers for spend-limit dimensions and accept `cf-aig-step` fallback responses as successful model output.
@@ -66,11 +66,11 @@ Artifact uploads are intentionally non-blocking. `uploadArtifact` in `src/lib/ar
 
 1. Validates the signed-in user and form fields.
 2. Writes the raw file buffer to `ARTIFACTS_BUCKET` with scope and document metadata.
-3. Inserts an `artifacts_registry` row with `status = pending`.
-4. Publishes an `artifact-registry-upload` job to `DOCUMENT_INGESTION_QUEUE`.
+3. Publishes a `knowledge-item-upsert` job to `DOCUMENT_INGESTION_QUEUE`.
+4. The queue consumer writes `knowledge_items` and `knowledge_chunks` rows after extraction and embedding.
 5. Sets HTTP `202 Accepted` and returns `{ status: "queued", artifactId, r2Key }`.
 
-The queue consumer in `src/lib/document-ingestion-queue.ts` owns the expensive work. It retrieves the R2 object, extracts text, chunks Markdown structurally by headings and paragraph breaks, embeds chunks in batches of 50 using `@cf/baai/bge-large-en-v1.5`, clamps each Vectorize metadata object to the 2048-byte limit, writes vectors, writes D1 `document_chunks_v2` rows for registry uploads, and moves the registry row through `processing`, `completed`, or `failed`.
+The queue consumer in `src/lib/document-ingestion-queue.ts` owns the expensive work. It retrieves the R2 object when raw text is not included, extracts text, chunks Markdown structurally by headings and paragraph breaks, embeds chunks in batches of 50 using `@cf/baai/bge-large-en-v1.5`, clamps each Vectorize metadata object to the 2048-byte limit, writes vectors, and moves `knowledge_items` rows through `processing`, `completed`, or `failed`.
 
 ## Autonomous Web Research Indexing
 
@@ -90,8 +90,8 @@ The consumer in `src/lib/autonomous-research-queue.ts`:
 3. Builds up to three bounded search queries optimized for frameworks, case studies, risks, requirements, metrics, and benchmarks.
 4. Calls Firecrawl Search with Markdown scrape options.
 5. Deduplicates external HTTP URLs and caps Markdown per document.
-6. Passes each Markdown document into the shared scoped RAG ingestion helper.
-7. Embeds chunks with `@cf/baai/bge-large-en-v1.5`, stores D1 `document_chunks`, and upserts Vectorize records.
+6. Passes each Markdown document into the shared knowledge ingestion helper.
+7. Embeds chunks with `@cf/baai/bge-large-en-v1.5`, stores D1 `knowledge_items` and `knowledge_chunks`, and upserts Vectorize records.
 
 Autonomous research vectors include these metadata fields in addition to the normal scoped RAG filter fields:
 
@@ -270,5 +270,5 @@ When Asana search is enabled for a mapped project chat, the app fetches current 
 
 - The first Asana-enabled chat stores a baseline snapshot.
 - Later Asana-enabled chats store a new snapshot only when task, status update, or tracked story content changes.
-- Changed snapshots are written to R2 as Markdown and queued through `DOCUMENT_INGESTION_QUEUE` with `kind: "scoped-rag-generated-artifact"`, so the existing document ingestion worker embeds them into Vectorize and writes D1 `document_chunks`.
+- Changed snapshots are written to R2 as Markdown and queued through `DOCUMENT_INGESTION_QUEUE` with `kind: "knowledge-item-upsert"`, so the document ingestion worker embeds them into Vectorize and writes D1 `knowledge_items` and `knowledge_chunks`.
 - The current chat prompt also receives a concise snapshot comparison, so the model can distinguish live Asana context from changes since the previous captured snapshot.

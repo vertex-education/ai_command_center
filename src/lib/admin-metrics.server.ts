@@ -645,16 +645,15 @@ async function buildSingleMetricCard(metricId: string): Promise<MetricCard> {
       };
     }
     case "files-stored": {
-      const [totalArtifacts, legacyDocumentFiles, v2ArtifactFiles, totalChunks] = await Promise.all([
+      const [totalArtifacts, archivedKnowledgeItems, totalChunks] = await Promise.all([
         countRows("SELECT COUNT(*) as count FROM artifacts"),
-        countRows("SELECT COUNT(DISTINCT r2_key) as count FROM document_chunks"),
-        optionalCountRows("SELECT COUNT(*) as count FROM artifacts_registry"),
-        countRows("SELECT COUNT(*) as count FROM document_chunks"),
+        countRows("SELECT COUNT(*) as count FROM knowledge_items"),
+        countRows("SELECT COUNT(*) as count FROM knowledge_chunks"),
       ]);
       return {
         id: metricId,
         label: "Files stored",
-        value: (totalArtifacts + legacyDocumentFiles + v2ArtifactFiles).toLocaleString(),
+        value: (totalArtifacts + archivedKnowledgeItems).toLocaleString(),
         detail: `${totalChunks.toLocaleString()} searchable chunks`,
         status: "ok",
       };
@@ -727,8 +726,7 @@ async function getHealthMetrics() {
     totalMessages,
     assistantMessages,
     totalArtifacts,
-    legacyDocumentFiles,
-    v2ArtifactFiles,
+    archivedKnowledgeItems,
     totalChunks,
     pendingInvites,
     recentEvents,
@@ -749,9 +747,8 @@ async function getHealthMetrics() {
     countRows("SELECT COUNT(*) as count FROM chat_messages"),
     countRows("SELECT COUNT(*) as count FROM chat_messages WHERE role = 'assistant'"),
     countRows("SELECT COUNT(*) as count FROM artifacts"),
-    countRows("SELECT COUNT(DISTINCT r2_key) as count FROM document_chunks"),
-    optionalCountRows("SELECT COUNT(*) as count FROM artifacts_registry"),
-    countRows("SELECT COUNT(*) as count FROM document_chunks"),
+    countRows("SELECT COUNT(*) as count FROM knowledge_items"),
+    countRows("SELECT COUNT(*) as count FROM knowledge_chunks"),
     countRows("SELECT COUNT(*) as count FROM auth_invites WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at > ?", now),
     countRows("SELECT COUNT(*) as count FROM events WHERE created_at >= ?", sevenDaysAgo),
     getMostActiveProject(thirtyDaysAgo),
@@ -762,7 +759,7 @@ async function getHealthMetrics() {
     getRecentUsageRows(),
   ]);
 
-  const totalStoredFiles = totalArtifacts + legacyDocumentFiles + v2ArtifactFiles;
+  const totalStoredFiles = totalArtifacts + archivedKnowledgeItems;
   const estimatedAverageConcurrentUsers = Math.round((activeUsers + sessionsUpdatedToday / 24) * 10) / 10;
   const providerRowsByName = new Map(usageRows.map((row) => [row.provider, row]));
   const aiGatewayEventUsage = providerRowsByName.get("ai-gateway");

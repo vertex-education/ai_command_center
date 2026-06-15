@@ -145,8 +145,8 @@ Core tables:
 - `chat_messages`: chat history.
 - `ideas`: scoped improvement ideas, owner attribution, AI analysis scores, rationale text, status, explicit pin state, and shareable authenticated route targets.
 - `artifacts`: immutable artifact metadata, version lineage, commit messages, and R2 object keys.
-- `artifacts_registry`: upload registry rows for asynchronous artifact ingestion, including R2 key, scope, tags, status, error, and chunk count.
-- `document_chunks` and `document_chunks_v2`: D1 chunk text stores paired with Vectorize metadata for scoped RAG retrieval.
+- `knowledge_items`: canonical searchable archive records across uploads, generated artifacts, Asana snapshots, R2 objects, and workspace records.
+- `knowledge_chunks`: D1 chunk text store paired with Vectorize metadata for scoped search and LLM retrieval.
 - `vector_tenant_map`: compressed integer tenant ids for Vectorize metadata, mapping long workspace/team/project identifiers back to D1-owned scope records.
 - `workspace_actions`: decisions, approvals, and tasks, including status, original assistant text, project scope, explicit pin state, outbound status, and queued bidirectional Asana task sync metadata.
 - `extracted_tasks`: background task extraction results from workspace intelligence queue jobs.
@@ -394,9 +394,9 @@ The seed set includes separate DOCX, XLSX, and PPTX files for Personal, Team, an
 
 ## Artifact Upload And Ingestion
 
-Artifact registry uploads use [src/lib/artifact-upload.ts](src/lib/artifact-upload.ts). The upload server function requires `DB`, `ARTIFACTS_BUCKET`, and `DOCUMENT_INGESTION_QUEUE`, writes the raw file buffer directly to R2, inserts an `artifacts_registry` row with `status = pending`, publishes an `artifact-registry-upload` queue job, and returns HTTP `202 Accepted` with `{ status: "queued" }`.
+Artifact uploads use [src/lib/artifact-upload.ts](src/lib/artifact-upload.ts). The upload server function requires `DB`, `ARTIFACTS_BUCKET`, and `DOCUMENT_INGESTION_QUEUE`, writes the raw file buffer directly to R2, publishes a `knowledge-item-upsert` queue job, and returns HTTP `202 Accepted` with `{ status: "queued" }`.
 
-The document ingestion consumer in [src/document-ingestion-worker.ts](src/document-ingestion-worker.ts) is deployed separately with [wrangler.document-ingestion.jsonc](wrangler.document-ingestion.jsonc). It retrieves the R2 object, extracts text, chunks Markdown by headings and paragraph breaks, resolves a compressed `vector_tenant_id`, embeds chunks with Workers AI through the AI Gateway wrapper, clamps Vectorize metadata to the 2048-byte limit, upserts vectors, writes D1 chunk rows, and updates the registry row to `processing`, `completed`, or `failed`.
+The document ingestion consumer in [src/document-ingestion-worker.ts](src/document-ingestion-worker.ts) is deployed separately with [wrangler.document-ingestion.jsonc](wrangler.document-ingestion.jsonc). It retrieves the R2 object when raw text is not already included, extracts text, chunks Markdown by headings and paragraph breaks, resolves a compressed `vector_tenant_id`, embeds chunks with Workers AI through the AI Gateway wrapper, clamps Vectorize metadata to the 2048-byte limit, upserts vectors, and writes D1 `knowledge_items` and `knowledge_chunks` rows with `processing`, `completed`, or `failed` status.
 
 ## Autonomous Research Indexing
 
@@ -409,7 +409,7 @@ Admin setup requirements:
 - Deploy [wrangler.autonomous-research.jsonc](wrangler.autonomous-research.jsonc) with `npm run deploy:autonomous-research`.
 - Keep `AUTONOMOUS_RESEARCH_QUEUE` configured as a producer binding in [wrangler.jsonc](wrangler.jsonc).
 
-The consumer in [src/autonomous-research-worker.ts](src/autonomous-research-worker.ts) routes queue batches into [src/lib/autonomous-research-queue.ts](src/lib/autonomous-research-queue.ts). The processor extracts the core project or idea text, builds up to three optimized Firecrawl search queries, accepts Markdown results from Firecrawl, chunks the Markdown through the shared document ingestion helper, embeds with `@cf/baai/bge-large-en-v1.5`, writes D1 `document_chunks`, and upserts Vectorize vectors with metadata including `source: "autonomous_research"`, `entity_type`, `entity_id`, `workspace_id`, `project_id`, `vector_tenant_id`, `source_url`, `source_domain`, and `search_query`.
+The consumer in [src/autonomous-research-worker.ts](src/autonomous-research-worker.ts) routes queue batches into [src/lib/autonomous-research-queue.ts](src/lib/autonomous-research-queue.ts). The processor extracts the core project or idea text, builds up to three optimized Firecrawl search queries, accepts Markdown results from Firecrawl, writes them through the shared knowledge ingestion helper, embeds with `@cf/baai/bge-large-en-v1.5`, writes D1 `knowledge_items` and `knowledge_chunks`, and upserts Vectorize vectors with metadata including `source: "autonomous_research"`, `entity_type`, `entity_id`, `workspace_id`, `project_id`, `vector_tenant_id`, `source_url`, `source_domain`, and `search_query`.
 
 ## Scoped RAG Streaming
 
@@ -565,7 +565,7 @@ Settings and deployment notes:
 
 - Admins can review, create, enable, disable, edit retry/schedule settings, and queue central scheduler rows from Admin Settings > Scheduled Tasks.
 - Users configure briefing cadence, project scope, local run time, time zone, reporting window, and prompt instructions from Profile > Briefings. The destination is fixed to the project's `Briefings` thread.
-- The Cloudflare-account Worker deployment path must have the existing `DB`, `AI`, and `CHAT_SYNC` bindings plus the cron-backed scheduled task engine enabled. Weekly agentic briefings also use `TAVILY_API_KEY` and `FIRECRAWL_API_KEY` opportunistically through the existing consolidated web-search helper. Uploaded-artifact registry inputs use `artifacts_registry` when that table exists; missing registry rows are skipped rather than blocking the briefing.
+- The Cloudflare-account Worker deployment path must have the existing `DB`, `AI`, and `CHAT_SYNC` bindings plus the cron-backed scheduled task engine enabled. Weekly agentic briefings also use `TAVILY_API_KEY` and `FIRECRAWL_API_KEY` opportunistically through the existing consolidated web-search helper. Uploaded and generated archive inputs are read from `knowledge_items`.
 - Admin queue actions update `scheduled_tasks.next_run_at`; the hourly cron-backed Worker still performs the long-running orchestration under its configured scheduled-worker CPU allowance.
 
 ### Hybrid External Search

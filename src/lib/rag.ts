@@ -104,7 +104,7 @@ export type IngestGeneratedArtifactInput = {
   rawText: string;
   fileName: string;
   workspaceId?: string;
-  teamId: string;
+  teamId?: string | null;
   projectId: string;
   sensitivityLabel?: "Standard" | "Confidential";
   restricted?: boolean;
@@ -154,6 +154,7 @@ export type ScopedKnowledgeSearchResult = {
   id: string;
   documentName: string;
   excerpt: string;
+  itemType: string;
   projectId: string;
   r2Key: string;
   rank: number;
@@ -161,6 +162,7 @@ export type ScopedKnowledgeSearchResult = {
   score: number | null;
   sensitivityLabel: string;
   source: "vector";
+  sourceType: "asana" | "chat" | "r2" | "rag" | "upload" | "workspace";
 };
 
 export type ScopedKnowledgeSearchResponse = {
@@ -187,10 +189,12 @@ type EmbeddingResponse = {
 type DocumentChunkRow = {
   id: string;
   documentName: string;
+  itemType: string;
   projectId: string;
   r2Key: string;
   content: string;
   sensitivityLabel: string;
+  sourceType: ScopedKnowledgeSearchResult["sourceType"];
   restricted: boolean;
 };
 
@@ -542,8 +546,8 @@ export function contentTypeFor(fileName: string) {
   return "application/octet-stream";
 }
 
-export function createR2Key(teamId: string, projectId: string, fileName: string) {
-  return `rag/${teamId}/${projectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName(fileName)}`;
+export function createR2Key(teamId: string | null, projectId: string, fileName: string) {
+  return `rag/${teamId ?? "workspace"}/${projectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName(fileName)}`;
 }
 
 export function normalizeSensitivityLabel(value: string | undefined, restricted: boolean | undefined) {
@@ -743,6 +747,25 @@ function buildScopedVectorFilter(projectId: string, authorization: ScopedAccessC
   };
 }
 
+async function fetchProjectArchiveScope(projectId: string, requestedWorkspaceId?: string | null) {
+  const project = await getDb()
+    .prepare(
+      `SELECT p.workspace_id as workspaceId,
+              w.scope as workspaceScope
+       FROM projects p
+       INNER JOIN workspaces w ON w.id = p.workspace_id
+       WHERE p.id = ?
+       LIMIT 1`,
+    )
+    .bind(projectId)
+    .first<{ workspaceId: string; workspaceScope: "personal" | "team" | "org" }>();
+  if (!project) throw new Error("Project was not found for archive ingestion.");
+  if (requestedWorkspaceId?.trim() && requestedWorkspaceId.trim() !== project.workspaceId) {
+    throw new Error("Generated artifact workspace did not match the selected project.");
+  }
+  return project;
+}
+
 export function sanitizeUntrustedContext(value: string) {
   return value
     .replace(/<\/?untrusted_context[^>]*>/gi, "[untrusted_context_tag_removed]")
@@ -857,7 +880,7 @@ async function fetchScopedVectorChunkMatches({
   });
 
   const vectorIds = vectorMatches.map((match) => match.id);
-  const chunks = await fetchChunksByIds(vectorIds, { authorization, projectId, teamId });
+  const chunks = await fetchChunksByIds(vectorIds, { authorization, projectId, teamId, workspaceId });
   const scoresById = new Map(vectorMatches.map((match) => [match.id, typeof match.score === "number" ? match.score : null]));
 
   return {
@@ -873,39 +896,45 @@ async function fetchChunksByIds(
     authorization,
     projectId,
     teamId,
+    workspaceId,
   }: {
     authorization: ScopedAccessContext;
     projectId: string;
     teamId?: string | null;
+    workspaceId: string;
   },
 ) {
   if (ids.length === 0) return [];
   const placeholders = ids.map(() => "?").join(", ");
   const filters = [
-    `id IN (${placeholders})`,
-    "project_id = ?",
-    ...(authorization.workspaceScope === "team" && teamId ? ["team_id = ?"] : []),
+    `kc.vector_id IN (${placeholders})`,
+    "kc.workspace_id = ?",
+    "kc.project_id = ?",
+    ...(authorization.workspaceScope === "team" && teamId ? ["kc.team_id = ?"] : []),
     ...(authorization.canAccessConfidentialArtifacts
       ? []
-      : ["COALESCE(sensitivity_label, 'Standard') <> 'Confidential'", "COALESCE(restricted, 0) = 0"]),
+      : ["COALESCE(kc.sensitivity_label, 'Standard') <> 'Confidential'", "COALESCE(kc.restricted, 0) = 0"]),
   ];
-  const bindings = [...ids, projectId, ...(authorization.workspaceScope === "team" && teamId ? [teamId] : [])];
+  const bindings = [...ids, workspaceId, projectId, ...(authorization.workspaceScope === "team" && teamId ? [teamId] : [])];
   const result = await getDb()
     .prepare(
-      `SELECT id,
-              document_name as documentName,
-              project_id as projectId,
-              r2_key as r2Key,
-              content,
-              COALESCE(sensitivity_label, 'Standard') as sensitivityLabel,
-              COALESCE(restricted, 0) as restricted
-       FROM document_chunks
+      `SELECT kc.vector_id as id,
+              kc.title as documentName,
+              kc.item_type as itemType,
+              COALESCE(kc.project_id, '') as projectId,
+              COALESCE(kc.r2_key, ki.source_url, '') as r2Key,
+              kc.content,
+              COALESCE(kc.sensitivity_label, 'Standard') as sensitivityLabel,
+              kc.source_type as sourceType,
+              COALESCE(kc.restricted, 0) as restricted
+       FROM knowledge_chunks kc
+       INNER JOIN knowledge_items ki ON ki.id = kc.item_id
        WHERE ${filters.join("\n         AND ")}`,
     )
     .bind(...bindings)
     .all<DocumentChunkRow>();
 
-  const rowsById = new Map((result.results ?? []).map((row) => [row.id, row]));
+  const rowsById = new Map((result.results ?? []).map((row) => [row.id, row] as const));
   return ids.map((id) => rowsById.get(id)).filter((row): row is DocumentChunkRow => Boolean(row));
 }
 
@@ -2131,7 +2160,7 @@ export async function evaluateIdeaMultiAgent(
 export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
   .validator((data: IngestGeneratedArtifactInput) => data)
   .handler(async ({ data }): Promise<IngestGeneratedArtifactResult> => {
-    const teamId = assertRequiredString(data.teamId, "Team ID");
+    const teamId = data.teamId?.trim() || null;
     const projectId = assertRequiredString(data.projectId, "Project ID");
     const documentName = safeFileName(assertRequiredString(data.fileName, "File name"));
     const rawText = assertRequiredString(data.rawText, "Raw text");
@@ -2139,6 +2168,7 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
     const restricted = data.restricted || sensitivityLabel === "Confidential";
 
     await requireProjectAccessByProjectId(teamId, projectId);
+    const archiveScope = await fetchProjectArchiveScope(projectId, data.workspaceId);
 
     const r2Key = createR2Key(teamId, projectId, documentName);
     await getBucket().put(r2Key, rawText, {
@@ -2146,7 +2176,9 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
         contentType: contentTypeFor(documentName),
       },
       customMetadata: {
-        team_id: teamId,
+        workspace_id: archiveScope.workspaceId,
+        workspace_scope: archiveScope.workspaceScope,
+        team_id: teamId ?? "",
         project_id: projectId,
         document_name: documentName,
         confidentiality: sensitivityLabel,
@@ -2155,12 +2187,24 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
     });
 
     await getQueue().send({
-      kind: "scoped-rag-generated-artifact",
-      r2Key,
-      documentName,
-      workspaceId: data.workspaceId?.trim() || undefined,
-      teamId,
+      kind: "knowledge-item-upsert",
+      itemId: `rag-artifact-${crypto.randomUUID()}`,
+      itemType: "artifact",
+      sourceType: "rag",
+      title: documentName,
+      workspaceId: archiveScope.workspaceId,
+      workspaceScope: archiveScope.workspaceScope,
+      teamId: archiveScope.workspaceScope === "team" ? teamId : null,
       projectId,
+      r2Key,
+      contentType: contentTypeFor(documentName),
+      sensitivityLabel,
+      restricted,
+      metadata: {
+        generatedBy: "scoped-rag",
+        fileName: documentName,
+      },
+      embeddingFeature: "generated-artifact-embedding",
     });
 
     setResponseStatus(202);
@@ -2274,6 +2318,7 @@ export async function searchScopedKnowledgeForCurrentUser(data: ScopedKnowledgeS
       id: match.id,
       documentName: match.documentName,
       excerpt: buildSearchExcerpt(match.content, query),
+      itemType: match.itemType,
       projectId: match.projectId,
       r2Key: match.r2Key,
       rank: index + 1,
@@ -2281,6 +2326,7 @@ export async function searchScopedKnowledgeForCurrentUser(data: ScopedKnowledgeS
       score: match.score,
       sensitivityLabel: match.sensitivityLabel,
       source: "vector",
+      sourceType: match.sourceType,
     })),
     diagnostics: {
       durationMs: Date.now() - startedAt,

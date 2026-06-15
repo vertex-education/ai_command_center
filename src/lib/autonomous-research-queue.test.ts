@@ -136,6 +136,21 @@ describe("autonomous research queue", () => {
     expect(metadata.source_domain).toBe("docs.example.com");
   });
 
+  it("does not synthesize a team id for non-team autonomous research metadata", () => {
+    const metadata = buildAutonomousResearchVectorMetadata(
+      { ...job, teamId: null, workspaceId: "ws-org", workspaceMode: "Org" },
+      {
+        markdown: "# Content",
+        query: "org project query",
+        title: "Org guide",
+        url: "https://docs.example.com/org",
+      },
+    );
+
+    expect(metadata.team_id).toBeUndefined();
+    expect(metadata.workspace_id).toBe("ws-org");
+  });
+
   it("normalizes trigger input into a queue job", () => {
     expect(
       buildAutonomousResearchJob({

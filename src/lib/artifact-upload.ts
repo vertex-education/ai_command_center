@@ -5,7 +5,7 @@ import { setResponseStatus } from "@tanstack/react-start/server";
 import { getRequest } from "@tanstack/start-server-core";
 import { env } from "cloudflare:workers";
 import { getAuth } from "@/lib/auth";
-import type { DocumentIngestionJob, ScopeLevel } from "@/lib/document-ingestion-queue";
+import { customTagsIndexValue, inferSensitivityLabel, type DocumentIngestionJob, type ScopeLevel } from "@/lib/document-ingestion-queue";
 
 export type { ScopeLevel } from "@/lib/document-ingestion-queue";
 
@@ -116,6 +116,31 @@ function createR2Key(scopeLevel: ScopeLevel, scopeId: string, fileName: string) 
   return `uploads/${scopeLevel}/${encodeURIComponent(scopeId)}/${new Date().toISOString().slice(0, 10)}/${crypto.randomUUID()}${extension}`;
 }
 
+async function resolveKnowledgeScope(scopeLevel: ScopeLevel, projectId: string | null) {
+  if (projectId) {
+    const project = await getDb()
+      .prepare(
+        `SELECT p.workspace_id as workspaceId,
+                w.scope as workspaceScope
+         FROM projects p
+         INNER JOIN workspaces w ON w.id = p.workspace_id
+         WHERE p.id = ?
+         LIMIT 1`,
+      )
+      .bind(projectId)
+      .first<{ workspaceId: string; workspaceScope: ScopeLevel }>();
+    if (!project) throw new Error("Project was not found for artifact upload.");
+    return project;
+  }
+
+  const workspace = await getDb()
+    .prepare("SELECT id as workspaceId, scope as workspaceScope FROM workspaces WHERE scope = ? LIMIT 1")
+    .bind(scopeLevel)
+    .first<{ workspaceId: string; workspaceScope: ScopeLevel }>();
+  if (!workspace) throw new Error(`Workspace was not found for ${scopeLevel} uploads.`);
+  return workspace;
+}
+
 function getUploadFile(formData: FormData) {
   const file = formData.get("file");
   if (!(file instanceof File)) throw new Error("File is required.");
@@ -137,8 +162,10 @@ export const uploadArtifact = createServerFn({ method: "POST" })
     const customTags = parseTags(optionalString(data, "custom_tags"));
     const artifactId = `artifact-${crypto.randomUUID()}`;
     const r2Key = createR2Key(scopeLevel, scopeId, originalFilename);
-    const now = new Date().toISOString();
     const fileBuffer = await file.arrayBuffer();
+    const knowledgeScope = await resolveKnowledgeScope(scopeLevel, projectId);
+    const sensitivityLabel = inferSensitivityLabel({ customTags, documentName: originalFilename });
+    const restricted = sensitivityLabel === "Confidential";
 
     await getBucket().put(r2Key, fileBuffer, {
       httpMetadata: {
@@ -147,63 +174,42 @@ export const uploadArtifact = createServerFn({ method: "POST" })
       customMetadata: {
         artifact_id: artifactId,
         original_filename: originalFilename,
+        workspace_id: knowledgeScope.workspaceId,
+        workspace_scope: knowledgeScope.workspaceScope,
         scope_level: scopeLevel,
         scope_id: scopeId,
         project_id: projectId ?? "",
         document_type: documentType,
         custom_tags: customTags.join(","),
+        confidentiality: sensitivityLabel,
+        restricted: restricted ? "true" : "false",
       },
     });
 
-    await getDb()
-      .prepare(
-        `INSERT INTO artifacts_registry (
-          id,
-          original_filename,
-          mime_type,
-          file_size,
-          r2_key,
-          scope_level,
-          scope_id,
-          project_id,
-          document_type,
-          custom_tags_json,
-          status,
-          uploaded_by_user_id,
-          created_at,
-          updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-      )
-      .bind(
-        artifactId,
-        originalFilename,
-        mimeType,
-        file.size,
-        r2Key,
-        scopeLevel,
-        scopeId,
-        projectId,
-        documentType,
-        JSON.stringify(customTags),
-        userId,
-        now,
-        now,
-      )
-      .run();
-
     await getQueue().send(
       {
-        kind: "artifact-registry-upload",
-        artifactId,
-        r2Key,
-        originalFilename,
-        mimeType,
-        fileSize: file.size,
-        scopeLevel,
-        scopeId,
+        kind: "knowledge-item-upsert",
+        itemId: artifactId,
+        itemType: "artifact",
+        sourceType: "upload",
+        title: originalFilename,
+        workspaceId: knowledgeScope.workspaceId,
+        workspaceScope: knowledgeScope.workspaceScope,
+        teamId: knowledgeScope.workspaceScope === "team" ? scopeId : null,
         projectId,
-        documentType,
-        customTags,
+        r2Key,
+        contentType: mimeType,
+        sensitivityLabel,
+        restricted,
+        metadata: {
+          documentType,
+          fileSize: file.size,
+          scopeLevel,
+          scopeId,
+          uploadedByUserId: userId,
+          customTags: customTagsIndexValue(customTags),
+        },
+        embeddingFeature: "uploaded-artifact-embedding",
       },
       { contentType: "json" },
     );
