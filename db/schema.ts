@@ -10,7 +10,7 @@ export const user = sqliteTable(
     image: text("image"),
     createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
     updatedAt: integer("updatedAt", { mode: "timestamp_ms" }).notNull(),
-    role: text("role").notNull().default("user"),
+    role: text("role").notNull().default("contributor"),
     banned: integer("banned", { mode: "boolean" }).notNull().default(false),
     banReason: text("banReason"),
     banExpires: integer("banExpires", { mode: "timestamp_ms" }),
@@ -35,10 +35,12 @@ export const session = sqliteTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     impersonatedBy: text("impersonatedBy"),
+    activeOrganizationId: text("activeOrganizationId"),
   },
   (table) => ({
     tokenIdx: uniqueIndex("session_token_idx").on(table.token),
     userIdx: index("session_user_idx").on(table.userId),
+    activeOrganizationIdx: index("session_active_organization_idx").on(table.activeOrganizationId),
   }),
 );
 
@@ -82,15 +84,72 @@ export const verification = sqliteTable(
   }),
 );
 
+export const authOrganization = sqliteTable(
+  "organization",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    logo: text("logo"),
+    createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
+    metadata: text("metadata"),
+  },
+  (table) => ({
+    slugIdx: uniqueIndex("organization_slug_idx").on(table.slug),
+  }),
+);
+
+export const authMember = sqliteTable(
+  "member",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organizationId")
+      .notNull()
+      .references(() => authOrganization.id, { onDelete: "cascade" }),
+    userId: text("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role").notNull(),
+    createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    userIdx: index("member_user_id_idx").on(table.userId),
+    organizationIdx: index("member_organization_id_idx").on(table.organizationId),
+    userOrganizationIdx: uniqueIndex("member_user_organization_idx").on(table.userId, table.organizationId),
+  }),
+);
+
+export const authInvitation = sqliteTable(
+  "invitation",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organizationId")
+      .notNull()
+      .references(() => authOrganization.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    role: text("role"),
+    status: text("status").notNull().default("pending"),
+    expiresAt: integer("expiresAt", { mode: "timestamp_ms" }).notNull(),
+    inviterId: text("inviterId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    createdAt: integer("createdAt", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => ({
+    organizationIdx: index("invitation_organization_id_idx").on(table.organizationId),
+    emailIdx: index("invitation_email_idx").on(table.email),
+  }),
+);
+
 export const authInvites = sqliteTable(
   "auth_invites",
   {
     id: text("id").primaryKey(),
     email: text("email").notNull(),
     name: text("name").notNull(),
-    role: text("role", { enum: ["admin", "user", "viewer"] })
+    role: text("role", { enum: ["admin", "manager", "contributor", "user", "viewer"] })
       .notNull()
-      .default("user"),
+      .default("contributor"),
     tokenHash: text("token_hash").notNull(),
     invitedByUserId: text("invited_by_user_id").references(() => user.id, { onDelete: "set null" }),
     expiresAt: integer("expires_at", { mode: "timestamp_ms" }).notNull(),
@@ -283,6 +342,7 @@ export const risks = sqliteTable(
     projectId: text("project_id")
       .notNull()
       .references(() => projects.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
     description: text("description").notNull(),
     severity: text("severity", { enum: ["low", "medium", "high", "critical"] }).notNull(),
     status: text("status").notNull().default("open"),
@@ -446,6 +506,7 @@ export const workspaceActions = sqliteTable(
     pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
     asanaTaskGid: text("asana_task_gid"),
     asanaSyncedAt: integer("asana_synced_at", { mode: "timestamp_ms" }),
+    asanaSyncQueuedAt: integer("asana_sync_queued_at", { mode: "timestamp_ms" }),
     asanaSyncError: text("asana_sync_error"),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
@@ -479,6 +540,44 @@ export const adminUsageEvents = sqliteTable(
     providerIdx: index("admin_usage_events_provider_idx").on(table.provider, table.createdAt),
     scopeIdx: index("admin_usage_events_scope_idx").on(table.teamId, table.projectId, table.createdAt),
     chatIdx: index("admin_usage_events_chat_idx").on(table.chatId, table.createdAt),
+  }),
+);
+
+export const scheduledTasks = sqliteTable(
+  "scheduled_tasks",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").references(() => authOrganization.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
+    type: text("type", { enum: ["Weekly Briefing", "Background Research", "Artifact Validation"] }).notNull(),
+    status: text("status", { enum: ["pending", "running", "completed", "failed", "paused"] })
+      .notNull()
+      .default("pending"),
+    enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+    priority: integer("priority").notNull().default(0),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    scheduleJson: text("schedule_json").notNull().default("{}"),
+    nextRunAt: integer("next_run_at", { mode: "timestamp_ms" }).notNull(),
+    intervalMinutes: integer("interval_minutes"),
+    retryDelayMinutes: integer("retry_delay_minutes").notNull().default(15),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    lockedAt: integer("locked_at", { mode: "timestamp_ms" }),
+    lastRunAt: integer("last_run_at", { mode: "timestamp_ms" }),
+    lastCompletedAt: integer("last_completed_at", { mode: "timestamp_ms" }),
+    lastError: text("last_error"),
+    resultJson: text("result_json"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    dueIdx: index("scheduled_tasks_due_idx").on(table.enabled, table.status, table.nextRunAt, table.priority),
+    orgTypeIdx: index("scheduled_tasks_org_type_idx").on(table.organizationId, table.type, table.status, table.nextRunAt),
+    workspaceIdx: index("scheduled_tasks_workspace_idx").on(table.workspaceId, table.status, table.nextRunAt),
   }),
 );
 

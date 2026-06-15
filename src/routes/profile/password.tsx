@@ -8,11 +8,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/profile/password")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },

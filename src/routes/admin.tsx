@@ -1,16 +1,17 @@
 import { Outlet, createFileRoute, redirect, useRouterState } from "@tanstack/react-router";
-import { Activity, ArrowLeft, BarChart3, UsersRound } from "lucide-react";
+import { Activity, ArrowLeft, BarChart3, CalendarClock, UsersRound } from "lucide-react";
 import { AuthenticatedAppRail } from "@/components/AuthenticatedAppRail";
 import { VertexAIBrand } from "@/components/VertexAIBrand";
 import { Button } from "@/components/ui/button";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { isAdminRole } from "@/lib/auth-access-control";
+import { getSession } from "@/lib/auth-workflow";
 import { cn } from "@/lib/utils";
 
 export const Route = createFileRoute("/admin")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
-    if (session.user.role !== "admin") throw redirect({ to: "/" });
+    if (!isAdminRole(session.user.role)) throw redirect({ to: "/" });
     return { session };
   },
   head: () => ({
@@ -22,6 +23,7 @@ export const Route = createFileRoute("/admin")({
 const adminTabs = [
   { href: "/admin", label: "Dashboard", icon: BarChart3 },
   { href: "/admin/users", label: "Users", icon: UsersRound },
+  { href: "/admin/scheduled-tasks", label: "Scheduled Tasks", icon: CalendarClock },
 ] as const;
 
 function AdminLayout() {

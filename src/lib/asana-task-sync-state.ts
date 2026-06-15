@@ -1,8 +1,9 @@
-export const asanaTaskSyncColumnNames = ["asana_task_gid", "asana_synced_at", "asana_sync_error"] as const;
+export const asanaTaskSyncColumnNames = ["asana_task_gid", "asana_synced_at", "asana_sync_queued_at", "asana_sync_error"] as const;
 
 export type PersistedWorkflowActionRowWithOptionalAsanaSync<T extends object> = T & {
   asanaTaskGid: string | null;
   asanaSyncedAt: number | null;
+  asanaSyncQueuedAt: number | null;
   asanaSyncError: string | null;
 };
 
@@ -17,6 +18,7 @@ export function withDefaultAsanaSyncState<T extends object>(row: T): PersistedWo
     ...row,
     asanaTaskGid: null,
     asanaSyncedAt: null,
+    asanaSyncQueuedAt: null,
     asanaSyncError: null,
   };
 }
@@ -29,15 +31,27 @@ export function getTaskAsanaSyncControlState({
   canEdit,
   isSyncing,
   asanaTaskGid,
+  asanaSyncError,
+  asanaSyncQueuedAt,
 }: {
   canEdit: boolean;
   isSyncing: boolean;
   asanaTaskGid?: string | null;
+  asanaSyncError?: string | null;
+  asanaSyncQueuedAt?: number | null;
 }) {
   if (asanaTaskGid) {
     return {
       disabled: true,
       label: "Synced",
+      visible: true,
+    } as const;
+  }
+
+  if (asanaSyncQueuedAt && !asanaSyncError) {
+    return {
+      disabled: true,
+      label: "Queued",
       visible: true,
     } as const;
   }
@@ -52,7 +66,7 @@ export function getTaskAsanaSyncControlState({
 
   return {
     disabled: isSyncing,
-    label: isSyncing ? "Syncing..." : "Sync to Asana",
+    label: isSyncing ? "Queueing..." : asanaSyncError ? "Retry Sync" : "Sync to Asana",
     visible: true,
   } as const;
 }

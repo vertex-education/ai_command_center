@@ -28,10 +28,10 @@ import { Route as ApiChatEventsRouteImport } from './routes/api/chat-events'
 import { Route as ApiAsanaWebhookRouteImport } from './routes/api/asana-webhook'
 import { Route as ApiArtifactsRouteImport } from './routes/api/artifacts'
 import { Route as AdminUsersRouteImport } from './routes/admin/users'
+import { Route as AdminScheduledTasksRouteImport } from './routes/admin/scheduled-tasks'
 import { Route as ApiGraphWebhooksRouteImport } from './routes/api/graph/webhooks'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as ApiAsanaOauthCallbackRouteImport } from './routes/api/asana/oauth/callback'
-import { Route as WorkspaceWorkspaceIdProjectProjectIdRisksRouteImport } from './routes/workspace/$workspaceId/project/$projectId/risks'
 
 const SignInRoute = SignInRouteImport.update({
   id: '/sign-in',
@@ -128,6 +128,11 @@ const AdminUsersRoute = AdminUsersRouteImport.update({
   path: '/users',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminScheduledTasksRoute = AdminScheduledTasksRouteImport.update({
+  id: '/scheduled-tasks',
+  path: '/scheduled-tasks',
+  getParentRoute: () => AdminRoute,
+} as any)
 const ApiGraphWebhooksRoute = ApiGraphWebhooksRouteImport.update({
   id: '/api/graph/webhooks',
   path: '/api/graph/webhooks',
@@ -143,12 +148,6 @@ const ApiAsanaOauthCallbackRoute = ApiAsanaOauthCallbackRouteImport.update({
   path: '/api/asana/oauth/callback',
   getParentRoute: () => rootRouteImport,
 } as any)
-const WorkspaceWorkspaceIdProjectProjectIdRisksRoute =
-  WorkspaceWorkspaceIdProjectProjectIdRisksRouteImport.update({
-    id: '/workspace/$workspaceId/project/$projectId/risks',
-    path: '/workspace/$workspaceId/project/$projectId/risks',
-    getParentRoute: () => rootRouteImport,
-  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -157,6 +156,7 @@ export interface FileRoutesByFullPath {
   '/docs': typeof DocsRoute
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
   '/api/asana-webhook': typeof ApiAsanaWebhookRoute
@@ -173,13 +173,13 @@ export interface FileRoutesByFullPath {
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/graph/webhooks': typeof ApiGraphWebhooksRoute
   '/api/asana/oauth/callback': typeof ApiAsanaOauthCallbackRoute
-  '/workspace/$workspaceId/project/$projectId/risks': typeof WorkspaceWorkspaceIdProjectProjectIdRisksRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/accept-invite': typeof AcceptInviteRoute
   '/docs': typeof DocsRoute
   '/sign-in': typeof SignInRoute
+  '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
   '/api/asana-webhook': typeof ApiAsanaWebhookRoute
@@ -196,7 +196,6 @@ export interface FileRoutesByTo {
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/graph/webhooks': typeof ApiGraphWebhooksRoute
   '/api/asana/oauth/callback': typeof ApiAsanaOauthCallbackRoute
-  '/workspace/$workspaceId/project/$projectId/risks': typeof WorkspaceWorkspaceIdProjectProjectIdRisksRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -206,6 +205,7 @@ export interface FileRoutesById {
   '/docs': typeof DocsRoute
   '/profile': typeof ProfileRouteWithChildren
   '/sign-in': typeof SignInRoute
+  '/admin/scheduled-tasks': typeof AdminScheduledTasksRoute
   '/admin/users': typeof AdminUsersRoute
   '/api/artifacts': typeof ApiArtifactsRoute
   '/api/asana-webhook': typeof ApiAsanaWebhookRoute
@@ -222,7 +222,6 @@ export interface FileRoutesById {
   '/api/auth/$': typeof ApiAuthSplatRoute
   '/api/graph/webhooks': typeof ApiGraphWebhooksRoute
   '/api/asana/oauth/callback': typeof ApiAsanaOauthCallbackRoute
-  '/workspace/$workspaceId/project/$projectId/risks': typeof WorkspaceWorkspaceIdProjectProjectIdRisksRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -233,6 +232,7 @@ export interface FileRouteTypes {
     | '/docs'
     | '/profile'
     | '/sign-in'
+    | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
     | '/api/asana-webhook'
@@ -249,13 +249,13 @@ export interface FileRouteTypes {
     | '/api/auth/$'
     | '/api/graph/webhooks'
     | '/api/asana/oauth/callback'
-    | '/workspace/$workspaceId/project/$projectId/risks'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/accept-invite'
     | '/docs'
     | '/sign-in'
+    | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
     | '/api/asana-webhook'
@@ -272,7 +272,6 @@ export interface FileRouteTypes {
     | '/api/auth/$'
     | '/api/graph/webhooks'
     | '/api/asana/oauth/callback'
-    | '/workspace/$workspaceId/project/$projectId/risks'
   id:
     | '__root__'
     | '/'
@@ -281,6 +280,7 @@ export interface FileRouteTypes {
     | '/docs'
     | '/profile'
     | '/sign-in'
+    | '/admin/scheduled-tasks'
     | '/admin/users'
     | '/api/artifacts'
     | '/api/asana-webhook'
@@ -297,7 +297,6 @@ export interface FileRouteTypes {
     | '/api/auth/$'
     | '/api/graph/webhooks'
     | '/api/asana/oauth/callback'
-    | '/workspace/$workspaceId/project/$projectId/risks'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -316,7 +315,6 @@ export interface RootRouteChildren {
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiGraphWebhooksRoute: typeof ApiGraphWebhooksRoute
   ApiAsanaOauthCallbackRoute: typeof ApiAsanaOauthCallbackRoute
-  WorkspaceWorkspaceIdProjectProjectIdRisksRoute: typeof WorkspaceWorkspaceIdProjectProjectIdRisksRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -454,6 +452,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminUsersRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/scheduled-tasks': {
+      id: '/admin/scheduled-tasks'
+      path: '/scheduled-tasks'
+      fullPath: '/admin/scheduled-tasks'
+      preLoaderRoute: typeof AdminScheduledTasksRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/api/graph/webhooks': {
       id: '/api/graph/webhooks'
       path: '/api/graph/webhooks'
@@ -475,22 +480,17 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiAsanaOauthCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/workspace/$workspaceId/project/$projectId/risks': {
-      id: '/workspace/$workspaceId/project/$projectId/risks'
-      path: '/workspace/$workspaceId/project/$projectId/risks'
-      fullPath: '/workspace/$workspaceId/project/$projectId/risks'
-      preLoaderRoute: typeof WorkspaceWorkspaceIdProjectProjectIdRisksRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
 interface AdminRouteChildren {
+  AdminScheduledTasksRoute: typeof AdminScheduledTasksRoute
   AdminUsersRoute: typeof AdminUsersRoute
   AdminIndexRoute: typeof AdminIndexRoute
 }
 
 const AdminRouteChildren: AdminRouteChildren = {
+  AdminScheduledTasksRoute: AdminScheduledTasksRoute,
   AdminUsersRoute: AdminUsersRoute,
   AdminIndexRoute: AdminIndexRoute,
 }
@@ -532,8 +532,6 @@ const rootRouteChildren: RootRouteChildren = {
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiGraphWebhooksRoute: ApiGraphWebhooksRoute,
   ApiAsanaOauthCallbackRoute: ApiAsanaOauthCallbackRoute,
-  WorkspaceWorkspaceIdProjectProjectIdRisksRoute:
-    WorkspaceWorkspaceIdProjectProjectIdRisksRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

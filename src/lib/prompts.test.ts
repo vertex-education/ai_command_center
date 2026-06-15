@@ -41,11 +41,20 @@ describe("VertexAI prompt construction", () => {
   it("builds a viewer-safe inference authorization directive", () => {
     const directive = buildInferenceAuthorizationDirective({
       role: "viewer",
+      roleLabel: "Viewer",
       canModifyState: false,
       canAccessConfidentialArtifacts: false,
+      entityPermissions: {
+        workspaces: { create: false, read: true, update: false, delete: false },
+        projects: { create: false, read: true, update: false, delete: false },
+        artifacts: { create: false, read: true, update: false, delete: false },
+        risks: { create: false, read: true, update: false, delete: false },
+      },
     });
 
-    expect(directive).toContain("role of viewer");
+    expect(directive).toContain("role of Viewer (viewer)");
+    expect(directive).toContain("Viewer is strictly read-only");
+    expect(directive).toContain("- artifacts: read.");
     expect(directive).toContain("State modification allowed: no.");
     expect(directive).toContain("Confidential artifact access allowed: no.");
     expect(directive).toContain("this directive wins");

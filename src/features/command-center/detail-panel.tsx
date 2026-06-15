@@ -11,6 +11,7 @@ import {
   Share2,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Star,
   Trash2,
 } from "lucide-react";
@@ -63,6 +64,7 @@ export function DetailPanel({
   task,
   workspaceTitle,
   onClose,
+  onPatchArtifact,
   onPreviewArtifact,
   onPreviewWorkflow,
   onRestoreArtifactVersion,
@@ -97,6 +99,7 @@ export function DetailPanel({
   task?: Task;
   workspaceTitle: string;
   onClose: () => void;
+  onPatchArtifact: (artifact: Artifact) => void;
   onPreviewArtifact: (artifact: Artifact) => void;
   onPreviewWorkflow: (preview: NonNullable<WorkflowPreviewState>) => void;
   onRestoreArtifactVersion: (artifactId: string) => void;
@@ -156,6 +159,7 @@ export function DetailPanel({
           activeMode={activeMode}
           artifact={artifact}
           canEdit={canEdit}
+          onPatchArtifact={onPatchArtifact}
           onPreviewArtifact={onPreviewArtifact}
           onRestoreArtifactVersion={onRestoreArtifactVersion}
           onShare={onShare}
@@ -209,7 +213,7 @@ export function DetailPanel({
         <WorkflowMetadata
           icon={ShieldAlert}
           label="Risk"
-          title={risk.description}
+          title={risk.title}
           detail={`${risk.severity.toUpperCase()} / ${risk.status}${risk.mitigationStrategy ? " / Mitigation drafted" : ""}`}
           originalText={risk.mitigationStrategy || risk.description}
           isPinned={false}
@@ -220,7 +224,7 @@ export function DetailPanel({
           action={
             <Button type="button" variant="outline" size="sm" onClick={onManageRisks}>
               <ShieldAlert />
-              Manage Risks
+              Risk Grid
             </Button>
           }
         />
@@ -528,6 +532,7 @@ export function ArtifactDetail({
   activeMode,
   artifact,
   canEdit,
+  onPatchArtifact,
   onPreviewArtifact,
   onRestoreArtifactVersion,
   onShare,
@@ -536,6 +541,7 @@ export function ArtifactDetail({
   activeMode: WorkspaceMode;
   artifact: Artifact;
   canEdit: boolean;
+  onPatchArtifact: (artifact: Artifact) => void;
   onPreviewArtifact: (artifact: Artifact) => void;
   onRestoreArtifactVersion: (artifactId: string) => void;
   onShare: () => void;
@@ -573,6 +579,12 @@ export function ArtifactDetail({
             <Button type="button" variant="outline" onClick={onShare}>
               <Share2 />
               Share
+            </Button>
+          ) : null}
+          {canEdit ? (
+            <Button type="button" variant="outline" onClick={() => onPatchArtifact(artifact)}>
+              <Sparkles />
+              AI diff
             </Button>
           ) : null}
           <Button asChild>

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { type ColumnDef } from "@tanstack/react-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
 } from "@/lib/pmo-data";
 import { SectionHeader } from "./layout";
 import { DataTable, ScoreCell, SeverityBadge, StatusBadge } from "./common";
+import { RiskView } from "./workflow";
 
 export type ChatTableRow = {
   id: string;
@@ -39,17 +40,48 @@ export type PromptTableRow = {
 export function CategoryTablePage({
   activeMode,
   canEdit,
+  generatingRiskId,
   rail,
+  selectedRiskId,
   workspace,
+  onGenerateRiskMitigation,
+  onPreviewRisk,
+  onSelectRisk,
   onUsePrompt,
 }: {
   activeMode: WorkspaceMode;
   canEdit: boolean;
+  generatingRiskId?: string | null;
   rail: Exclude<RailName, "Workspaces">;
+  selectedRiskId?: string | null;
   workspace: ScopedWorkspaceState;
+  onGenerateRiskMitigation: (risk: Risk) => void;
+  onPreviewRisk: (risk: Risk) => void;
+  onSelectRisk: (risk: Risk) => void;
   onUsePrompt: (prompt: string) => void;
 }) {
   const scopeLabel = workspaceModeLabel(activeMode);
+  const [riskSearchTerm, setRiskSearchTerm] = useState("");
+
+  if (rail === "Risks") {
+    return (
+      <section className="scrollbar-thin min-h-0 overflow-auto p-4 lg:p-6">
+        <RiskView
+          canEdit={canEdit}
+          generatingRiskId={generatingRiskId}
+          projects={workspace.projects}
+          risks={workspace.risks}
+          scopeLabel={scopeLabel}
+          searchTerm={riskSearchTerm}
+          selectedRiskId={selectedRiskId}
+          onGenerateMitigation={onGenerateRiskMitigation}
+          onPreview={onPreviewRisk}
+          onSearchTerm={setRiskSearchTerm}
+          onSelect={onSelectRisk}
+        />
+      </section>
+    );
+  }
 
   return (
     <section className="scrollbar-thin min-h-0 overflow-auto p-4 lg:p-6">
@@ -64,7 +96,6 @@ export function CategoryTablePage({
       {rail === "Decisions" ? <DecisionsTable decisions={workspace.decisions} /> : null}
       {rail === "Approvals" ? <ApprovalsTable approvals={workspace.approvals} /> : null}
       {rail === "Tasks" ? <TasksTable tasks={workspace.tasks} /> : null}
-      {rail === "Risks" ? <RisksTable risks={workspace.risks} /> : null}
       {rail === "Prompts" ? <PromptsTable canEdit={canEdit} scopeLabel={scopeLabel} onUsePrompt={onUsePrompt} /> : null}
     </section>
   );
@@ -194,7 +225,8 @@ export function TasksTable({ tasks }: { tasks: Task[] }) {
 export function RisksTable({ risks }: { risks: Risk[] }) {
   const columns = useMemo<ColumnDef<Risk>[]>(
     () => [
-      { accessorKey: "description", header: "Risk" },
+      { accessorKey: "title", header: "Risk" },
+      { accessorKey: "description", header: "Description" },
       { accessorKey: "severity", header: "Severity", cell: ({ row }) => <SeverityBadge severity={row.original.severity} /> },
       { accessorKey: "status", header: "Status" },
       {

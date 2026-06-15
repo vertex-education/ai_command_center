@@ -4,19 +4,29 @@ import { env } from "cloudflare:workers";
 import { queryOptions } from "@tanstack/react-query";
 import { createServerFn } from "@tanstack/react-start";
 import { getRequest } from "@tanstack/start-server-core";
+import { publishAutonomousResearchTrigger, type AutonomousResearchProducerEnv } from "@/lib/autonomous-research-queue";
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
 import {
-  createAsanaTaskForWorkflowTaskForCurrentUser,
+  enqueueAsanaTaskSyncForWorkflowTaskForCurrentUser,
   fetchAsanaProjectContextForCurrentUser,
   getAsanaTaskAutoSyncEnabledForCurrentUser,
 } from "@/lib/asana-integration.server";
 import { isMissingAsanaSyncColumnError, normalizePersistedTaskStatus, withDefaultAsanaSyncState } from "@/lib/asana-task-sync-state";
+import {
+  applyArtifactPatches,
+  normalizeArtifactPatchActions,
+  type ArtifactPatchAction,
+  type ArtifactPatchApplyResult,
+} from "@/lib/artifact-diff";
+import { roleCanModifyState } from "@/lib/auth-access-control";
 import { getAuth } from "@/lib/auth";
+import { assertMutableChatThread } from "@/lib/briefing-thread";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
 import { xlsxBlobFromRows, type ExportTable } from "@/lib/chat-export";
 import type { ChatOperationalEntity } from "@/lib/chat-entities";
 import {
+  artifactDiffModelId,
   aiUnavailableMessage,
   buildVertexAiSystemPrompt,
   emptyAiResponseMessage,
@@ -132,6 +142,36 @@ export type Artifact = {
 
 export type ArtifactVersion = Omit<Artifact, "versionHistory" | "clientStatus">;
 
+export type ArtifactPatchDraftInput = {
+  mode: WorkspaceMode;
+  artifactId: string;
+  instruction: string;
+};
+
+export type ArtifactPatchDraftResult = {
+  artifactId: string;
+  baseArtifactId: string;
+  baseR2Key: string;
+  baseText: string;
+  baseVersion: number;
+  model: string;
+  patchSequence: string;
+  warnings: string[];
+};
+
+export type CommitArtifactPatchInput = {
+  mode: WorkspaceMode;
+  artifactId: string;
+  baseR2Key: string;
+  patches: ArtifactPatchAction[];
+  commitMessage?: string;
+};
+
+export type CommitArtifactPatchResult = {
+  artifact: Artifact;
+  workspace: PmoWorkspaceState;
+};
+
 export type Decision = {
   id: string;
   projectId: string | null;
@@ -165,6 +205,7 @@ export type Task = {
   status: "Open" | "Completed";
   asanaTaskGid?: string | null;
   asanaSyncedAt?: number | null;
+  asanaSyncQueuedAt?: number | null;
   asanaSyncError?: string | null;
   pinned?: boolean;
   clientStatus?: "pending";
@@ -175,6 +216,7 @@ export type RiskSeverity = "low" | "medium" | "high" | "critical";
 export type Risk = {
   id: string;
   projectId: string | null;
+  title: string;
   description: string;
   severity: RiskSeverity;
   status: string;
@@ -183,11 +225,13 @@ export type Risk = {
 
 export type CreateTaskInput = {
   mode: WorkspaceMode;
+  teamId?: string | null;
   projectId?: string | null;
   title: string;
   originalText?: string;
   owner?: string;
   source?: string;
+  syncToAsana?: boolean;
 };
 
 export type CreateWorkflowSuggestionInput = CreateTaskInput;
@@ -299,6 +343,7 @@ type SendChatMessageInput = {
 };
 
 type ChatDynamicWorkspaceContext = {
+  workspaceId: string;
   workspaceName: string;
   projectName: string | null;
   projectDescription: string | null;
@@ -367,7 +412,17 @@ export function normalizeGeneratedChatTitle(title: string, fallback: string) {
   return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
 }
 
-async function generateChatTitleFromInitialMessage(context: unknown, text: string) {
+async function generateChatTitleFromInitialMessage(
+  context: unknown,
+  text: string,
+  scope?: {
+    mode?: WorkspaceMode;
+    projectId?: string | null;
+    teamId?: string | null;
+    userId?: string | null;
+    workspaceId?: string | null;
+  },
+) {
   const fallback = conciseChatTitleFromRequest(text);
   const ai = (context as CloudflareContext).cloudflare?.env?.AI;
   if (!ai) return fallback;
@@ -396,9 +451,21 @@ async function generateChatTitleFromInitialMessage(context: unknown, text: strin
           {
             feature: "chat-title",
             signal,
+            identity: {
+              userId: scope?.userId,
+              workspaceId: scope?.workspaceId,
+              teamId: scope?.teamId,
+              projectId: scope?.projectId,
+              scopeType: scope?.mode,
+            },
             metadata: {
               feature: "chat-title",
               model: lightweightChatTitleModelId,
+              mode: scope?.mode ?? null,
+              userId: scope?.userId ?? null,
+              workspaceId: scope?.workspaceId ?? null,
+              teamId: scope?.teamId ?? null,
+              projectId: scope?.projectId ?? null,
             },
           },
         ),
@@ -878,7 +945,15 @@ function fallbackArtifactTitle(seedTitle: string, rows: ExportTable["rows"]) {
   );
 }
 
-async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"]) {
+type GatewayScope = {
+  mode?: WorkspaceMode;
+  projectId?: string | null;
+  teamId?: string | null;
+  userId?: string | null;
+  workspaceId?: string | null;
+};
+
+async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"], scope: GatewayScope = {}) {
   const ai = (env as Env).AI;
   if (!ai) return fallbackArtifactTitle(seedTitle, rows);
   const prompt = [
@@ -907,9 +982,21 @@ async function generateArtifactTitle(seedTitle: string, rows: ExportTable["rows"
           {
             feature: "artifact-title",
             signal,
+            identity: {
+              userId: scope.userId,
+              workspaceId: scope.workspaceId,
+              teamId: scope.teamId,
+              projectId: scope.projectId,
+              scopeType: scope.mode,
+            },
             metadata: {
               feature: "artifact-title",
               model: vertexAiModelId,
+              mode: scope.mode ?? null,
+              userId: scope.userId ?? null,
+              workspaceId: scope.workspaceId ?? null,
+              teamId: scope.teamId ?? null,
+              projectId: scope.projectId ?? null,
             },
           },
         ),
@@ -945,7 +1032,7 @@ function fallbackWorkflowSuggestionTitle(kind: string, title: string) {
   );
 }
 
-async function generateWorkflowSuggestionTitle(kind: "approval" | "decision" | "idea" | "task", title: string) {
+async function generateWorkflowSuggestionTitle(kind: "approval" | "decision" | "idea" | "task", title: string, scope: GatewayScope = {}) {
   const fallback = fallbackWorkflowSuggestionTitle(kind, title);
   const ai = (env as Env).AI;
   if (!ai) return fallback;
@@ -973,9 +1060,21 @@ async function generateWorkflowSuggestionTitle(kind: "approval" | "decision" | "
           {
             feature: `workflow-${kind}-title`,
             signal,
+            identity: {
+              userId: scope.userId,
+              workspaceId: scope.workspaceId,
+              teamId: scope.teamId,
+              projectId: scope.projectId,
+              scopeType: scope.mode,
+            },
             metadata: {
               feature: `workflow-${kind}-title`,
               model: lightweightChatTitleModelId,
+              mode: scope.mode ?? null,
+              userId: scope.userId ?? null,
+              workspaceId: scope.workspaceId ?? null,
+              teamId: scope.teamId ?? null,
+              projectId: scope.projectId ?? null,
             },
           },
         ),
@@ -1278,11 +1377,13 @@ async function runGemmaChat({
   context,
   data,
   existingMessages,
+  userId,
   workspace,
 }: {
   context: unknown;
   data: SendChatMessageInput;
   existingMessages: ChatMessage[];
+  userId: string;
   workspace: ScopedWorkspaceState;
 }): Promise<{ text: string; trace: LlmDevTrace }> {
   const reasoningLevel = normalizeReasoningLevel(data.reasoningLevel);
@@ -1302,7 +1403,8 @@ async function runGemmaChat({
   const workspaceContext: ChatDynamicWorkspaceContext = data.projectId
     ? ((await getDb()
         .prepare(
-          `SELECT w.name as workspaceName,
+          `SELECT w.id as workspaceId,
+                w.name as workspaceName,
                 p.name as projectName,
                 p.description as projectDescription,
                 COALESCE(p.project_instructions, '') as projectInstructions,
@@ -1314,6 +1416,7 @@ async function runGemmaChat({
         )
         .bind(data.projectId)
         .first<ChatDynamicWorkspaceContext>()) ?? {
+        workspaceId: workspaceIdForMode(data.mode),
         workspaceName: `${workspaceModeLabel(data.mode)} Workspace`,
         projectName: null,
         projectDescription: null,
@@ -1322,9 +1425,12 @@ async function runGemmaChat({
       })
     : {
         ...((await getDb()
-          .prepare("SELECT name as workspaceName FROM workspaces WHERE scope = ? LIMIT 1")
+          .prepare("SELECT id as workspaceId, name as workspaceName FROM workspaces WHERE scope = ? LIMIT 1")
           .bind(workspace.scope)
-          .first<{ workspaceName: string }>()) ?? { workspaceName: `${workspaceModeLabel(data.mode)} Workspace` }),
+          .first<{ workspaceId: string; workspaceName: string }>()) ?? {
+          workspaceId: workspaceIdForMode(data.mode),
+          workspaceName: `${workspaceModeLabel(data.mode)} Workspace`,
+        }),
         projectName: null,
         projectDescription: null,
         projectInstructions: null,
@@ -1465,9 +1571,19 @@ async function runGemmaChat({
           projectId: data.projectId,
           chatId: data.chatId,
           signal,
+          identity: {
+            userId,
+            workspaceId: workspaceContext.workspaceId,
+            teamId: data.mode === "Team" ? (data.teamId ?? null) : null,
+            projectId: data.projectId,
+            scopeType: data.mode,
+          },
           metadata: {
             feature: webSearch ? "gemma-chat-web" : "gemma-chat",
             mode: data.mode,
+            userId,
+            workspaceId: workspaceContext.workspaceId,
+            teamId: data.mode === "Team" ? (data.teamId ?? null) : null,
             chatId: data.chatId.slice(0, 80),
             projectId: data.projectId?.slice(0, 80) ?? null,
           },
@@ -1573,17 +1689,28 @@ export function buildAsanaNotesForWorkflowTask(task: Task) {
     .join("\n");
 }
 
-async function createAsanaSyncStateForTask(task: Task) {
-  const asanaTask = await createAsanaTaskForWorkflowTaskForCurrentUser({
+async function queueAsanaSyncForTask(
+  task: Task,
+  {
+    mode,
+    sourceClientId,
+    teamId,
+  }: {
+    mode: WorkspaceMode;
+    sourceClientId: string | null;
+    teamId?: string | null;
+  },
+) {
+  return enqueueAsanaTaskSyncForWorkflowTaskForCurrentUser({
+    mode,
     notes: buildAsanaNotesForWorkflowTask(task),
+    sourceClientId,
+    taskId: task.id,
+    teamId: teamId ?? null,
     title: task.title,
     vertexProjectId: task.projectId,
+    workspaceId: workspaceIdForMode(mode),
   });
-  return {
-    asanaTaskGid: asanaTask.gid,
-    asanaSyncedAt: Date.now(),
-    asanaSyncError: null,
-  } satisfies Pick<Task, "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncError">;
 }
 
 export function boundedScore(value: unknown, fallback: number) {
@@ -1629,10 +1756,12 @@ async function assessIdeaWithGemma({
   context,
   mode,
   idea,
+  userId,
 }: {
   context: unknown;
   mode: WorkspaceMode;
   idea: Pick<Idea, "title" | "originalText" | "category" | "owner" | "summary" | "tags" | "projectId">;
+  userId?: string | null;
 }): Promise<IdeaAssessment> {
   const fallbackImpact = idea.tags.includes("High") ? 86 : idea.tags.includes("Low") ? 46 : 68;
   const fallback: IdeaAssessment = {
@@ -1690,9 +1819,17 @@ async function assessIdeaWithGemma({
             feature: "gemma-idea-assessment",
             projectId: idea.projectId,
             signal,
+            identity: {
+              userId,
+              workspaceId: workspaceIdForMode(mode),
+              projectId: idea.projectId,
+              scopeType: mode,
+            },
             metadata: {
               feature: "idea-assessment",
               mode,
+              userId: userId ?? null,
+              workspaceId: workspaceIdForMode(mode),
               projectId: idea.projectId?.slice(0, 80) ?? null,
             },
           },
@@ -1945,6 +2082,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
     pinned: boolean | number;
     asanaTaskGid: string | null;
     asanaSyncedAt: number | null;
+    asanaSyncQueuedAt: number | null;
     asanaSyncError: string | null;
   }>;
   try {
@@ -1963,6 +2101,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
                 pinned,
                 asana_task_gid as asanaTaskGid,
                 asana_synced_at as asanaSyncedAt,
+                asana_sync_queued_at as asanaSyncQueuedAt,
                 asana_sync_error as asanaSyncError
          FROM workspace_actions`,
       )
@@ -1985,7 +2124,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
                 pinned
          FROM workspace_actions`,
       )
-      .all<Omit<(typeof rows)[number], "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncError">>();
+      .all<Omit<(typeof rows)[number], "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncQueuedAt" | "asanaSyncError">>();
     rows = (fallback.results ?? []).map(withDefaultAsanaSyncState);
   }
 
@@ -2005,6 +2144,7 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
         status: normalizePersistedTaskStatus(),
         asanaTaskGid: row.asanaTaskGid,
         asanaSyncedAt: row.asanaSyncedAt,
+        asanaSyncQueuedAt: row.asanaSyncQueuedAt,
         asanaSyncError: row.asanaSyncError,
         pinned: Boolean(row.pinned),
       };
@@ -2046,6 +2186,7 @@ async function mergePersistedRisks(root: PmoWorkspaceState) {
     id: string;
     workspaceId: string;
     projectId: string | null;
+    title: string;
     description: string;
     severity: RiskSeverity;
     status: string;
@@ -2057,6 +2198,7 @@ async function mergePersistedRisks(root: PmoWorkspaceState) {
         `SELECT id,
                 workspace_id as workspaceId,
                 project_id as projectId,
+                title,
                 description,
                 severity,
                 status,
@@ -2076,6 +2218,7 @@ async function mergePersistedRisks(root: PmoWorkspaceState) {
     const risk: Risk = {
       id: row.id,
       projectId: row.projectId,
+      title: row.title || row.description,
       description: row.description,
       severity: row.severity,
       status: row.status,
@@ -2215,8 +2358,8 @@ async function persistWorkflowAction(mode: WorkspaceMode, kind: "approval" | "de
   await getDb()
     .prepare(
       `INSERT OR REPLACE INTO workspace_actions (
-         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned, asana_task_gid, asana_synced_at, asana_sync_error, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned, asana_task_gid, asana_synced_at, asana_sync_queued_at, asana_sync_error, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       item.id,
@@ -2232,6 +2375,7 @@ async function persistWorkflowAction(mode: WorkspaceMode, kind: "approval" | "de
       item.pinned ? 1 : 0,
       kind === "task" ? ((item as Task).asanaTaskGid ?? null) : null,
       kind === "task" ? ((item as Task).asanaSyncedAt ?? null) : null,
+      kind === "task" ? ((item as Task).asanaSyncQueuedAt ?? null) : null,
       kind === "task" ? ((item as Task).asanaSyncError ?? null) : null,
       Date.now(),
     )
@@ -2253,19 +2397,20 @@ async function updatePersistedWorkflowActionStatus(
 async function updatePersistedTaskAsanaSync(
   mode: WorkspaceMode,
   id: string,
-  sync: { asanaTaskGid: string | null; asanaSyncedAt: number | null; asanaSyncError: string | null },
+  sync: { asanaTaskGid: string | null; asanaSyncedAt: number | null; asanaSyncQueuedAt: number | null; asanaSyncError: string | null },
 ) {
   await getDb()
     .prepare(
       `UPDATE workspace_actions
        SET asana_task_gid = ?,
            asana_synced_at = ?,
+           asana_sync_queued_at = ?,
            asana_sync_error = ?
        WHERE id = ?
          AND workspace_id = ?
          AND kind = 'task'`,
     )
-    .bind(sync.asanaTaskGid, sync.asanaSyncedAt, sync.asanaSyncError, id, workspaceIdForMode(mode))
+    .bind(sync.asanaTaskGid, sync.asanaSyncedAt, sync.asanaSyncQueuedAt, sync.asanaSyncError, id, workspaceIdForMode(mode))
     .run();
 }
 
@@ -2281,6 +2426,7 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
               pinned,
               asana_task_gid as asanaTaskGid,
               asana_synced_at as asanaSyncedAt,
+              asana_sync_queued_at as asanaSyncQueuedAt,
               asana_sync_error as asanaSyncError
        FROM workspace_actions
        WHERE id = ?
@@ -2299,6 +2445,7 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
       pinned: boolean | number;
       asanaTaskGid: string | null;
       asanaSyncedAt: number | null;
+      asanaSyncQueuedAt: number | null;
       asanaSyncError: string | null;
     }>();
   if (!row) return null;
@@ -2313,6 +2460,7 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
     pinned: Boolean(row.pinned),
     asanaTaskGid: row.asanaTaskGid,
     asanaSyncedAt: row.asanaSyncedAt,
+    asanaSyncQueuedAt: row.asanaSyncQueuedAt,
     asanaSyncError: row.asanaSyncError,
   };
 }
@@ -2340,7 +2488,7 @@ async function requireWorkspaceEditor() {
   const request = getRequest();
   const session = await getAuth(request).api.getSession({ headers: request.headers });
   const user = (session as { user?: { id?: string; name?: string | null; email?: string | null; role?: string | null } } | null)?.user;
-  if ((user?.role !== "admin" && user?.role !== "user") || !user.id) {
+  if (!user?.id || !roleCanModifyState(user.role)) {
     throw new Error("Viewer accounts have view-only access.");
   }
   return {
@@ -2390,6 +2538,26 @@ async function recordWorkspaceMutation({
     teamId,
     workspaceId: resolvedWorkspaceId,
   });
+}
+
+async function teamIdForAutonomousResearch(mode: WorkspaceMode, userId: string, projectId: string | null, providedTeamId?: string | null) {
+  if (mode !== "Team") return null;
+  const normalizedTeamId = providedTeamId?.trim();
+  if (normalizedTeamId) return normalizedTeamId;
+  if (!projectId) return null;
+
+  const membership = await getDb()
+    .prepare(
+      `SELECT team_id as teamId
+       FROM project_members
+       WHERE project_id = ?
+         AND user_id = ?
+         AND team_id IS NOT NULL
+       LIMIT 1`,
+    )
+    .bind(projectId, userId)
+    .first<{ teamId: string }>();
+  return membership?.teamId ?? null;
 }
 
 async function requireChatContributor({
@@ -2447,6 +2615,11 @@ async function requireChatContributor({
   if (!membership) throw new Error("You are not a member of this chat.");
 }
 
+async function assertChatAcceptsUserMessages(chatId: string) {
+  const chat = await getDb().prepare("SELECT id, title, description FROM chats WHERE id = ? LIMIT 1").bind(chatId).first<ChatSummary>();
+  assertMutableChatThread(chat);
+}
+
 function chatSyncScopeKey({
   mode,
   teamId,
@@ -2474,6 +2647,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
       teamId: data.teamId,
       userId: user.id,
     });
+    await assertChatAcceptsUserMessages(data.chatId);
     const workspace = getMutableWorkspace(data.mode);
     const conversationKey = getConversationKey(data.mode, data.projectId, data.chatId);
     const text = data.text.trim();
@@ -2481,7 +2655,17 @@ export const sendChatMessage = createServerFn({ method: "POST" })
     if (!text && attachments.length === 0) return { workspace: clone(getMutableRoot()), llmTrace: null };
     const existingMessages = await listPersistedChatMessages(data.chatId);
     const titleSeed = text || attachments.map((attachment) => attachment.name).join(", ");
-    const chatTitle = existingMessages.length === 0 ? await generateChatTitleFromInitialMessage(context, titleSeed) : data.chatTitle;
+    const workspaceId = await getChatWorkspaceId(data.chatId);
+    const chatTitle =
+      existingMessages.length === 0
+        ? await generateChatTitleFromInitialMessage(context, titleSeed, {
+            mode: data.mode,
+            projectId: data.projectId,
+            teamId: data.teamId,
+            userId: user.id,
+            workspaceId,
+          })
+        : data.chatTitle;
 
     const userMessage: ChatMessage = {
       id: createId("msg-user"),
@@ -2496,6 +2680,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
       context,
       data: { ...data, chatTitle, text: userMessage.text, attachments },
       existingMessages,
+      userId: user.id,
       workspace,
     });
     const response: ChatMessage = {
@@ -2506,7 +2691,6 @@ export const sendChatMessage = createServerFn({ method: "POST" })
       text: aiResult.text,
     };
 
-    const workspaceId = await getChatWorkspaceId(data.chatId);
     if (chatTitle !== data.chatTitle) {
       await getDb().prepare("UPDATE chats SET title = ? WHERE id = ?").bind(chatTitle, data.chatId).run();
     }
@@ -2555,7 +2739,7 @@ export const sendChatMessage = createServerFn({ method: "POST" })
   });
 
 export const addIdea = createServerFn({ method: "POST" })
-  .validator((data: AddIdeaInput & { mode?: WorkspaceMode; projectId?: string | null }) => data)
+  .validator((data: AddIdeaInput & { mode?: WorkspaceMode; projectId?: string | null; teamId?: string | null }) => data)
   .handler(async ({ context, data }) => {
     const user = await requireWorkspaceEditor();
     const mode = data.mode ?? "Personal";
@@ -2583,7 +2767,7 @@ export const addIdea = createServerFn({ method: "POST" })
       metrics: [],
       thread: [],
     };
-    const assessment = await assessIdeaWithGemma({ context, mode, idea: baseIdea });
+    const assessment = await assessIdeaWithGemma({ context, mode, idea: baseIdea, userId: user.id });
     const nextIdea: Idea = { ...baseIdea, ...assessment };
 
     workspace.ideas = [nextIdea, ...workspace.ideas];
@@ -2597,6 +2781,18 @@ export const addIdea = createServerFn({ method: "POST" })
       operation: "insert",
       projectId: nextIdea.projectId,
       sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
+    await publishAutonomousResearchTrigger(env as AutonomousResearchProducerEnv, {
+      entityType: "idea",
+      entityId: nextIdea.id,
+      workspaceId: workspaceIdForMode(mode),
+      workspaceMode: mode,
+      teamId: await teamIdForAutonomousResearch(mode, user.id, nextIdea.projectId, data.teamId),
+      projectId: nextIdea.projectId,
+      title: nextIdea.title,
+      description: [nextIdea.summary, nextIdea.originalText ?? "", nextIdea.nextStep].filter(Boolean).join("\n"),
+      tags: [nextIdea.category, ...nextIdea.tags],
       sourceUserId: user.id,
     });
     return mergePersistedWorkspace(clone(getMutableRoot()));
@@ -2860,6 +3056,456 @@ function versionedR2KeyFrom(baseKey: string, nextVersion: number) {
   return `${folder}versions/${stem}-v${nextVersion}-${crypto.randomUUID()}${extension}`;
 }
 
+const maxArtifactPatchInstructionChars = 4_000;
+const maxArtifactPatchTextChars = 800_000;
+const maxArtifactPatchCount = 40;
+const maxArtifactPatchNewStringChars = 60_000;
+const maxArtifactPatchTargetChars = 30_000;
+const artifactPatchStateCacheTtlSeconds = 120;
+const textArtifactPreviewChars = 24_000;
+const textPatchFileTypes = new Set(["csv", "json", "md", "markdown", "text", "txt", "xml", "yaml", "yml"]);
+
+type ArtifactPatchTextState = {
+  contentType: string;
+  customMetadata: Record<string, string>;
+  httpMetadata?: R2HTTPMetadata;
+  text: string;
+};
+
+async function findLatestArtifactVersionSource(id: string) {
+  const latest = await findLatestArtifactVersionInLineage(id);
+  if (!latest) return null;
+  const source = await findArtifactVersionSource(latest.id);
+  return source ? { latest, source } : null;
+}
+
+async function readArtifactTextFromR2EdgeCache(
+  source: Pick<ArtifactVersionSourceRow, "fileType" | "r2Key">,
+): Promise<ArtifactPatchTextState> {
+  const cacheRequest = artifactPatchStateCacheRequest(source.r2Key);
+  const cache = getDefaultArtifactPatchCache();
+  const cachedResponse = await cache?.match(cacheRequest).catch(() => undefined);
+  if (cachedResponse?.ok) {
+    const text = await cachedResponse.text();
+    const cachedObject = await getArtifactsBucket()
+      .head(source.r2Key)
+      .catch(() => null);
+    return {
+      contentType:
+        cachedObject?.httpMetadata?.contentType ??
+        cachedResponse.headers.get("Content-Type") ??
+        textContentTypeForArtifact(source.fileType),
+      customMetadata: cachedObject?.customMetadata ?? {},
+      httpMetadata: cachedObject?.httpMetadata,
+      text,
+    };
+  }
+
+  const object = await getArtifactsBucket().get(source.r2Key);
+  if (!object?.body) throw new Error("Artifact file was not found in R2.");
+  const contentType = object.httpMetadata?.contentType ?? textContentTypeForArtifact(source.fileType);
+  const buffer = await object.arrayBuffer();
+  const text = decodePatchableArtifactText(buffer, source.fileType, contentType);
+  await putArtifactTextStateInCache(cache, cacheRequest, text, contentType);
+
+  return {
+    contentType,
+    customMetadata: object.customMetadata ?? {},
+    httpMetadata: object.httpMetadata,
+    text,
+  };
+}
+
+function getDefaultArtifactPatchCache() {
+  if (typeof caches === "undefined") return null;
+  return (caches as CacheStorage & { default?: Cache }).default ?? null;
+}
+
+function artifactPatchStateCacheRequest(r2Key: string) {
+  return new Request(`https://vertex-ai.internal/r2-artifact-state?key=${encodeURIComponent(r2Key)}`);
+}
+
+async function putArtifactTextStateInCache(cache: Cache | null, request: Request, text: string, contentType: string) {
+  if (!cache) return;
+  try {
+    await cache.put(
+      request,
+      new Response(text, {
+        headers: {
+          "Cache-Control": `private, max-age=${artifactPatchStateCacheTtlSeconds}`,
+          "Content-Type": contentType,
+        },
+      }),
+    );
+  } catch (error) {
+    console.warn("Unable to cache artifact text state for AI diffing.", {
+      error: error instanceof Error ? error.message : "Unknown cache error",
+    });
+  }
+}
+
+function decodePatchableArtifactText(buffer: ArrayBuffer, fileType: string, contentType: string) {
+  const bytes = new Uint8Array(buffer);
+  const normalizedFileType = fileExtensionFromArtifact(fileType);
+  if (!isPatchableTextArtifact(normalizedFileType, contentType, bytes)) {
+    throw new Error("AI diff patching supports text, Markdown, JSON, YAML, XML, and CSV artifacts stored as UTF-8 text.");
+  }
+
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
+  const replacementCount = [...text].filter((character) => character === "\uFFFD").length;
+  if (replacementCount > Math.max(8, text.length * 0.01)) {
+    throw new Error("Artifact text could not be decoded safely as UTF-8.");
+  }
+  if (text.length > maxArtifactPatchTextChars) {
+    throw new Error(`Artifact text is too large for this patch review. Limit: ${maxArtifactPatchTextChars.toLocaleString()} characters.`);
+  }
+  return text;
+}
+
+function isPatchableTextArtifact(fileType: string, contentType: string, bytes: Uint8Array) {
+  if (hasBinarySignature(bytes)) return false;
+  const normalizedContentType = contentType.toLowerCase();
+  return (
+    textPatchFileTypes.has(fileType) ||
+    normalizedContentType.startsWith("text/") ||
+    ["application/json", "application/xml", "application/x-yaml", "application/yaml"].some((type) => normalizedContentType.includes(type))
+  );
+}
+
+function hasBinarySignature(bytes: Uint8Array) {
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) return true;
+  const sample = bytes.slice(0, Math.min(bytes.length, 4096));
+  return sample.some((byte) => byte === 0);
+}
+
+function fileExtensionFromArtifact(fileType: string) {
+  const normalized = fileType.trim().toLowerCase().replace(/^\./, "");
+  if (normalized.includes(".")) return normalized.split(".").pop() ?? normalized;
+  return normalized;
+}
+
+function textContentTypeForArtifact(fileType: string) {
+  const extension = fileExtensionFromArtifact(fileType);
+  if (extension === "md" || extension === "markdown") return "text/markdown; charset=utf-8";
+  if (extension === "json") return "application/json; charset=utf-8";
+  if (extension === "csv") return "text/csv; charset=utf-8";
+  if (extension === "xml") return "application/xml; charset=utf-8";
+  if (extension === "yaml" || extension === "yml") return "application/yaml; charset=utf-8";
+  return "text/plain; charset=utf-8";
+}
+
+function normalizePatchInstruction(instruction: string) {
+  const trimmed = instruction.trim();
+  if (!trimmed) throw new Error("Describe the artifact change to draft.");
+  return trimmed.slice(0, maxArtifactPatchInstructionChars);
+}
+
+function buildArtifactPatchPrompt({
+  artifact,
+  currentText,
+  instruction,
+}: {
+  artifact: ArtifactVersionSourceRow;
+  currentText: string;
+  instruction: string;
+}) {
+  return [
+    "You are editing an existing artifact by producing only exact JSON patch deltas.",
+    "Do not rewrite or summarize the whole artifact.",
+    'Return a single strict JSON object with this exact top-level shape: {"patches":[...]}',
+    "Each patch must be one of:",
+    '{"action":"replace","target_string":"exact existing text","new_string":"replacement text","occurrence":1,"rationale":"short reason"}',
+    '{"action":"delete","target_string":"exact existing text","occurrence":1,"rationale":"short reason"}',
+    '{"action":"insert_before","target_string":"exact existing text anchor","new_string":"inserted text","occurrence":1,"rationale":"short reason"}',
+    '{"action":"insert_after","target_string":"exact existing text anchor","new_string":"inserted text","occurrence":1,"rationale":"short reason"}',
+    "Rules:",
+    "- target_string must be copied verbatim from the current artifact text, including punctuation and line breaks.",
+    "- Use the smallest sufficient target_string that is unique enough to apply safely.",
+    "- Use occurrence only when the exact target appears multiple times; occurrence is 1-based.",
+    "- Return no Markdown fences, no prose outside JSON, and no full-document fields.",
+    '- If no precise change is possible, return {"patches":[]}.',
+    "",
+    `Artifact title: ${artifact.title}`,
+    `Artifact type: ${artifact.fileType}`,
+    `Current version: ${artifact.version}`,
+    "",
+    "Requested alteration:",
+    instruction,
+    "",
+    "Current artifact text:",
+    "<<<ARTIFACT_TEXT_START>>>",
+    currentText,
+    "<<<ARTIFACT_TEXT_END>>>",
+  ].join("\n");
+}
+
+function parseArtifactPatchModelResponse(responseText: string) {
+  const parsed = safeParseJson(responseText) ?? extractJsonObject(responseText);
+  return validateArtifactPatchActions(normalizeArtifactPatchActions(parsed));
+}
+
+function safeParseJson(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function validateArtifactPatchActions(patches: ArtifactPatchAction[]) {
+  if (patches.length > maxArtifactPatchCount) {
+    throw new Error(`AI diff response returned too many patches. Limit: ${maxArtifactPatchCount}.`);
+  }
+
+  for (const patch of patches) {
+    if (patch.target_string.length > maxArtifactPatchTargetChars) {
+      throw new Error("AI diff response included an oversized target string.");
+    }
+    if ((patch.new_string ?? "").length > maxArtifactPatchNewStringChars) {
+      throw new Error("AI diff response included an oversized replacement string.");
+    }
+  }
+
+  return patches;
+}
+
+function patchSequenceFromActions(patches: ArtifactPatchAction[]) {
+  return JSON.stringify({ patches });
+}
+
+function assertApplicablePatchResult(result: ArtifactPatchApplyResult) {
+  if (!result.changes.length) throw new Error("The patch did not produce any applicable changes.");
+  if (result.warnings.length) throw new Error(result.warnings[0] ?? "The patch could not be applied cleanly.");
+}
+
+function buildPatchedArtifactPreviewJson(text: string, sourcePreviewJson: string, fileType: string, patchCount: number): JsonValue {
+  const sourcePreview = parseArtifactPreview(sourcePreviewJson);
+  const previewText =
+    text.length > textArtifactPreviewChars
+      ? `${text.slice(0, textArtifactPreviewChars).trimEnd()}\n\n[Preview truncated. Download the artifact for the full text.]`
+      : text;
+  const preview = [`AI diff patch saved`, `${patchCount} change${patchCount === 1 ? "" : "s"} applied`];
+  const base = {
+    kind: "text",
+    preview,
+    projectId: sourcePreview.projectId,
+    sourceChatTitle: sourcePreview.sourceChatTitle ?? null,
+  };
+  const extension = fileExtensionFromArtifact(fileType);
+  if (extension === "md" || extension === "markdown") return { ...base, kind: "markdown", markdown: previewText };
+  if (extension === "json") return { ...base, code: previewText, language: "json" };
+  return { ...base, content: previewText };
+}
+
+function artifactApiDownloadHref(r2Key: string) {
+  return `/api/artifacts?key=${encodeURIComponent(r2Key)}`;
+}
+
+export const draftArtifactPatch = createServerFn({ method: "POST" })
+  .validator((data: ArtifactPatchDraftInput) => data)
+  .handler(async ({ data }): Promise<ArtifactPatchDraftResult> => {
+    const user = await requireWorkspaceEditor();
+    const instruction = normalizePatchInstruction(data.instruction);
+    const source = await findArtifactVersionSource(data.artifactId);
+    if (!source) throw new Error("Artifact was not found.");
+    const workspaceId = workspaceIdForMode(data.mode);
+    if (source.workspaceId !== workspaceId) throw new Error("Artifact is outside the selected workspace.");
+
+    const latest = await findLatestArtifactVersionSource(source.id);
+    if (!latest) throw new Error("Latest artifact version was not found.");
+    const current = await readArtifactTextFromR2EdgeCache(latest.source);
+    const ai = (env as Env).AI;
+    if (!ai) throw new Error(aiUnavailableMessage);
+
+    const response = await withAiTimeout(
+      (signal) =>
+        runTrackedAiGateway(
+          ai,
+          artifactDiffModelId,
+          {
+            messages: [
+              {
+                role: "system",
+                content: "You produce strict JSON delta patches for large artifacts. You never output the full rewritten artifact.",
+              },
+              {
+                role: "user",
+                content: buildArtifactPatchPrompt({ artifact: latest.source, currentText: current.text, instruction }),
+              },
+            ],
+            max_completion_tokens: 4096,
+            response_format: { type: "json_object" },
+            temperature: 0,
+          },
+          {
+            feature: "artifact-diff-draft",
+            model: artifactDiffModelId,
+            requestTimeoutMs: 45_000,
+            signal,
+            identity: {
+              userId: user.id,
+              workspaceId,
+              projectId: parseArtifactPreview(latest.source.previewJson).projectId,
+              scopeType: data.mode,
+            },
+            metadata: {
+              feature: "artifact-diff-draft",
+              model: artifactDiffModelId,
+              workspaceId,
+              userId: user.id,
+              artifactId: latest.source.id,
+            },
+          },
+        ),
+      50_000,
+    );
+
+    const patches = parseArtifactPatchModelResponse(extractAiResponse(response));
+    const applyResult = applyArtifactPatches(current.text, patches);
+    if (!patches.length) throw new Error("Kimi did not return any patch actions for that request.");
+    if (!applyResult.changes.length) throw new Error("Kimi returned patch actions, but none matched the current artifact text.");
+
+    return {
+      artifactId: latest.source.id,
+      baseArtifactId: source.id,
+      baseR2Key: latest.source.r2Key,
+      baseText: current.text,
+      baseVersion: latest.source.version || latest.latest.version || 1,
+      model: artifactDiffModelId,
+      patchSequence: patchSequenceFromActions(patches),
+      warnings: applyResult.warnings,
+    };
+  });
+
+export const commitArtifactPatch = createServerFn({ method: "POST" })
+  .validator((data: CommitArtifactPatchInput) => data)
+  .handler(async ({ data }): Promise<CommitArtifactPatchResult> => {
+    const user = await requireWorkspaceEditor();
+    const source = await findArtifactVersionSource(data.artifactId);
+    if (!source) throw new Error("Artifact was not found.");
+    const workspaceId = workspaceIdForMode(data.mode);
+    if (source.workspaceId !== workspaceId) throw new Error("Artifact is outside the selected workspace.");
+
+    const latest = await findLatestArtifactVersionSource(source.id);
+    if (!latest) throw new Error("Latest artifact version was not found.");
+    if (latest.source.r2Key !== data.baseR2Key) {
+      throw new Error("This artifact changed after the patch was drafted. Regenerate the diff before approving it.");
+    }
+
+    const patches = validateArtifactPatchActions(normalizeArtifactPatchActions(data.patches));
+    const current = await readArtifactTextFromR2EdgeCache(latest.source);
+    const applyResult = applyArtifactPatches(current.text, patches);
+    assertApplicablePatchResult(applyResult);
+
+    const nextVersion = (latest.source.version || latest.latest.version || 1) + 1;
+    const nextId = `artifact-${crypto.randomUUID()}`;
+    const nextR2Key = versionedR2KeyFrom(latest.source.r2Key, nextVersion);
+    const artifactDate = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    const commitMessage = (data.commitMessage?.trim() || "Approved AI diff patch").slice(0, 160);
+    const previewJson = buildPatchedArtifactPreviewJson(
+      applyResult.text,
+      latest.source.previewJson,
+      latest.source.fileType,
+      patches.length,
+    );
+    const href = artifactApiDownloadHref(nextR2Key);
+
+    await getArtifactsBucket().put(nextR2Key, applyResult.text, {
+      httpMetadata: {
+        ...(current.httpMetadata ?? {}),
+        contentType: current.contentType || textContentTypeForArtifact(latest.source.fileType),
+      },
+      customMetadata: {
+        ...current.customMetadata,
+        ai_diff_model: artifactDiffModelId,
+        parent_artifact_id: latest.source.id,
+        patch_count: String(patches.length),
+        version: String(nextVersion),
+      },
+    });
+    await putArtifactTextStateInCache(
+      getDefaultArtifactPatchCache(),
+      artifactPatchStateCacheRequest(nextR2Key),
+      applyResult.text,
+      current.contentType,
+    );
+
+    await getDb()
+      .prepare(
+        `INSERT INTO artifacts (
+          id,
+          workspace_id,
+          title,
+          file_type,
+          owner,
+          artifact_date,
+          status,
+          summary,
+          r2_key,
+          href,
+          preview_json,
+          pinned,
+          version,
+          parent_artifact_id,
+          commit_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        nextId,
+        latest.source.workspaceId,
+        latest.source.title,
+        latest.source.fileType,
+        latest.source.owner,
+        artifactDate,
+        latest.source.status,
+        latest.source.summary,
+        nextR2Key,
+        href,
+        JSON.stringify(previewJson),
+        latest.latest.pinned ? 1 : 0,
+        nextVersion,
+        latest.source.id,
+        commitMessage,
+      )
+      .run();
+
+    const parsedPreview = parseArtifactPreview(JSON.stringify(previewJson));
+    const artifact: Artifact = {
+      id: nextId,
+      projectId: parsedPreview.projectId,
+      parentArtifactId: latest.source.id,
+      sourceChatTitle: parsedPreview.sourceChatTitle,
+      title: latest.source.title,
+      type: latest.source.fileType,
+      owner: latest.source.owner,
+      date: artifactDate,
+      status: latest.source.status,
+      summary: latest.source.summary,
+      href,
+      r2Key: nextR2Key,
+      preview: parsedPreview.preview,
+      previewJson,
+      pinnedTo: latest.latest.pinned ? [data.mode] : [],
+      version: nextVersion,
+      commitMessage,
+    };
+
+    const workspace = getMutableWorkspace(data.mode);
+    recordActivity(workspace, "Artifact patch approved", `${latest.source.title} saved as version ${nextVersion}.`);
+    await recordWorkspaceMutation({
+      entity: "artifact",
+      entityId: nextId,
+      invalidates: ["workspace"],
+      mode: data.mode,
+      operation: "diff-patch",
+      projectId: parsedPreview.projectId,
+      sourceClientId: user.clientId,
+      sourceUserId: user.id,
+    });
+    const mergedWorkspace = await mergePersistedWorkspace(clone(getMutableRoot()));
+    return { workspace: mergedWorkspace, artifact };
+  });
+
 export const restoreArtifactVersion = createServerFn({ method: "POST" })
   .validator((data: { mode: WorkspaceMode; artifactId: string; commitMessage?: string }) => data)
   .handler(async ({ data }) => {
@@ -2974,7 +3620,16 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     }
     const latestBaseArtifact = baseArtifact ? await findLatestArtifactVersionInLineage(baseArtifact.id) : null;
     if (baseArtifact && !latestBaseArtifact) throw new Error("Latest artifact version was not found.");
-    const title = baseArtifact?.title ?? (await generateArtifactTitle(seedTitle, rows)).slice(0, 96);
+    const title =
+      baseArtifact?.title ??
+      (
+        await generateArtifactTitle(seedTitle, rows, {
+          mode,
+          projectId,
+          userId: user.id,
+          workspaceId,
+        })
+      ).slice(0, 96);
     const nextVersion = latestBaseArtifact ? (latestBaseArtifact.version || 1) + 1 : 1;
     const fileName = `${safeArtifactFileName(title)}.xlsx`;
     const xlsxBlob = await xlsxBlobFromRows(title, rows);
@@ -3232,7 +3887,15 @@ export const createTaskFromSuggestion = createServerFn({ method: "POST" })
   .validator((data: CreateTaskInput) => data)
   .handler(async ({ data }) => {
     const user = await requireWorkspaceEditor();
-    const title = (await generateWorkflowSuggestionTitle("task", data.title)).slice(0, 140);
+    const title = (
+      await generateWorkflowSuggestionTitle("task", data.title, {
+        mode: data.mode,
+        projectId: data.projectId,
+        teamId: data.teamId,
+        userId: user.id,
+        workspaceId: workspaceIdForMode(data.mode),
+      })
+    ).slice(0, 140);
     if (!title) throw new Error("Task title is required.");
     const workspace = getMutableWorkspace(data.mode);
     const existingTask = workspace.tasks.find((task) => titleMatchesTask(task.title, title) && (data.projectId ?? null) === task.projectId);
@@ -3247,11 +3910,32 @@ export const createTaskFromSuggestion = createServerFn({ method: "POST" })
       source: data.source?.trim().slice(0, 96) || "VertexAI suggestion",
       status: "Open",
     };
-    if (await getAsanaTaskAutoSyncEnabledForCurrentUser()) {
-      Object.assign(task, await createAsanaSyncStateForTask(task));
-    }
     workspace.tasks = [task, ...workspace.tasks];
     await persistWorkflowAction(data.mode, "task", task);
+    const shouldSyncToAsana = Boolean(data.syncToAsana) || (await getAsanaTaskAutoSyncEnabledForCurrentUser());
+    if (shouldSyncToAsana) {
+      try {
+        const syncState = await queueAsanaSyncForTask(task, {
+          mode: data.mode,
+          sourceClientId: user.clientId,
+          teamId: data.teamId,
+        });
+        Object.assign(task, syncState);
+        workspace.tasks = workspace.tasks.map((item) => (item.id === task.id ? { ...item, ...syncState } : item));
+        await updatePersistedTaskAsanaSync(data.mode, task.id, syncState);
+      } catch (error) {
+        const syncError = error instanceof Error ? error.message : "Unknown Asana sync queue failure";
+        const syncState = {
+          asanaTaskGid: null,
+          asanaSyncedAt: null,
+          asanaSyncQueuedAt: null,
+          asanaSyncError: syncError,
+        };
+        Object.assign(task, syncState);
+        workspace.tasks = workspace.tasks.map((item) => (item.id === task.id ? { ...item, ...syncState } : item));
+        await updatePersistedTaskAsanaSync(data.mode, task.id, syncState);
+      }
+    }
     recordActivity(workspace, "Task created", `${task.title} was added from VertexAI suggestions.`);
     await recordWorkspaceMutation({
       entity: "task",
@@ -3275,12 +3959,16 @@ export const syncTaskToAsana = createServerFn({ method: "POST" })
     if (!task) task = await getPersistedTask(data.mode, data.id);
     if (!task) throw new Error("Task was not found.");
     if (task.asanaTaskGid) return { workspace: await mergePersistedWorkspace(clone(getMutableRoot())), task };
+    if (task.asanaSyncQueuedAt && !task.asanaSyncError) return { workspace: await mergePersistedWorkspace(clone(getMutableRoot())), task };
 
     try {
-      const syncState = await createAsanaSyncStateForTask(task);
+      const syncState = await queueAsanaSyncForTask(task, {
+        mode: data.mode,
+        sourceClientId: user.clientId,
+      });
       workspace.tasks = workspace.tasks.map((item) => (item.id === task.id ? { ...item, ...syncState } : item));
       await updatePersistedTaskAsanaSync(data.mode, task.id, syncState);
-      recordActivity(workspace, "Task synced to Asana", `${task.title} was pushed to Asana.`);
+      recordActivity(workspace, "Task queued for Asana", `${task.title} was queued for Asana sync.`);
       await recordWorkspaceMutation({
         entity: "task",
         entityId: task.id,
@@ -3297,6 +3985,7 @@ export const syncTaskToAsana = createServerFn({ method: "POST" })
       await updatePersistedTaskAsanaSync(data.mode, task.id, {
         asanaTaskGid: null,
         asanaSyncedAt: null,
+        asanaSyncQueuedAt: null,
         asanaSyncError: syncError,
       });
       throw error;
@@ -3307,7 +3996,15 @@ export const createApprovalFromSuggestion = createServerFn({ method: "POST" })
   .validator((data: CreateWorkflowSuggestionInput) => data)
   .handler(async ({ data }) => {
     const user = await requireWorkspaceEditor();
-    const title = (await generateWorkflowSuggestionTitle("approval", data.title)).slice(0, 140);
+    const title = (
+      await generateWorkflowSuggestionTitle("approval", data.title, {
+        mode: data.mode,
+        projectId: data.projectId,
+        teamId: data.teamId,
+        userId: user.id,
+        workspaceId: workspaceIdForMode(data.mode),
+      })
+    ).slice(0, 140);
     if (!title) throw new Error("Approval title is required.");
     const workspace = getMutableWorkspace(data.mode);
     const existingApproval = workspace.approvals.find(
@@ -3343,7 +4040,15 @@ export const createDecisionFromSuggestion = createServerFn({ method: "POST" })
   .validator((data: CreateWorkflowSuggestionInput) => data)
   .handler(async ({ data }) => {
     const user = await requireWorkspaceEditor();
-    const title = (await generateWorkflowSuggestionTitle("decision", data.title)).slice(0, 140);
+    const title = (
+      await generateWorkflowSuggestionTitle("decision", data.title, {
+        mode: data.mode,
+        projectId: data.projectId,
+        teamId: data.teamId,
+        userId: user.id,
+        workspaceId: workspaceIdForMode(data.mode),
+      })
+    ).slice(0, 140);
     if (!title) throw new Error("Decision title is required.");
     const workspace = getMutableWorkspace(data.mode);
     const existingDecision = workspace.decisions.find(
@@ -3379,7 +4084,15 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
   .validator((data: CreateWorkflowSuggestionInput) => data)
   .handler(async ({ context, data }) => {
     const user = await requireWorkspaceEditor();
-    const title = (await generateWorkflowSuggestionTitle("idea", data.title)).slice(0, 120);
+    const title = (
+      await generateWorkflowSuggestionTitle("idea", data.title, {
+        mode: data.mode,
+        projectId: data.projectId,
+        teamId: data.teamId,
+        userId: user.id,
+        workspaceId: workspaceIdForMode(data.mode),
+      })
+    ).slice(0, 120);
     if (!title) throw new Error("Idea title is required.");
     const workspace = getMutableWorkspace(data.mode);
     const existingIdea = workspace.ideas.find((idea) => titleMatchesTask(idea.title, title) && (data.projectId ?? null) === idea.projectId);
@@ -3404,7 +4117,7 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       metrics: [],
       thread: [],
     };
-    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea: baseIdea });
+    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea: baseIdea, userId: user.id });
     const idea: Idea = { ...baseIdea, ...assessment };
     workspace.ideas = [idea, ...workspace.ideas];
     await persistIdea(data.mode, idea, false);
@@ -3419,6 +4132,18 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       sourceClientId: user.clientId,
       sourceUserId: user.id,
     });
+    await publishAutonomousResearchTrigger(env as AutonomousResearchProducerEnv, {
+      entityType: "idea",
+      entityId: idea.id,
+      workspaceId: workspaceIdForMode(data.mode),
+      workspaceMode: data.mode,
+      teamId: await teamIdForAutonomousResearch(data.mode, user.id, idea.projectId, data.teamId),
+      projectId: idea.projectId,
+      title: idea.title,
+      description: [idea.summary, idea.originalText ?? "", idea.nextStep, data.source ?? ""].filter(Boolean).join("\n"),
+      tags: [idea.category, ...idea.tags],
+      sourceUserId: user.id,
+    });
     return mergePersistedWorkspace(clone(getMutableRoot()));
   });
 
@@ -3429,7 +4154,7 @@ export const refreshIdeaAssessment = createServerFn({ method: "POST" })
     const workspace = getMutableWorkspace(data.mode);
     const idea = workspace.ideas.find((item) => item.id === data.id);
     if (!idea) return mergePersistedWorkspace(clone(getMutableRoot()));
-    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea });
+    const assessment = await assessIdeaWithGemma({ context, mode: data.mode, idea, userId: user.id });
     const nextIdea: Idea = { ...idea, ...assessment };
     workspace.ideas = workspace.ideas.map((item) => (item.id === data.id ? nextIdea : item));
     await persistIdea(data.mode, nextIdea, workspace.pinnedIdeaIds.includes(data.id));

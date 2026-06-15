@@ -15,7 +15,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { ArtifactRenderer } from "@/components/ArtifactRenderer";
+import { ArtifactRenderer, hasRiskFlagSchema, normalizeMarkdownPreview } from "@/components/ArtifactRenderer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -113,17 +113,22 @@ export function ChatView({
   showTokenUsage: boolean;
 }) {
   const messageEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   const [entityStatuses, setEntityStatuses] = useState<Record<string, ChatEntityStatus>>({});
 
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ block: "end" });
   }, [messages, isTyping]);
 
+  useEffect(() => {
+    cleanRenderedChatText(chatContainerRef.current);
+  }, [messages]);
+
   const showEmptyChatPlaceholder = messages.length === 0 && !isTyping;
   const showTypingIndicator = isTyping && !messages.some((message) => message.role === "assistant" && message.clientStatus === "sending");
 
   return (
-    <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
+    <div className="scrollbar-thin min-h-0 flex-1 space-y-4 overflow-y-auto p-4" ref={chatContainerRef}>
       {showEmptyChatPlaceholder ? (
         <div className="flex min-h-full items-center justify-center px-4 py-12">
           <div className="flex max-w-sm flex-col items-center text-center">
@@ -165,7 +170,7 @@ export function ChatView({
                 )}
               >
                 {isUser ? (
-                  message.text
+                  normalizeChatPlainText(message.text)
                 ) : (
                   <AssistantResponseContent
                     approvals={approvals}
@@ -224,7 +229,7 @@ export function ChatView({
                     setEntityStatuses((current) => ({ ...current, [entity.id]: "acknowledged" }));
                     try {
                       await onSyncEntityToAsana(entity);
-                      setEntityStatuses((current) => ({ ...current, [entity.id]: "synced" }));
+                      setEntityStatuses((current) => ({ ...current, [entity.id]: "queued" }));
                     } catch {
                       setEntityStatuses((current) => ({ ...current, [entity.id]: "active" }));
                     }
@@ -356,7 +361,7 @@ export function ChatEntityCards({
                       type="button"
                       size="sm"
                       className="h-8 gap-1.5"
-                      disabled={!canEdit || isSyncing || status === "synced"}
+                      disabled={!canEdit || isSyncing || status === "queued" || status === "synced"}
                       title={canEdit ? "Create a task from this entity and sync it to Asana" : "Viewer access is read-only"}
                       onClick={async () => {
                         setSyncingEntityId(entity.id);
@@ -368,7 +373,7 @@ export function ChatEntityCards({
                       }}
                     >
                       <Share2 className="size-3.5" />
-                      <span>{isSyncing ? "Syncing..." : "Sync to Asana"}</span>
+                      <span>{isSyncing ? "Queueing..." : status === "queued" ? "Queued" : "Sync to Asana"}</span>
                     </Button>
                   </div>
                 </div>
@@ -429,9 +434,10 @@ export type ScopedRagSseHandlers = {
 
 export function consumeScopedRagEventSource(
   input: {
+    assistantMessageId?: string | null;
     asanaSearchEnabled: boolean;
     chatId: string;
-    projectId: string;
+    projectId: string | null;
     prompt: string;
     reasoningLevel: ChatReasoningLevel;
     teamId: string;
@@ -505,9 +511,10 @@ export function consumeScopedRagEventSource(
 }
 
 export function scopedRagStreamUrl(input: {
+  assistantMessageId?: string | null;
   asanaSearchEnabled: boolean;
   chatId: string;
-  projectId: string;
+  projectId: string | null;
   prompt: string;
   reasoningLevel: ChatReasoningLevel;
   teamId: string;
@@ -519,12 +526,13 @@ export function scopedRagStreamUrl(input: {
     prompt: input.prompt,
     teamId: input.teamId,
     workspaceId: input.workspaceId,
-    projectId: input.projectId,
     chatId: input.chatId,
     asanaSearchEnabled: input.asanaSearchEnabled ? "1" : "0",
     reasoningLevel: input.reasoningLevel,
     webSearchEnabled: input.webSearchEnabled ? "1" : "0",
   });
+  if (input.projectId) params.set("projectId", input.projectId);
+  if (input.assistantMessageId) params.set("assistantMessageId", input.assistantMessageId);
   return `/sse/workspace-events?${params.toString()}`;
 }
 
@@ -611,7 +619,7 @@ export function parseAssistantResponse(text: string, requestedJson: boolean): Pa
   if (jsonCandidate) {
     try {
       const parsed = JSON.parse(jsonCandidate);
-      if (requestedJson || hasWorkflowActionSchema(parsed)) {
+      if (requestedJson || hasWorkflowActionSchema(parsed) || hasRiskFlagSchema(parsed)) {
         return { kind: "json", content: JSON.stringify(parsed, null, 2) };
       }
       const extracted = extractReadableJson(parsed);
@@ -625,6 +633,32 @@ export function parseAssistantResponse(text: string, requestedJson: boolean): Pa
   }
 
   return looksLikeMarkdown(trimmed) ? { kind: "markdown", content: trimmed } : { kind: "text", content: trimmed };
+}
+
+export function normalizeChatPlainText(content: string) {
+  return normalizeMarkdownPreview(content, "text") || content;
+}
+
+export const normalizeAssistantPlainText = normalizeChatPlainText;
+
+function cleanRenderedChatText(root: HTMLElement | null) {
+  if (!root) return;
+  const walker = root.ownerDocument.createTreeWalker(root, 4, {
+    acceptNode(node) {
+      const parent = node.parentElement;
+      if (!parent) return 2;
+      if (parent.closest("code, pre, kbd, samp, .katex")) return 2;
+      return 1;
+    },
+  });
+  const textNodes: Text[] = [];
+  while (walker.nextNode()) textNodes.push(walker.currentNode as Text);
+  for (const node of textNodes) {
+    const current = node.nodeValue ?? "";
+    if (!current.includes("\\") && !/[\u2190\u2192\u2194\u21d0\u21d2\u21d4\u27f5\u27f6\u27f7]/.test(current)) continue;
+    const normalized = normalizeChatPlainText(current);
+    if (normalized !== current) node.nodeValue = normalized;
+  }
 }
 
 export function extractJsonCandidate(text: string) {
@@ -826,7 +860,7 @@ export function AssistantResponseContent({
   return (
     <div data-source-chat-title={chatTitle ?? ""}>
       {exportActions}
-      <p className="whitespace-pre-wrap">{parsed.content}</p>
+      <p className="whitespace-pre-wrap">{normalizeAssistantPlainText(parsed.content)}</p>
     </div>
   );
 }

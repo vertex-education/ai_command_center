@@ -6,11 +6,12 @@ import { VertexAIBrand } from "@/components/VertexAIBrand";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { isAdminRole } from "@/lib/auth-access-control";
+import { getSession } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/profile/")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },
@@ -119,7 +120,7 @@ function UserProfilePage() {
                       <CalendarClock className="size-4" />
                       Automated Briefings
                     </Button>
-                    {session.user.role === "admin" ? (
+                    {isAdminRole(session.user.role) ? (
                       <Button
                         className="w-full justify-start"
                         type="button"

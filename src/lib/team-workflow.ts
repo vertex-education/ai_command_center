@@ -1,9 +1,14 @@
 import { createServerFn } from "@tanstack/react-start";
 import { env } from "cloudflare:workers";
+import { publishAutonomousResearchTrigger, type AutonomousResearchProducerEnv } from "@/lib/autonomous-research-queue";
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
+import { roleCanModifyState } from "@/lib/auth-access-control";
 import { getAuth } from "@/lib/auth";
+import { assertMutableChatThread, isReservedBriefingsTitle } from "@/lib/briefing-thread";
+import type { ChatOperationalEntity } from "@/lib/chat-entities";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { lightweightChatTitleModelId } from "@/lib/prompts";
+import { normalizeRiskEntities } from "@/lib/risk-contract";
 import {
   avatarAlex,
   getConversationKey,
@@ -104,12 +109,13 @@ export type BranchChatResult = {
 export type PersistScopedRagChatInput = {
   mode: WorkspaceMode;
   teamId?: string | null;
-  projectId: string;
+  projectId: string | null;
   chatId: string;
   userMessageId: string;
   assistantMessageId: string;
   prompt: string;
   response: string;
+  entities?: ChatOperationalEntity[];
 };
 
 function getDb() {
@@ -131,7 +137,7 @@ async function currentUser() {
 }
 
 function canManage(user: SessionUser) {
-  return user.role === "admin" || user.role === "user";
+  return roleCanModifyState(user.role);
 }
 
 async function requireManager() {
@@ -173,6 +179,38 @@ function messageId(prefix: string, value: string) {
   return trimmed && /^[a-zA-Z0-9_-]{8,120}$/.test(trimmed) ? trimmed : `msg-${prefix}-${crypto.randomUUID()}`;
 }
 
+async function persistRiskEntities({
+  assistantMessageId,
+  entities,
+  projectId,
+  workspaceId,
+}: {
+  assistantMessageId: string;
+  entities: ChatOperationalEntity[] | undefined;
+  projectId: string;
+  workspaceId: string;
+}) {
+  const risks = normalizeRiskEntities(entities, { assistantMessageId, projectId, workspaceId });
+  for (const risk of risks) {
+    await getDb()
+      .prepare(
+        `INSERT OR IGNORE INTO risks (
+          id,
+          workspace_id,
+          project_id,
+          title,
+          description,
+          severity,
+          status,
+          mitigation_strategy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(risk.id, risk.workspaceId, risk.projectId, risk.title, risk.description, risk.severity, risk.status, risk.mitigationStrategy)
+      .run();
+  }
+  return risks.length;
+}
+
 function nowLabel() {
   return new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
@@ -180,6 +218,17 @@ function nowLabel() {
 function normalizeChatTitle(title: string) {
   const trimmed = title.trim().replace(/\s+/g, " ").slice(0, 60);
   return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
+}
+
+function assertProjectChatTitleIsNotReserved(title: string, section: ChatSection) {
+  if (section === "project" && isReservedBriefingsTitle(title)) {
+    throw new Error("Briefings is reserved for automated weekly briefing output.");
+  }
+}
+
+async function assertChatIsMutable(chatId: string) {
+  const chat = await getDb().prepare("SELECT id, title, description FROM chats WHERE id = ? LIMIT 1").bind(chatId).first<ChatSummary>();
+  assertMutableChatThread(chat);
 }
 
 function conciseChatTitleFromRequest(text: string) {
@@ -210,7 +259,17 @@ function normalizeGeneratedInitialChatTitle(title: string, fallback: string) {
   return normalizeChatTitle(cleaned && cleaned.length >= 3 ? cleaned : fallback) || fallback;
 }
 
-async function generateInitialChatTitle(context: unknown, text: string) {
+async function generateInitialChatTitle(
+  context: unknown,
+  text: string,
+  scope?: {
+    mode?: WorkspaceMode;
+    projectId?: string | null;
+    teamId?: string | null;
+    userId?: string | null;
+    workspaceId?: string | null;
+  },
+) {
   const fallback = conciseChatTitleFromRequest(text);
   const ai = (context as CloudflareContext).cloudflare?.env?.AI ?? (env as Env & { AI?: Ai }).AI;
   if (!ai) return fallback;
@@ -237,9 +296,21 @@ async function generateInitialChatTitle(context: unknown, text: string) {
         },
         {
           feature: "stream-chat-title",
+          identity: {
+            userId: scope?.userId,
+            workspaceId: scope?.workspaceId,
+            teamId: scope?.teamId,
+            projectId: scope?.projectId,
+            scopeType: scope?.mode,
+          },
           metadata: {
             feature: "stream-chat-title",
             model: lightweightChatTitleModelId,
+            mode: scope?.mode ?? null,
+            userId: scope?.userId ?? null,
+            workspaceId: scope?.workspaceId ?? null,
+            teamId: scope?.teamId ?? null,
+            projectId: scope?.projectId ?? null,
           },
         },
       ),
@@ -312,7 +383,18 @@ function normalizeBranchGeneratedTitle(title: string, fallback: string) {
   return normalizeChatTitle(`Branch: ${usable}`) || fallback;
 }
 
-async function generateBranchChatTitle(context: unknown, sourceChatTitle: string, messageText: string) {
+async function generateBranchChatTitle(
+  context: unknown,
+  sourceChatTitle: string,
+  messageText: string,
+  scope?: {
+    mode?: WorkspaceMode;
+    projectId?: string | null;
+    teamId?: string | null;
+    userId?: string | null;
+    workspaceId?: string | null;
+  },
+) {
   const fallback = fallbackBranchChatTitle(sourceChatTitle, messageText);
   const ai = (context as CloudflareContext).cloudflare?.env?.AI ?? (env as Env & { AI?: Ai }).AI;
   if (!ai) return fallback;
@@ -339,9 +421,21 @@ async function generateBranchChatTitle(context: unknown, sourceChatTitle: string
         },
         {
           feature: "branch-title",
+          identity: {
+            userId: scope?.userId,
+            workspaceId: scope?.workspaceId,
+            teamId: scope?.teamId,
+            projectId: scope?.projectId,
+            scopeType: scope?.mode,
+          },
           metadata: {
             feature: "branch-title",
             model: lightweightChatTitleModelId,
+            mode: scope?.mode ?? null,
+            userId: scope?.userId ?? null,
+            workspaceId: scope?.workspaceId ?? null,
+            teamId: scope?.teamId ?? null,
+            projectId: scope?.projectId ?? null,
           },
         },
       ),
@@ -641,6 +735,18 @@ export const createScopedProject = createServerFn({ method: "POST" })
       sourceUserId: user.id,
       teamId: data.teamId ?? null,
       workspaceId: workspace.id,
+    });
+    await publishAutonomousResearchTrigger(env as AutonomousResearchProducerEnv, {
+      entityType: "project",
+      entityId: id,
+      workspaceId: workspace.id,
+      workspaceMode: data.mode,
+      teamId: data.mode === "Team" ? (data.teamId ?? null) : null,
+      projectId: id,
+      title: name,
+      description,
+      tags: [data.status, data.mode, "project"],
+      sourceUserId: user.id,
     });
 
     return {
@@ -951,32 +1057,89 @@ export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
     const response = data.response.trim() || "The model did not return a response.";
     if (!prompt) throw new Error("Prompt is required.");
     if (!data.chatId.trim()) throw new Error("Chat is required.");
-    if (!data.projectId.trim()) throw new Error("Project is required.");
-    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before using this team project chat.");
+    const projectId = data.projectId?.trim() || null;
+    if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before using this team chat.");
 
     const workspaceId = await getWorkspaceId(data.mode);
-    await requireProjectMember(user.id, data.projectId, data.mode === "Team" ? (data.teamId ?? null) : null);
-    const chat = await getDb()
-      .prepare(
-        `SELECT id,
-                title,
-                description,
-                (SELECT COUNT(*)
-                 FROM chat_messages
-                 WHERE chat_id = chats.id) as messageCount
-         FROM chats
-         WHERE id = ?
-           AND workspace_id = ?
-           AND section = 'project'
-           AND project_id = ?
-         LIMIT 1`,
-      )
-      .bind(data.chatId, workspaceId, data.projectId)
-      .first<{ id: string; title: string; description: string | null; messageCount: number }>();
-    if (!chat) throw new Error("Chat was not found in this project.");
+    let chat: { id: string; title: string; description: string | null; messageCount: number } | null = null;
+    if (projectId) {
+      await requireProjectMember(user.id, projectId, data.mode === "Team" ? (data.teamId ?? null) : null);
+      chat = await getDb()
+        .prepare(
+          `SELECT id,
+                  title,
+                  description,
+                  (SELECT COUNT(*)
+                   FROM chat_messages
+                   WHERE chat_id = chats.id) as messageCount
+           FROM chats
+           WHERE id = ?
+             AND workspace_id = ?
+             AND section = 'project'
+             AND project_id = ?
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, projectId)
+        .first<{ id: string; title: string; description: string | null; messageCount: number }>();
+      if (!chat) throw new Error("Chat was not found in this project.");
+    } else if (data.mode === "Team") {
+      await requireTeamMember(user.id, data.teamId ?? "");
+      chat = await getDb()
+        .prepare(
+          `SELECT c.id,
+                  c.title,
+                  c.description,
+                  (SELECT COUNT(*)
+                   FROM chat_messages
+                   WHERE chat_id = c.id) as messageCount
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.team_id = ?
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, data.teamId ?? "")
+        .first<{ id: string; title: string; description: string | null; messageCount: number }>();
+      if (!chat) throw new Error("Chat was not found in this team workspace.");
+    } else {
+      chat = await getDb()
+        .prepare(
+          `SELECT c.id,
+                  c.title,
+                  c.description,
+                  (SELECT COUNT(*)
+                   FROM chat_messages
+                   WHERE chat_id = c.id) as messageCount
+           FROM chats c
+           INNER JOIN chat_members cm ON cm.chat_id = c.id
+           WHERE c.id = ?
+             AND c.workspace_id = ?
+             AND c.section = 'workspace'
+             AND c.project_id IS NULL
+             AND cm.user_id = ?
+             AND cm.team_id IS NULL
+           LIMIT 1`,
+        )
+        .bind(data.chatId, workspaceId, user.id)
+        .first<{ id: string; title: string; description: string | null; messageCount: number }>();
+      if (!chat) throw new Error("Chat was not found in this workspace.");
+    }
+
+    assertMutableChatThread(chat);
 
     const generatedTitle =
-      chat.messageCount === 0 && shouldAutoRenameInitialChat(chat) ? await generateInitialChatTitle(context, prompt) : null;
+      chat.messageCount === 0 && shouldAutoRenameInitialChat(chat)
+        ? await generateInitialChatTitle(context, prompt, {
+            mode: data.mode,
+            projectId,
+            teamId: data.teamId ?? null,
+            userId: user.id,
+            workspaceId,
+          })
+        : null;
     if (generatedTitle && generatedTitle !== chat.title) {
       await getDb().prepare("UPDATE chats SET title = ? WHERE id = ?").bind(generatedTitle, data.chatId).run();
     }
@@ -1000,18 +1163,26 @@ export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
       await insertScopedChatMessage({
         chatId: data.chatId,
         workspaceId,
-        projectId: data.projectId,
+        projectId,
         mode: data.mode,
         message: userMessage,
       }),
       await insertScopedChatMessage({
         chatId: data.chatId,
         workspaceId,
-        projectId: data.projectId,
+        projectId,
         mode: data.mode,
         message: assistantMessage,
       }),
     ];
+    const persistedRiskCount = projectId
+      ? await persistRiskEntities({
+          assistantMessageId: assistantMessage.id,
+          entities: data.entities,
+          projectId,
+          workspaceId,
+        })
+      : 0;
 
     await publishChatMessageInserts(
       (env as Env).CHAT_SYNC,
@@ -1023,6 +1194,20 @@ export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
       }),
       insertedMessages,
     );
+    if (persistedRiskCount > 0) {
+      await recordScopedMutation({
+        chatId: data.chatId,
+        entity: "risk",
+        entityId: data.chatId,
+        invalidates: ["workspace", "projects"],
+        mode: data.mode,
+        operation: "insert",
+        projectId,
+        sourceUserId: user.id,
+        teamId: data.teamId ?? null,
+        workspaceId,
+      });
+    }
     await recordScopedMutation({
       chatId: data.chatId,
       entity: "chat_message",
@@ -1030,7 +1215,7 @@ export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
       invalidates: ["chats", "projects"],
       mode: data.mode,
       operation: "insert",
-      projectId: data.projectId,
+      projectId,
       sourceUserId: user.id,
       teamId: data.teamId ?? null,
       workspaceId,
@@ -1043,7 +1228,7 @@ export const persistScopedRagChatTurn = createServerFn({ method: "POST" })
         invalidates: ["chats", "projects"],
         mode: data.mode,
         operation: "rename",
-        projectId: data.projectId,
+        projectId,
         sourceUserId: user.id,
         teamId: data.teamId ?? null,
         workspaceId,
@@ -1060,6 +1245,7 @@ export const createScopedChat = createServerFn({ method: "POST" })
     const title = data.title.trim();
     const description = data.description.trim();
     if (!title) throw new Error("Chat name is required.");
+    assertProjectChatTitleIsNotReserved(title, data.section);
     if (data.section === "project" && !data.projectId) throw new Error("Select a project before creating a project chat.");
     if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before creating a team chat.");
     if (data.section === "workspace" && data.mode === "Team") await requireTeamMember(user.id, data.teamId ?? "");
@@ -1194,7 +1380,13 @@ export const branchScopedChat = createServerFn({ method: "POST" })
       )
       .bind(workspaceId, data.section, data.projectId ?? null, data.projectId ?? null)
       .first<{ sortOrder: number }>();
-    const title = await generateBranchChatTitle(context, sourceChat.title, sourceMessage.text);
+    const title = await generateBranchChatTitle(context, sourceChat.title, sourceMessage.text, {
+      mode: data.mode,
+      projectId: data.projectId ?? null,
+      teamId: data.teamId ?? null,
+      userId: user.id,
+      workspaceId,
+    });
     const description = branchChatDescription(sourceMessage.text);
     const nextChatId = chatId(title);
     await getDb()
@@ -1338,6 +1530,8 @@ export const deleteScopedChat = createServerFn({ method: "POST" })
       if (!chat) throw new Error("Chat was not found.");
     }
 
+    await assertChatIsMutable(data.chatId);
+
     await getDb().prepare("DELETE FROM chat_members WHERE chat_id = ?").bind(data.chatId).run();
     await getDb().prepare("DELETE FROM chat_messages WHERE chat_id = ?").bind(data.chatId).run();
     await getDb().prepare("DELETE FROM chats WHERE id = ?").bind(data.chatId).run();
@@ -1363,6 +1557,7 @@ export const renameScopedChat = createServerFn({ method: "POST" })
     const user = await requireManager();
     const title = normalizeChatTitle(data.title);
     if (!title) throw new Error("Chat name is required.");
+    assertProjectChatTitleIsNotReserved(title, data.section);
     if (!data.chatId) throw new Error("Chat is required.");
     if (data.mode === "Team" && !data.teamId) throw new Error("Select a team before renaming a team chat.");
 
@@ -1410,6 +1605,8 @@ export const renameScopedChat = createServerFn({ method: "POST" })
         .first<{ id: string }>();
       if (!chat) throw new Error("Chat was not found.");
     }
+
+    await assertChatIsMutable(data.chatId);
 
     await getDb().prepare("UPDATE chats SET title = ? WHERE id = ?").bind(title, data.chatId).run();
     await recordScopedMutation({

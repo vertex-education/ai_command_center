@@ -1,0 +1,44 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "account_id": "101ae2c39c8dda6574c201e123edf24f",
+  "name": "autonomous-research-worker",
+  "main": "./src/autonomous-research-worker.ts",
+  "compatibility_date": "2026-05-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-command-center-db",
+      "database_id": "b92787ed-58b0-429a-b6f3-7539c0a5e201",
+      "remote": true,
+    },
+  ],
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "ai-command-center-rag",
+      "remote": true,
+    },
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true,
+  },
+  "vars": {
+    "CLOUDFLARE_AI_GATEWAY_ID": "default",
+    "FIRECRAWL_API_BASE_URL": "https://api.firecrawl.dev/v2/search",
+  },
+  "queues": {
+    "consumers": [
+      {
+        "queue": "autonomous-research-queue",
+        "max_batch_size": 2,
+        "max_batch_timeout": 30,
+        "max_retries": 3,
+      },
+    ],
+  },
+  "observability": {
+    "enabled": true,
+  },
+}

@@ -27,6 +27,22 @@ export function getRiskStats(risks: LightweightRisk[]) {
 }
 
 export function riskManagementHref(scope: WorkspaceScope, projectId: string | null | undefined) {
-  if (!projectId) return null;
-  return `/workspace/ws-${scope}/project/${encodeURIComponent(projectId)}/risks`;
+  const params = new URLSearchParams({
+    mode: modeForScope(scope),
+    tab: "Risks",
+  });
+  if (projectId) params.set("projectId", projectId);
+  return `/?${params.toString()}`;
+}
+
+export function workspaceScopeFromId(workspaceId: string): WorkspaceScope | null {
+  const scope = workspaceId.replace(/^ws-/, "").toLowerCase();
+  if (scope === "personal" || scope === "team" || scope === "org") return scope;
+  return null;
+}
+
+function modeForScope(scope: WorkspaceScope) {
+  if (scope === "team") return "Team";
+  if (scope === "org") return "Org";
+  return "Personal";
 }

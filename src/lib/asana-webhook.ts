@@ -99,9 +99,14 @@ export async function handleAsanaWebhookRequest(request: Request, runtimeEnv: As
   if (events.length === 0) return Response.json({ accepted: true, delivered: false, reason: "No events in payload." });
 
   await upsertAsanaTaskStates(webhookEnv, webhookScope.workspaceKey, events);
+  const localTaskUpdates = await applyAsanaWebhookEventsToLocalTasks(webhookEnv, events);
 
   const target = await resolveProjectChatTarget(events, webhookEnv);
   if (!target) {
+    const sourceUserId = await resolveSourceUserId(webhookEnv);
+    if (sourceUserId && localTaskUpdates.length > 0) {
+      await publishLocalTaskUpdateEvents(webhookEnv, localTaskUpdates, sourceUserId);
+    }
     console.warn(
       JSON.stringify({
         event: "asana_webhook_unmatched",
@@ -109,7 +114,14 @@ export async function handleAsanaWebhookRequest(request: Request, runtimeEnv: As
         projectGids: extractProjectGids(events),
       }),
     );
-    return Response.json({ accepted: true, delivered: false, reason: "No matching project chat." }, { status: 202 });
+    return Response.json(
+      {
+        accepted: true,
+        delivered: localTaskUpdates.length > 0,
+        reason: localTaskUpdates.length > 0 ? "Updated local task state without a matching project chat." : "No matching project chat.",
+      },
+      { status: 202 },
+    );
   }
 
   const sourceUserId = await resolveSourceUserId(webhookEnv);
@@ -137,6 +149,9 @@ export async function handleAsanaWebhookRequest(request: Request, runtimeEnv: As
     teamId: target.mode === "Team" ? target.teamId : null,
     workspaceId: target.workspaceId,
   });
+  if (localTaskUpdates.length > 0) {
+    await publishLocalTaskUpdateEvents(webhookEnv, localTaskUpdates, sourceUserId);
+  }
 
   return Response.json({
     accepted: true,
@@ -272,6 +287,146 @@ export function extractEventStatus(event: AsanaWebhookEvent) {
     if (typeof text === "string") return text;
   }
   return value === null ? null : String(value);
+}
+
+type LocalTaskWebhookUpdate = {
+  action: string;
+  asanaTaskGid: string;
+  changeField: string | null;
+  localStatus: "Open" | "Completed" | null;
+  taskName: string | null;
+};
+
+type UpdatedLocalTask = {
+  asanaTaskGid: string;
+  chatId: string | null;
+  localTaskId: string;
+  mode: WorkspaceMode;
+  projectId: string | null;
+  teamId: string | null;
+  workspaceId: string;
+};
+
+async function applyAsanaWebhookEventsToLocalTasks(webhookEnv: AsanaWebhookEnv, events: AsanaWebhookEvent[]) {
+  const updates = collectLocalTaskWebhookUpdates(events);
+  const updatedTasks: UpdatedLocalTask[] = [];
+  for (const update of updates) {
+    const row = await findLocalTaskByAsanaGid(webhookEnv.DB, update.asanaTaskGid);
+    if (!row) continue;
+
+    const nextTitle = update.changeField === "name" && update.taskName ? update.taskName : row.title;
+    const nextStatus = update.localStatus ?? row.status;
+    const nextSyncError =
+      update.action === "deleted" ? "Asana task was deleted." : update.action === "undeleted" ? null : row.asanaSyncError;
+
+    await webhookEnv.DB.prepare(
+      `UPDATE workspace_actions
+       SET title = ?,
+           status = ?,
+           asana_sync_error = ?
+       WHERE id = ?
+         AND workspace_id = ?
+         AND kind = 'task'`,
+    )
+      .bind(nextTitle, nextStatus, nextSyncError, row.id, row.workspaceId)
+      .run();
+
+    updatedTasks.push({
+      asanaTaskGid: update.asanaTaskGid,
+      chatId: row.chatId,
+      localTaskId: row.id,
+      mode: row.mode,
+      projectId: row.projectId,
+      teamId: row.teamId,
+      workspaceId: row.workspaceId,
+    });
+  }
+  return updatedTasks;
+}
+
+function collectLocalTaskWebhookUpdates(events: AsanaWebhookEvent[]) {
+  const updatesByTaskGid = new Map<string, LocalTaskWebhookUpdate>();
+  for (const event of events) {
+    const task = event.resource?.resource_type === "task" ? event.resource : event.parent?.resource_type === "task" ? event.parent : null;
+    const asanaTaskGid = task?.gid?.trim();
+    if (!task || !asanaTaskGid) continue;
+    updatesByTaskGid.set(asanaTaskGid, {
+      action: event.action ?? "changed",
+      asanaTaskGid,
+      changeField: event.change?.field?.trim().toLowerCase() || null,
+      localStatus: mapAsanaWebhookTaskStatusToWorkflowStatus(extractEventStatus(event)),
+      taskName: task.name?.trim() || null,
+    });
+  }
+  return [...updatesByTaskGid.values()];
+}
+
+export function mapAsanaWebhookTaskStatusToWorkflowStatus(status: string | null) {
+  const normalized = status?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (["complete", "completed", "done", "true"].includes(normalized)) return "Completed" as const;
+  if (["incomplete", "open", "not completed", "false"].includes(normalized)) return "Open" as const;
+  return null;
+}
+
+async function findLocalTaskByAsanaGid(db: D1Database, asanaTaskGid: string) {
+  const row = await db
+    .prepare(
+      `SELECT wa.id,
+              wa.workspace_id as workspaceId,
+              wa.project_id as projectId,
+              wa.title,
+              wa.status,
+              wa.asana_sync_error as asanaSyncError,
+              w.scope as workspaceScope,
+              c.id as chatId,
+              pm.team_id as teamId
+       FROM workspace_actions wa
+       INNER JOIN workspaces w ON w.id = wa.workspace_id
+       LEFT JOIN chats c ON c.project_id = wa.project_id
+        AND c.workspace_id = wa.workspace_id
+        AND c.section = 'project'
+       LEFT JOIN project_members pm ON pm.project_id = wa.project_id
+       WHERE wa.asana_task_gid = ?
+         AND wa.kind = 'task'
+       ORDER BY c.sort_order ASC
+       LIMIT 1`,
+    )
+    .bind(asanaTaskGid)
+    .first<{
+      id: string;
+      workspaceId: string;
+      projectId: string | null;
+      title: string;
+      status: "Open" | "Completed";
+      asanaSyncError: string | null;
+      workspaceScope: "personal" | "team" | "org";
+      chatId: string | null;
+      teamId: string | null;
+    }>();
+  if (!row) return null;
+  return {
+    ...row,
+    mode: modeForScope(row.workspaceScope),
+  };
+}
+
+async function publishLocalTaskUpdateEvents(webhookEnv: AsanaWebhookEnv, updates: UpdatedLocalTask[], sourceUserId: string) {
+  for (const update of updates) {
+    await recordRealtimeMutationEvent(webhookEnv.DB, {
+      chatId: update.chatId,
+      entity: "task",
+      entityId: update.localTaskId,
+      invalidates: ["workspace", "projects"],
+      mode: update.mode,
+      operation: "update",
+      projectId: update.projectId,
+      sourceClientId: webhookSourceClientId,
+      sourceUserId,
+      teamId: update.mode === "Team" ? update.teamId : null,
+      workspaceId: update.workspaceId,
+    });
+  }
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -435,7 +590,7 @@ async function resolveSourceUserId(webhookEnv: AsanaWebhookEnv) {
   }
 
   const fallback = await webhookEnv.DB.prepare(
-    "SELECT id FROM user WHERE banned = 0 ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'user' THEN 1 ELSE 2 END, createdAt ASC LIMIT 1",
+    "SELECT id FROM user WHERE banned = 0 ORDER BY CASE role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 WHEN 'contributor' THEN 2 WHEN 'user' THEN 2 ELSE 3 END, createdAt ASC LIMIT 1",
   ).first<{ id: string }>();
   return fallback?.id ?? null;
 }

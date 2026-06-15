@@ -8,9 +8,17 @@ import { runTrackedAiGateway } from "@/lib/ai-gateway";
 import { recordAdminUsageEvent } from "@/lib/admin-metrics.server";
 import { fetchAsanaProjectContextForCurrentUser } from "@/lib/asana-integration.server";
 import { getAuth } from "@/lib/auth";
+import {
+  entityPermissionMatrix,
+  normalizeVertexRole,
+  roleCanAccessConfidentialArtifacts,
+  roleCanModifyState,
+  roleDisplayName,
+  type VertexAuthRole,
+} from "@/lib/auth-access-control";
 import { parseChatOperationalEntityJson, type ChatOperationalEntity } from "@/lib/chat-entities";
 import type { DocumentIngestionJob } from "@/lib/document-ingestion-queue";
-import type { PromptIntent } from "@/lib/intent-routing";
+import { classifyPromptIntent, type PromptIntent } from "@/lib/intent-routing";
 import {
   buildDynamicWorkspaceContextHeader,
   buildInferenceAuthorizationDirective,
@@ -19,6 +27,7 @@ import {
   prependInferenceAuthorizationDirective,
   type InferenceAuthorizationContext,
 } from "@/lib/prompts";
+import { createRiskFlagJsonBlocks, formatRiskFlagBlocks } from "@/lib/risk-contract";
 
 const embeddingModelId = "@cf/baai/bge-large-en-v1.5";
 const generationModelId = "@cf/google/gemma-4-26b-a4b-it";
@@ -40,7 +49,6 @@ type AuthSession = {
   };
 };
 
-type AuthorizationRole = "admin" | "user" | "viewer";
 export type StreamReasoningLevel = "low" | "medium" | "high";
 
 type ScopedAccessContext = InferenceAuthorizationContext & {
@@ -107,8 +115,9 @@ export type ChatWithScopedRagInput = {
   prompt: string;
   teamId?: string;
   workspaceId: string;
-  projectId: string;
+  projectId?: string | null;
   chatId?: string;
+  assistantMessageId?: string | null;
   asanaSearchEnabled?: boolean;
   reasoningLevel?: StreamReasoningLevel;
   webSearchEnabled?: boolean;
@@ -126,6 +135,11 @@ export type ChatWithScopedRagResult = {
 
 export type ChatWithScopedRagCitation = ChatWithScopedRagResult["citations"][number];
 
+type HistoricalPromptContext = {
+  context: string;
+  citations: ChatWithScopedRagCitation[];
+};
+
 type EmbeddingResponse = {
   data?: number[][];
 };
@@ -141,10 +155,10 @@ type DocumentChunkRow = {
 
 type ScopedPromptContext = {
   workspaceName: string;
-  projectName: string;
-  projectDescription: string;
-  projectInstructions: string;
-  projectStatus: string;
+  projectName: string | null;
+  projectDescription: string | null;
+  projectInstructions: string | null;
+  projectStatus: string | null;
 };
 
 type StreamTraceMessage = {
@@ -216,25 +230,29 @@ async function currentUserId() {
   return userId;
 }
 
-function normalizeAuthorizationRole(role: string | null | undefined): AuthorizationRole {
-  return role === "admin" || role === "viewer" ? role : "user";
-}
-
-function buildAuthorizationContext(role: AuthorizationRole): InferenceAuthorizationContext {
+function buildAuthorizationContext(role: VertexAuthRole): InferenceAuthorizationContext {
   return {
     role,
-    canModifyState: role === "admin" || role === "user",
-    canAccessConfidentialArtifacts: role === "admin" || role === "user",
+    roleLabel: roleDisplayName(role),
+    canModifyState: roleCanModifyState(role),
+    canAccessConfidentialArtifacts: roleCanAccessConfidentialArtifacts(role),
+    entityPermissions: entityPermissionMatrix(role),
+  };
+}
+
+async function currentUserAuthorizationContext() {
+  const userId = await currentUserId();
+  const activeUser = await getDb().prepare('SELECT role FROM "user" WHERE id = ? LIMIT 1').bind(userId).first<{ role: string | null }>();
+  if (!activeUser) throw new Error("Signed-in user was not found.");
+  return {
+    userId,
+    ...buildAuthorizationContext(normalizeVertexRole(activeUser.role)),
   };
 }
 
 async function requireScopedProjectAccess(workspaceId: string, projectId: string, teamId: string | null): Promise<ScopedAccessContext> {
-  const userId = await currentUserId();
+  const userAuthorization = await currentUserAuthorizationContext();
   const db = getDb();
-
-  const activeUser = await db.prepare('SELECT role FROM "user" WHERE id = ? LIMIT 1').bind(userId).first<{ role: string | null }>();
-  if (!activeUser) throw new Error("Signed-in user was not found.");
-  const role = normalizeAuthorizationRole(activeUser.role);
 
   const project = await db
     .prepare(
@@ -253,7 +271,7 @@ async function requireScopedProjectAccess(workspaceId: string, projectId: string
     if (!teamId) throw new Error("Select a team before using this team project chat.");
     const teamMembership = await db
       .prepare("SELECT team_id FROM team_members WHERE team_id = ? AND user_id = ? LIMIT 1")
-      .bind(teamId, userId)
+      .bind(teamId, userAuthorization.userId)
       .first<{ team_id: string }>();
     if (!teamMembership) throw new Error("You are not a member of this team.");
   }
@@ -270,15 +288,77 @@ async function requireScopedProjectAccess(workspaceId: string, projectId: string
          )
        LIMIT 1`,
     )
-    .bind(projectId, userId, project.workspaceScope, teamId, project.workspaceScope)
+    .bind(projectId, userAuthorization.userId, project.workspaceScope, teamId, project.workspaceScope)
     .first<{ project_id: string }>();
   if (!projectMembership) throw new Error("You are not assigned to this project.");
 
   return {
-    userId,
+    ...userAuthorization,
     workspaceScope: project.workspaceScope,
     teamId: project.workspaceScope === "team" ? teamId : null,
-    ...buildAuthorizationContext(role),
+  };
+}
+
+async function requireScopedWorkspaceChatAccess(
+  workspaceId: string,
+  chatId: string | null,
+  teamId: string | null,
+): Promise<ScopedAccessContext> {
+  if (!chatId) throw new Error("Chat is required for workspace streaming.");
+  const userAuthorization = await currentUserAuthorizationContext();
+  const db = getDb();
+  const workspace = await db
+    .prepare("SELECT scope as workspaceScope FROM workspaces WHERE id = ? LIMIT 1")
+    .bind(workspaceId)
+    .first<{ workspaceScope: "personal" | "team" | "org" }>();
+  if (!workspace) throw new Error("Workspace was not found.");
+
+  if (workspace.workspaceScope === "team") {
+    if (!teamId) throw new Error("Select a team before using this team chat.");
+    const teamMembership = await db
+      .prepare("SELECT team_id FROM team_members WHERE team_id = ? AND user_id = ? LIMIT 1")
+      .bind(teamId, userAuthorization.userId)
+      .first<{ team_id: string }>();
+    if (!teamMembership) throw new Error("You are not a member of this team.");
+
+    const chat = await db
+      .prepare(
+        `SELECT c.id
+         FROM chats c
+         INNER JOIN chat_members cm ON cm.chat_id = c.id
+         WHERE c.id = ?
+           AND c.workspace_id = ?
+           AND c.section = 'workspace'
+           AND c.project_id IS NULL
+           AND cm.team_id = ?
+         LIMIT 1`,
+      )
+      .bind(chatId, workspaceId, teamId)
+      .first<{ id: string }>();
+    if (!chat) throw new Error("Chat was not found in this team workspace.");
+  } else {
+    const chat = await db
+      .prepare(
+        `SELECT c.id
+         FROM chats c
+         INNER JOIN chat_members cm ON cm.chat_id = c.id
+         WHERE c.id = ?
+           AND c.workspace_id = ?
+           AND c.section = 'workspace'
+           AND c.project_id IS NULL
+           AND cm.user_id = ?
+           AND cm.team_id IS NULL
+         LIMIT 1`,
+      )
+      .bind(chatId, workspaceId, userAuthorization.userId)
+      .first<{ id: string }>();
+    if (!chat) throw new Error("Chat was not found in this workspace.");
+  }
+
+  return {
+    ...userAuthorization,
+    workspaceScope: workspace.workspaceScope,
+    teamId: workspace.workspaceScope === "team" ? teamId : null,
   };
 }
 
@@ -291,7 +371,22 @@ async function requireProjectAccessByProjectId(teamId: string | null, projectId:
   return requireScopedProjectAccess(project.workspaceId, projectId, teamId);
 }
 
-async function fetchScopedPromptContext(workspaceId: string, projectId: string) {
+async function fetchScopedPromptContext(workspaceId: string, projectId: string | null) {
+  if (!projectId) {
+    const context = await getDb()
+      .prepare("SELECT name as workspaceName FROM workspaces WHERE id = ? LIMIT 1")
+      .bind(workspaceId)
+      .first<{ workspaceName: string }>();
+    if (!context) throw new Error("Workspace was not found.");
+    return {
+      workspaceName: context.workspaceName,
+      projectName: null,
+      projectDescription: null,
+      projectInstructions: null,
+      projectStatus: null,
+    } satisfies ScopedPromptContext;
+  }
+
   const context = await getDb()
     .prepare(
       `SELECT w.name as workspaceName,
@@ -370,6 +465,7 @@ async function embedTexts(
   scope?: {
     feature?: string;
     teamId?: string | null;
+    userId?: string | null;
     workspaceId?: string | null;
     projectId?: string | null;
   },
@@ -388,10 +484,20 @@ async function embedTexts(
         feature,
         teamId: scope?.teamId,
         projectId: scope?.projectId,
+        identity: {
+          userId: scope?.userId,
+          workspaceId: scope?.workspaceId,
+          teamId: scope?.teamId,
+          projectId: scope?.projectId,
+          scopeType: "scoped-rag",
+        },
         metadata: {
           feature,
           model: embeddingModelId,
+          userId: scope?.userId ?? null,
           workspaceId: scope?.workspaceId ?? null,
+          teamId: scope?.teamId ?? null,
+          projectId: scope?.projectId ?? null,
           batchSize: batch.length,
           batchIndex: index / embeddingBatchSize,
         },
@@ -486,6 +592,17 @@ function buildContext(chunks: DocumentChunkRow[]) {
     .join("\n\n");
 }
 
+export function intentRequiresVectorSearch(intent: PromptIntent) {
+  return intent === "RAG_SEARCH" || intent === "WEB_SEARCH";
+}
+
+function emptyHistoricalPromptContext(): HistoricalPromptContext {
+  return {
+    context: "",
+    citations: [],
+  };
+}
+
 function buildScopedVectorFilter(projectId: string, authorization: ScopedAccessContext) {
   return {
     project_id: { $eq: projectId },
@@ -515,10 +632,11 @@ async function fetchScopedHistoricalPromptContext({
   feature: string;
   authorization: ScopedAccessContext;
   topK: number;
-}) {
+}): Promise<HistoricalPromptContext> {
   const [promptEmbedding] = await embedTexts([prompt], {
     feature: "scoped-rag-query-embedding",
     teamId,
+    userId: authorization.userId,
     workspaceId,
     projectId,
   });
@@ -636,14 +754,16 @@ async function repairOperationalEntityJson({
   rawOutput,
   schema,
   teamId,
+  userId,
   workspaceId,
 }: {
   ai: Ai;
   chatId: string | null;
-  projectId: string;
+  projectId: string | null;
   rawOutput: string;
   schema: string;
   teamId: string | null;
+  userId?: string | null;
   workspaceId: string;
 }) {
   const result = await runTrackedAiGateway(
@@ -678,11 +798,19 @@ async function repairOperationalEntityJson({
       teamId,
       projectId,
       chatId,
+      identity: {
+        userId,
+        workspaceId,
+        teamId,
+        projectId,
+        scopeType: "scoped-rag",
+      },
       metadata: {
         feature: "scoped-rag-entity-repair",
         model: entityExtractionModelId,
+        userId: userId ?? null,
         teamId: teamId?.slice(0, 80) ?? null,
-        projectId: projectId.slice(0, 80),
+        projectId: projectId?.slice(0, 80) ?? null,
         chatId: chatId?.slice(0, 80) ?? null,
         workspaceId,
       },
@@ -698,13 +826,15 @@ async function extractOperationalEntities({
   projectId,
   prompt,
   teamId,
+  userId,
   workspaceId,
 }: {
   assistantResponse: string;
   chatId: string | null;
-  projectId: string;
+  projectId: string | null;
   prompt: string;
   teamId: string | null;
+  userId?: string | null;
   workspaceId: string;
 }): Promise<ChatOperationalEntity[]> {
   const trimmedPrompt = truncateForRagPrompt(prompt, 3_000);
@@ -722,6 +852,7 @@ async function extractOperationalEntities({
     '  "owner": "person/team if explicit, otherwise null",',
     '  "dueDate": "date/deadline if explicit, otherwise null",',
     '  "priority": "Low" | "Medium" | "High" | null,',
+    '  "severity": "low" | "medium" | "high" | "critical" | null,',
     '  "sourceQuote": "short quote from the prompt or response",',
     '  "confidence": 0.0',
     "}",
@@ -730,6 +861,7 @@ async function extractOperationalEntities({
     "Approval = explicit decision or permission needed from a person/group.",
     "Idea = suggestion, improvement, opportunity, or possible artifact to explore.",
     "Risk = blocker, dependency, uncertainty, or negative outcome to monitor.",
+    "For Risk items, set severity based on operational impact and urgency. For non-Risk items, set severity to null.",
     "Extract only distinct operational entities that are actually present. If none are present, return [].",
   ].join("\n");
 
@@ -762,11 +894,19 @@ async function extractOperationalEntities({
         teamId,
         projectId,
         chatId,
+        identity: {
+          userId,
+          workspaceId,
+          teamId,
+          projectId,
+          scopeType: "scoped-rag",
+        },
         metadata: {
           feature: "scoped-rag-entities",
           model: entityExtractionModelId,
+          userId: userId ?? null,
           teamId: teamId?.slice(0, 80) ?? null,
-          projectId: projectId.slice(0, 80),
+          projectId: projectId?.slice(0, 80) ?? null,
           chatId: chatId?.slice(0, 80) ?? null,
           workspaceId,
         },
@@ -783,6 +923,7 @@ async function extractOperationalEntities({
         rawOutput: text,
         schema,
         teamId,
+        userId,
         workspaceId,
       });
     }
@@ -799,10 +940,12 @@ function createAiSseResponse(
   citations: ChatWithScopedRagCitation[],
   trace: StreamTracePayload,
   entityContext: {
+    assistantMessageId?: string | null;
     chatId: string | null;
-    projectId: string;
+    projectId: string | null;
     prompt: string;
     teamId: string | null;
+    userId?: string | null;
     workspaceId: string;
   },
 ) {
@@ -867,13 +1010,30 @@ function createAiSseResponse(
           }
           buffer = "";
         }
-        if (!fullResponse.trim()) enqueue("token", { token: "The model did not return a response." });
-        const finalResponse = fullResponse.trim();
+        if (!fullResponse.trim()) {
+          fullResponse = "The model did not return a response.";
+          enqueue("token", { token: fullResponse });
+        }
+        const responseForEntityExtraction = fullResponse.trim();
         const entityExtraction = extractOperationalEntities({
-          assistantResponse: finalResponse || "The model did not return a response.",
+          assistantResponse: responseForEntityExtraction,
           ...entityContext,
         });
         const entities = await entityExtraction;
+        const riskFlagBlocks = entityContext.projectId
+          ? formatRiskFlagBlocks(
+              createRiskFlagJsonBlocks(entities, {
+                assistantMessageId: entityContext.assistantMessageId,
+                projectId: entityContext.projectId,
+                workspaceId: entityContext.workspaceId,
+              }),
+            )
+          : "";
+        if (riskFlagBlocks) {
+          fullResponse += riskFlagBlocks;
+          enqueue("token", { token: riskFlagBlocks });
+        }
+        const finalResponse = fullResponse.trim();
         enqueue("entities", { entities });
         enqueue("done", { response: finalResponse, thinking: fullThinking.trim(), citations, entities });
       } catch (error) {
@@ -895,11 +1055,39 @@ function createAiSseResponse(
   });
 }
 
-async function createDirectGenerationResponse({
+function generationFeatureForIntent(intent: Exclude<PromptIntent, "WEB_SEARCH">) {
+  if (intent === "RAG_SEARCH") return "scoped-rag-search-generation";
+  if (intent === "ENTITY_EXTRACTION") return "scoped-rag-entity-generation";
+  if (intent === "ARTIFACT_GENERATION") return "scoped-rag-artifact-generation";
+  return "scoped-rag-direct-chat";
+}
+
+function generationMetadataFeatureForIntent(intent: Exclude<PromptIntent, "WEB_SEARCH">) {
+  if (intent === "RAG_SEARCH") return "scoped-rag-search";
+  if (intent === "ENTITY_EXTRACTION") return "scoped-rag-entity";
+  if (intent === "ARTIFACT_GENERATION") return "scoped-rag-artifact";
+  return "scoped-rag-direct";
+}
+
+function buildIntentGenerationInstruction(intent: Exclude<PromptIntent, "WEB_SEARCH">) {
+  if (intent === "ENTITY_EXTRACTION") {
+    return "Focus on extracting concrete operational entities from the user's prompt. Include owners, due dates, priority, and source wording only when they are explicit.";
+  }
+  if (intent === "ARTIFACT_GENERATION") {
+    return "Produce the requested standalone artifact in clear Markdown. Use only provided prompt context unless scoped context is explicitly supplied.";
+  }
+  if (intent === "RAG_SEARCH") {
+    return "Ground the answer in the supplied scoped vector/RAG context. Cite supporting artifact keys inline using [r2_key: path] when relying on artifact chunks.";
+  }
+  return "Answer directly from the prompt and scoped workspace context. Do not claim to have searched project artifacts, web sources, or external systems.";
+}
+
+async function createScopedGenerationResponse({
   intent,
   prompt,
   projectId,
   chatId,
+  assistantMessageId,
   authorization,
   scopedPromptContext,
   teamId,
@@ -911,28 +1099,28 @@ async function createDirectGenerationResponse({
   reasoningProfile,
   contextNotice,
 }: {
-  intent: Extract<PromptIntent, "DIRECT_CHAT" | "ARTIFACT_GENERATION">;
+  intent: Exclude<PromptIntent, "WEB_SEARCH">;
   prompt: string;
   teamId: string | null;
   workspaceId: string;
-  projectId: string;
+  projectId: string | null;
   chatId: string | null;
+  assistantMessageId?: string | null;
   authorization: ScopedAccessContext;
   scopedPromptContext: ScopedPromptContext;
   asanaContext: string | null;
-  historicalContext: {
-    context: string;
-    citations: ChatWithScopedRagCitation[];
-  };
+  historicalContext: HistoricalPromptContext | null;
   maxCompletionTokens: number;
   reasoningLevel: StreamReasoningLevel;
   reasoningProfile: StreamContextBudget;
   contextNotice: string | null;
 }) {
+  const citations = historicalContext?.citations ?? [];
+  const vectorContext = historicalContext?.context.trim() ? historicalContext.context : null;
   const ai = getAi();
   const systemPrompt = prependScopedAuthorizationToSystemPrompt(
     prependScopedContextToSystemPrompt(
-      `${buildVertexAiSystemPrompt()} ${buildStreamReasoningInstruction(reasoningLevel)}`,
+      `${buildVertexAiSystemPrompt()} ${buildStreamReasoningInstruction(reasoningLevel)} ${buildIntentGenerationInstruction(intent)}`,
       scopedPromptContext,
     ),
     authorization,
@@ -955,15 +1143,19 @@ async function createDirectGenerationResponse({
           },
         ]
       : []),
-    {
-      role: "user",
-      content: [
-        "Scoped vector/RAG context:",
-        historicalContext.context,
-        "",
-        "Use this vector context when it is relevant. Cite supporting artifact keys inline using [r2_key: path] when relying on artifact chunks.",
-      ].join("\n"),
-    },
+    ...(vectorContext
+      ? [
+          {
+            role: "user" as const,
+            content: [
+              "Scoped vector/RAG context:",
+              vectorContext,
+              "",
+              "Use this vector context when it is relevant. Cite supporting artifact keys inline using [r2_key: path] when relying on artifact chunks.",
+            ].join("\n"),
+          },
+        ]
+      : []),
     { role: "user", content: prompt },
   ];
   const aiStream = (await runTrackedAiGateway(
@@ -981,42 +1173,50 @@ async function createDirectGenerationResponse({
       temperature: 0.2,
     },
     {
-      feature: intent === "ARTIFACT_GENERATION" ? "scoped-rag-artifact-generation" : "scoped-rag-direct-chat",
+      feature: generationFeatureForIntent(intent),
       teamId,
       projectId,
       chatId,
+      identity: {
+        userId: authorization.userId,
+        workspaceId,
+        teamId,
+        projectId,
+        scopeType: authorization.workspaceScope,
+      },
       metadata: {
-        feature: intent === "ARTIFACT_GENERATION" ? "scoped-rag-artifact" : "scoped-rag-direct",
+        feature: generationMetadataFeatureForIntent(intent),
         model: generationModelId,
+        userId: authorization.userId,
         teamId: teamId?.slice(0, 80) ?? null,
-        projectId: projectId.slice(0, 80),
+        projectId: projectId?.slice(0, 80) ?? null,
         chatId: chatId?.slice(0, 80) ?? null,
         workspaceId,
         intent,
-        vectorizeBypassed: false,
+        vectorizeBypassed: !historicalContext,
         userRole: authorization.role,
         confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
         maxCompletionTokens,
         streamed: true,
-        citations: historicalContext.citations.length,
+        citations: citations.length,
       },
     },
   )) as unknown as ReadableStream<Uint8Array>;
 
   return createAiSseResponse(
     aiStream,
-    historicalContext.citations,
+    citations,
     {
       request: { messages },
       context: {
         asanaContextChars: asanaContext?.length ?? 0,
-        citations: historicalContext.citations.length,
+        citations: citations.length,
         contextNotice,
-        historicalContextChars: historicalContext.context.length,
+        historicalContextChars: vectorContext?.length ?? 0,
         webContextChars: 0,
       },
     },
-    { chatId, projectId, prompt, teamId, workspaceId },
+    { assistantMessageId, chatId, projectId, prompt, teamId, userId: authorization.userId, workspaceId },
   );
 }
 
@@ -1024,6 +1224,7 @@ async function createWebSearchGenerationResponse({
   prompt,
   projectId,
   chatId,
+  assistantMessageId,
   authorization,
   scopedPromptContext,
   teamId,
@@ -1039,8 +1240,9 @@ async function createWebSearchGenerationResponse({
   prompt: string;
   teamId: string | null;
   workspaceId: string;
-  projectId: string;
+  projectId: string | null;
   chatId: string | null;
+  assistantMessageId?: string | null;
   authorization: ScopedAccessContext;
   scopedPromptContext: ScopedPromptContext;
   asanaContext: string | null;
@@ -1054,16 +1256,17 @@ async function createWebSearchGenerationResponse({
   reasoningProfile: StreamContextBudget;
   webContext: string;
 }) {
+  const scopeLabel = projectId ? "team-project" : "workspace";
   const systemPrompt = [
     buildInferenceAuthorizationDirective(authorization),
     "",
     buildScopedEnvironmentContext(scopedPromptContext),
     "",
-    "You are a scoped team-project assistant.",
-    "Use the real-time web context below for current or external facts and the scoped historical chunks for internal project history.",
+    `You are a scoped ${scopeLabel} assistant.`,
+    "Use the real-time web context below for current or external facts and any supplied historical chunks for internal history.",
     "If the web providers are unavailable or do not return useful evidence, say that live web search did not return enough usable information.",
     "Cite supporting artifact keys inline using the format [r2_key: path] when relying on historical chunks.",
-    "If the historical chunks do not contain enough evidence, say that the scoped artifact history does not contain enough information.",
+    "If supplied historical chunks do not contain enough evidence, say that the scoped artifact history does not contain enough information.",
     "Do not invent citations, source URLs, dates, prices, laws, policies, or public facts.",
     buildStreamReasoningInstruction(reasoningLevel),
     "",
@@ -1100,15 +1303,23 @@ async function createWebSearchGenerationResponse({
       teamId,
       projectId,
       chatId,
+      identity: {
+        userId: authorization.userId,
+        workspaceId,
+        teamId,
+        projectId,
+        scopeType: authorization.workspaceScope,
+      },
       metadata: {
         feature: "scoped-rag-web",
         model: generationModelId,
+        userId: authorization.userId,
         teamId: teamId?.slice(0, 80) ?? null,
-        projectId: projectId.slice(0, 80),
+        projectId: projectId?.slice(0, 80) ?? null,
         chatId: chatId?.slice(0, 80) ?? null,
         workspaceId,
         intent: "WEB_SEARCH",
-        vectorizeBypassed: false,
+        vectorizeBypassed: !projectId,
         userRole: authorization.role,
         confidentialFiltered: !authorization.canAccessConfidentialArtifacts,
         maxCompletionTokens,
@@ -1131,7 +1342,7 @@ async function createWebSearchGenerationResponse({
         webContextChars: webContext.length,
       },
     },
-    { chatId, projectId, prompt, teamId, workspaceId },
+    { assistantMessageId, chatId, projectId, prompt, teamId, userId: authorization.userId, workspaceId },
   );
 }
 
@@ -1391,11 +1602,13 @@ export async function fetchConsolidatedWebSearch(
   } = {},
 ) {
   const tasks: Array<Promise<{ provider: "tavily" | "firecrawl"; payload: TavilySearchPayload | FirecrawlSearchPayload }>> = [];
+  const tavilyApiKey = env.TAVILY_API_KEY;
+  const firecrawlApiKey = env.FIRECRAWL_API_KEY;
 
-  if (env.TAVILY_API_KEY) {
+  if (tavilyApiKey) {
     const startedAt = Date.now();
     tasks.push(
-      fetchTavilySearch(query, env.TAVILY_API_KEY)
+      fetchTavilySearch(query, tavilyApiKey)
         .then(async (payload) => {
           await recordAdminUsageEvent({
             provider: "tavily",
@@ -1427,10 +1640,10 @@ export async function fetchConsolidatedWebSearch(
     );
   }
 
-  if (env.FIRECRAWL_API_KEY) {
+  if (firecrawlApiKey) {
     const startedAt = Date.now();
     tasks.push(
-      fetchFirecrawlSearch(query, env.FIRECRAWL_API_KEY)
+      fetchFirecrawlSearch(query, firecrawlApiKey)
         .then(async (payload) => {
           await recordAdminUsageEvent({
             provider: "firecrawl",
@@ -1467,10 +1680,10 @@ export async function fetchConsolidatedWebSearch(
   }
 
   const settled = await Promise.allSettled(tasks);
-  let tavilySummary = env.TAVILY_API_KEY
+  let tavilySummary = tavilyApiKey
     ? "Tavily search failed or returned no usable summary."
     : "Tavily summary unavailable: TAVILY_API_KEY is not configured.";
-  let firecrawlMarkdown = env.FIRECRAWL_API_KEY
+  let firecrawlMarkdown = firecrawlApiKey
     ? "Firecrawl search failed or returned no markdown content."
     : "Firecrawl markdown unavailable: FIRECRAWL_API_KEY is not configured.";
   const issues: string[] = [];
@@ -1545,35 +1758,46 @@ export const ingestGeneratedArtifact = createServerFn({ method: "POST" })
 
 export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput): Promise<Response> {
   const workspaceId = assertRequiredString(data.workspaceId, "Workspace ID");
-  const projectId = assertRequiredString(data.projectId, "Project ID");
+  const projectId = data.projectId?.trim() || null;
   const chatId = data.chatId?.trim() || null;
+  const assistantMessageId = data.assistantMessageId?.trim() || null;
   const prompt = assertRequiredString(data.prompt, "Prompt");
   const reasoningLevel = normalizeStreamReasoningLevel(data.reasoningLevel);
   const budget = streamContextBudgets[reasoningLevel];
   const inputTeamId = data.teamId?.trim() || null;
 
-  const authorization = await requireScopedProjectAccess(workspaceId, projectId, inputTeamId);
+  const authorization = projectId
+    ? await requireScopedProjectAccess(workspaceId, projectId, inputTeamId)
+    : await requireScopedWorkspaceChatAccess(workspaceId, chatId, inputTeamId);
   const scopedPromptContext = await fetchScopedPromptContext(workspaceId, projectId);
   const teamId = authorization.teamId;
 
   const runtimeEnv = getRuntimeEnv();
+  const classifiedIntent = await classifyPromptIntent(prompt, getAi());
+  const intent: PromptIntent = data.webSearchEnabled && classifiedIntent === "RAG_SEARCH" ? "WEB_SEARCH" : classifiedIntent;
+  const needsVectorSearch = Boolean(projectId) && intentRequiresVectorSearch(intent);
+  const needsWebSearch = intent === "WEB_SEARCH";
   const [rawAsanaContext, rawHistoricalContext, rawWebContext] = await Promise.all([
-    fetchAsanaProjectContextForCurrentUser({
-      enabled: data.asanaSearchEnabled,
-      maxContextChars: budget.asanaMaxChars,
-      prompt,
-      vertexProjectId: projectId,
-    }),
-    fetchScopedHistoricalPromptContext({
-      prompt,
-      teamId,
-      workspaceId,
-      projectId,
-      feature: "scoped-rag-stream-vector-query",
-      authorization,
-      topK: budget.ragTopK,
-    }),
-    data.webSearchEnabled
+    projectId
+      ? fetchAsanaProjectContextForCurrentUser({
+          enabled: data.asanaSearchEnabled,
+          maxContextChars: budget.asanaMaxChars,
+          prompt,
+          vertexProjectId: projectId,
+        })
+      : Promise.resolve(null),
+    needsVectorSearch
+      ? fetchScopedHistoricalPromptContext({
+          prompt,
+          teamId,
+          workspaceId,
+          projectId: projectId ?? "",
+          feature: "scoped-rag-stream-vector-query",
+          authorization,
+          topK: budget.ragTopK,
+        })
+      : Promise.resolve(emptyHistoricalPromptContext()),
+    needsWebSearch
       ? fetchConsolidatedWebSearch(prompt, runtimeEnv, {
           teamId: authorization.teamId,
           projectId,
@@ -1582,6 +1806,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
             workspaceId,
             reasoningLevel,
             source: "scoped-rag-stream",
+            scope: projectId ? "project" : "workspace",
           },
         })
       : Promise.resolve(null),
@@ -1597,18 +1822,19 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
     return createTextSseResponse(budgetedContext.blockedMessage, rawHistoricalContext.citations);
   }
 
-  if (!data.webSearchEnabled) {
-    return createDirectGenerationResponse({
-      intent: "DIRECT_CHAT",
+  if (!needsWebSearch) {
+    return createScopedGenerationResponse({
+      intent,
       prompt,
       teamId,
       workspaceId,
       projectId,
       chatId,
+      assistantMessageId,
       authorization,
       scopedPromptContext,
       asanaContext: budgetedContext.asanaContext,
-      historicalContext: budgetedContext.historicalContext,
+      historicalContext: needsVectorSearch ? budgetedContext.historicalContext : null,
       maxCompletionTokens: budget.maxCompletionTokens,
       reasoningLevel,
       reasoningProfile: budget,
@@ -1622,6 +1848,7 @@ export async function createScopedRagStreamResponse(data: ChatWithScopedRagInput
     workspaceId,
     projectId,
     chatId,
+    assistantMessageId,
     authorization,
     scopedPromptContext,
     asanaContext: budgetedContext.asanaContext,

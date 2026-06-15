@@ -2,6 +2,8 @@ import { and, asc, eq, gte, inArray, lte, or, sql } from "drizzle-orm";
 import { drizzle, type DrizzleD1Database } from "drizzle-orm/d1";
 import * as schema from "../../db/schema";
 import { runAiGateway } from "@/lib/ai-gateway";
+import { briefingsChatIdForProject, weeklyBriefingsChatDescription, weeklyBriefingsChatTitle } from "@/lib/briefing-thread";
+import { recordRealtimeMutationEvent } from "@/lib/realtime-events";
 import {
   formatCustomInstructionTemplate,
   normalizeBriefingMarkdown,
@@ -18,6 +20,7 @@ type BriefingProjectRow = {
   id: string;
   workspaceId: string;
   workspaceName: string;
+  workspaceScope: "personal" | "team" | "org";
   name: string;
   description: string;
   status: string;
@@ -38,6 +41,7 @@ type TaskRow = {
   owner: string;
   source: string | null;
   status: string;
+  asanaTaskGid: string | null;
   createdAt: Date;
 };
 
@@ -60,6 +64,46 @@ type RiskSignalRow = {
   createdAt: string;
 };
 
+type PersistedRiskRow = {
+  id: string;
+  title: string;
+  description: string;
+  severity: "low" | "medium" | "high" | "critical";
+  status: string;
+  mitigationStrategy: string;
+};
+
+type ArtifactSourceRow = {
+  id: string;
+  title: string;
+  fileType: string;
+  owner: string;
+  artifactDate: string;
+  status: string;
+  summary: string;
+  r2Key: string;
+  href: string;
+  previewJson: string;
+  version: number;
+  parentArtifactId: string | null;
+  commitMessage: string;
+};
+
+type ModifiedArtifactRow = {
+  id: string;
+  title: string;
+  fileType: string;
+  owner: string | null;
+  status: string | null;
+  summary: string;
+  r2Key: string | null;
+  version: number | null;
+  parentArtifactId: string | null;
+  commitMessage: string | null;
+  modifiedAt: string;
+  source: "artifacts" | "artifacts_registry";
+};
+
 type BriefingGenerationInput = {
   projectId: string;
   workspaceId?: string | null;
@@ -69,6 +113,7 @@ type BriefingGenerationInput = {
   promptInstructions?: string | null;
   scheduledAt?: Date;
   markerKey?: string | null;
+  sourceUserId?: string | null;
 };
 
 type WorkersAiTextResult = {
@@ -90,9 +135,18 @@ type WorkersAiTextResult = {
   }>;
 };
 
-const dailyBriefingsTitle = "Daily Briefings";
+const legacyDailyBriefingsTitle = "Daily Briefings";
 const briefingAuthor = "VertexAI";
-const defaultWindowHours = 24;
+const defaultWindowHours = 168;
+const closedTaskStatuses = new Set(["closed", "complete", "completed", "done", "resolved"]);
+const contextLimits = {
+  asanaTasks: 120,
+  artifacts: 80,
+  messages: 240,
+  persistedRisks: 80,
+  riskSignals: 120,
+  tasks: 80,
+};
 
 function isoDateKey(date: Date) {
   return date.toISOString().slice(0, 10);
@@ -111,6 +165,75 @@ function xmlEscape(value: string | number | null | undefined) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function toIso(value: Date | string | number | null | undefined) {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return new Date(value).toISOString();
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : value;
+  }
+  return "";
+}
+
+function compactChronologicalRows<T>(rows: T[], limit: number) {
+  if (rows.length <= limit) return rows;
+  const headCount = Math.max(1, Math.floor(limit * 0.2));
+  const tailCount = Math.max(1, limit - headCount);
+  return [...rows.slice(0, headCount), ...rows.slice(-tailCount)];
+}
+
+function parseJsonRecord(value: string | null | undefined): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value ?? "");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function projectIdFromArtifactPreview(previewJson: string) {
+  const record = parseJsonRecord(previewJson);
+  const projectId = record?.projectId;
+  return typeof projectId === "string" && projectId.trim() ? projectId.trim() : null;
+}
+
+function parseArtifactDate(value: string) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed) : null;
+}
+
+function artifactDateFallsInWindow(value: string, windowStart: Date, windowEnd: Date) {
+  const parsed = parseArtifactDate(value);
+  if (!parsed) return false;
+  const dayStart = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 0, 0, 0, 0));
+  const dayEnd = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 23, 59, 59, 999));
+  return dayEnd >= windowStart && dayStart <= windowEnd;
+}
+
+function isClosedTaskStatus(status: string | null | undefined) {
+  return closedTaskStatuses.has((status ?? "").trim().toLowerCase());
+}
+
+function isCompletedAsanaTask(task: AsanaTaskRow) {
+  const status = (task.status ?? "").toLowerCase();
+  const action = task.action.toLowerCase();
+  const changeAction = (task.changeAction ?? "").toLowerCase();
+  const changeField = (task.changeField ?? "").toLowerCase();
+  return (
+    status.includes("complete") ||
+    status.includes("closed") ||
+    action.includes("complete") ||
+    action.includes("closed") ||
+    (changeField === "completed" && (changeAction === "changed" || changeAction === "added"))
+  );
+}
+
+function workspaceModeFromScope(scope: BriefingProjectRow["workspaceScope"]) {
+  if (scope === "team") return "Team";
+  if (scope === "org") return "Org";
+  return "Personal";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -210,24 +333,30 @@ function fallbackBriefing(
   const projectName = project.name?.trim() || "{Project Name}";
   const customInstructions = resolveInstructionPlaceholders(promptInstructions, project, windowEnd);
   return [
-    `# Chief of Staff Briefing - ${projectName} - ${isoDateKey(windowEnd)}`,
+    `# Weekly Briefing - ${projectName} - ${isoDateKey(windowEnd)}`,
     "",
     "> AI synthesis was unavailable for this run, so this fallback summary could not apply Custom Instructions beyond the static briefing sections.",
     `> Reason: ${failureReason}`,
     customInstructions ? `> Custom Instructions received: ${customInstructions}` : "",
     customInstructions ? "" : "",
-    "## Strategic Decisions",
+    "## Executive Summary",
     hasActivity
       ? "- Review the source activity in this thread; model synthesis was unavailable."
-      : "- No new strategic decisions were identified in the reporting window.",
+      : "- No activity was identified in the reporting window.",
     "",
-    "## Completed Asana Tasks",
+    "## Strategic Decisions and Direction",
+    "- No strategic decisions could be synthesized while model generation was unavailable.",
+    "",
+    "## Completed Asana-Linked Work",
     "- No completed Asana tasks were identified in the available source data.",
     "",
-    "## Elevated Project Risks",
+    "## Newly Surfaced Risks",
     project.status === "Blocked" || project.status === "Watch"
       ? `- Project status is currently ${project.status}.`
       : "- No elevated risks were identified in the available source data.",
+    "",
+    "## Modified Artifacts",
+    "- No modified artifacts were identified in the available source data.",
     "",
     "## Recommended Next Moves",
     "- Confirm whether follow-up is needed based on the source thread activity.",
@@ -241,6 +370,7 @@ async function getProjectById(db: AppDb, projectId: string) {
         id: schema.projects.id,
         workspaceId: schema.projects.workspaceId,
         workspaceName: schema.workspaces.name,
+        workspaceScope: schema.workspaces.scope,
         name: schema.projects.name,
         description: schema.projects.description,
         status: schema.projects.status,
@@ -260,6 +390,7 @@ async function listActiveOrgProjects(db: AppDb) {
         id: schema.projects.id,
         workspaceId: schema.projects.workspaceId,
         workspaceName: schema.workspaces.name,
+        workspaceScope: schema.workspaces.scope,
         name: schema.projects.name,
         description: schema.projects.description,
         status: schema.projects.status,
@@ -272,34 +403,23 @@ async function listActiveOrgProjects(db: AppDb) {
   return projects as BriefingProjectRow[];
 }
 
-async function getOrCreateDailyBriefingsChat(db: AppDb, project: BriefingProjectRow, preferredChatId?: string | null) {
-  if (preferredChatId) {
-    const [rows] = await db.batch([
-      db
-        .select({ id: schema.chats.id })
-        .from(schema.chats)
-        .where(
-          and(
-            eq(schema.chats.id, preferredChatId),
-            eq(schema.chats.workspaceId, project.workspaceId),
-            eq(schema.chats.projectId, project.id),
-          ),
-        )
-        .limit(1),
-    ]);
-    if (rows[0]?.id) return rows[0].id;
-  }
-
-  const [existing, sortRows] = await db.batch([
+async function getOrCreateBriefingsChat(db: AppDb, project: BriefingProjectRow) {
+  const chatId = briefingsChatIdForProject(project.id);
+  const [existingById, existingByTitle, sortRows] = await db.batch([
     db
-      .select({ id: schema.chats.id })
+      .select({ id: schema.chats.id, description: schema.chats.description })
+      .from(schema.chats)
+      .where(and(eq(schema.chats.id, chatId), eq(schema.chats.workspaceId, project.workspaceId), eq(schema.chats.projectId, project.id)))
+      .limit(1),
+    db
+      .select({ id: schema.chats.id, description: schema.chats.description })
       .from(schema.chats)
       .where(
         and(
           eq(schema.chats.workspaceId, project.workspaceId),
           eq(schema.chats.projectId, project.id),
           eq(schema.chats.section, "project"),
-          eq(schema.chats.title, dailyBriefingsTitle),
+          eq(schema.chats.title, weeklyBriefingsChatTitle),
         ),
       )
       .limit(1),
@@ -309,17 +429,22 @@ async function getOrCreateDailyBriefingsChat(db: AppDb, project: BriefingProject
       .where(and(eq(schema.chats.workspaceId, project.workspaceId), eq(schema.chats.projectId, project.id))),
   ]);
 
-  if (existing[0]?.id) return existing[0].id;
+  const existing = existingById[0] ?? existingByTitle[0];
+  if (existing?.id) {
+    if (existing.description !== weeklyBriefingsChatDescription) {
+      await db.update(schema.chats).set({ description: weeklyBriefingsChatDescription }).where(eq(schema.chats.id, existing.id));
+    }
+    return existing.id;
+  }
 
-  const chatId = `daily-briefings-${project.id}`;
   await db.batch([
     db.insert(schema.chats).values({
       id: chatId,
       workspaceId: project.workspaceId,
       projectId: project.id,
       section: "project",
-      title: dailyBriefingsTitle,
-      description: "Automated executive summaries generated by the scheduled Worker.",
+      title: weeklyBriefingsChatTitle,
+      description: weeklyBriefingsChatDescription,
       sortOrder: sortRows[0]?.sortOrder ?? 99,
     }),
   ]);
@@ -337,8 +462,60 @@ async function briefingExists(db: AppDb, chatId: string, marker: string) {
   return Boolean(rows[0]?.id);
 }
 
-async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow, windowStart: Date) {
-  const [messages, tasks, asanaTasks, riskSignals] = await db.batch([
+async function listModifiedRegistryArtifacts(d1: D1Database, project: BriefingProjectRow, windowStart: Date, windowEnd: Date) {
+  try {
+    const result = await d1
+      .prepare(
+        `SELECT id,
+                original_filename as title,
+                document_type as fileType,
+                uploaded_by_user_id as owner,
+                status,
+                error_message as summary,
+                r2_key as r2Key,
+                updated_at as updatedAt
+         FROM artifacts_registry
+         WHERE project_id = ?
+           AND updated_at >= ?
+           AND updated_at <= ?
+         ORDER BY updated_at ASC
+         LIMIT ?`,
+      )
+      .bind(project.id, windowStart.toISOString(), windowEnd.toISOString(), contextLimits.artifacts)
+      .all<{
+        id: string;
+        title: string;
+        fileType: string;
+        owner: string | null;
+        status: string;
+        summary: string | null;
+        r2Key: string;
+        updatedAt: string;
+      }>();
+
+    return (result.results ?? []).map(
+      (row): ModifiedArtifactRow => ({
+        id: row.id,
+        title: row.title,
+        fileType: row.fileType,
+        owner: row.owner,
+        status: row.status,
+        summary: row.summary ?? "",
+        r2Key: row.r2Key,
+        version: null,
+        parentArtifactId: null,
+        commitMessage: "Uploaded artifact registry row updated",
+        modifiedAt: row.updatedAt,
+        source: "artifacts_registry",
+      }),
+    );
+  } catch {
+    return [];
+  }
+}
+
+async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow, windowStart: Date, windowEnd: Date, d1: D1Database) {
+  const [messages, tasks, asanaTasks, riskSignals, persistedRisks, artifacts] = await db.batch([
     db
       .select({
         id: schema.chatMessages.id,
@@ -355,7 +532,9 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
           eq(schema.chatMessages.workspaceId, project.workspaceId),
           eq(schema.chats.projectId, project.id),
           gte(schema.chatMessages.createdAt, windowStart.toISOString()),
-          sql`${schema.chats.title} <> ${dailyBriefingsTitle}`,
+          lte(schema.chatMessages.createdAt, windowEnd.toISOString()),
+          sql`${schema.chatMessages.type} <> 'briefing'`,
+          sql`LOWER(${schema.chats.title}) NOT IN (${weeklyBriefingsChatTitle.toLowerCase()}, ${legacyDailyBriefingsTitle.toLowerCase()})`,
         ),
       )
       .orderBy(asc(schema.chatMessages.createdAt)),
@@ -366,6 +545,7 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         owner: schema.workspaceActions.owner,
         source: schema.workspaceActions.source,
         status: schema.workspaceActions.status,
+        asanaTaskGid: schema.workspaceActions.asanaTaskGid,
         createdAt: schema.workspaceActions.createdAt,
       })
       .from(schema.workspaceActions)
@@ -374,7 +554,9 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
           eq(schema.workspaceActions.workspaceId, project.workspaceId),
           eq(schema.workspaceActions.projectId, project.id),
           eq(schema.workspaceActions.kind, "task"),
+          sql`${schema.workspaceActions.asanaTaskGid} IS NOT NULL`,
           gte(schema.workspaceActions.createdAt, windowStart),
+          lte(schema.workspaceActions.createdAt, windowEnd),
         ),
       )
       .orderBy(asc(schema.workspaceActions.createdAt)),
@@ -394,7 +576,13 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         schema.asanaProjectMappings,
         eq(schema.asanaProjectMappings.asanaProjectGid, schema.asanaWebhookTaskStates.asanaProjectGid),
       )
-      .where(and(eq(schema.asanaProjectMappings.vertexProjectId, project.id), gte(schema.asanaWebhookTaskStates.updatedAt, windowStart)))
+      .where(
+        and(
+          eq(schema.asanaProjectMappings.vertexProjectId, project.id),
+          gte(schema.asanaWebhookTaskStates.updatedAt, windowStart),
+          lte(schema.asanaWebhookTaskStates.updatedAt, windowEnd),
+        ),
+      )
       .orderBy(asc(schema.asanaWebhookTaskStates.updatedAt)),
     db
       .select({
@@ -410,6 +598,9 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         and(
           eq(schema.chatMessages.workspaceId, project.workspaceId),
           gte(schema.chatMessages.createdAt, windowStart.toISOString()),
+          lte(schema.chatMessages.createdAt, windowEnd.toISOString()),
+          sql`${schema.chatMessages.type} <> 'briefing'`,
+          sql`LOWER(${schema.chats.title}) NOT IN (${weeklyBriefingsChatTitle.toLowerCase()}, ${legacyDailyBriefingsTitle.toLowerCase()})`,
           sql`(
           ${schema.chats.projectId} = ${project.id}
           OR ${schema.chats.projectId} IS NULL
@@ -424,19 +615,78 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         ),
       )
       .orderBy(asc(schema.chatMessages.createdAt)),
+    db
+      .select({
+        id: schema.risks.id,
+        title: schema.risks.title,
+        description: schema.risks.description,
+        severity: schema.risks.severity,
+        status: schema.risks.status,
+        mitigationStrategy: schema.risks.mitigationStrategy,
+      })
+      .from(schema.risks)
+      .where(and(eq(schema.risks.workspaceId, project.workspaceId), eq(schema.risks.projectId, project.id)))
+      .orderBy(asc(schema.risks.severity), asc(schema.risks.title)),
+    db
+      .select({
+        id: schema.artifacts.id,
+        title: schema.artifacts.title,
+        fileType: schema.artifacts.fileType,
+        owner: schema.artifacts.owner,
+        artifactDate: schema.artifacts.artifactDate,
+        status: schema.artifacts.status,
+        summary: schema.artifacts.summary,
+        r2Key: schema.artifacts.r2Key,
+        href: schema.artifacts.href,
+        previewJson: schema.artifacts.previewJson,
+        version: schema.artifacts.version,
+        parentArtifactId: schema.artifacts.parentArtifactId,
+        commitMessage: schema.artifacts.commitMessage,
+      })
+      .from(schema.artifacts)
+      .where(eq(schema.artifacts.workspaceId, project.workspaceId))
+      .orderBy(asc(schema.artifacts.title), asc(schema.artifacts.version)),
   ]);
 
+  const localModifiedArtifacts = (artifacts as ArtifactSourceRow[])
+    .filter((artifact) => projectIdFromArtifactPreview(artifact.previewJson) === project.id)
+    .filter((artifact) => artifactDateFallsInWindow(artifact.artifactDate, windowStart, windowEnd))
+    .map(
+      (artifact): ModifiedArtifactRow => ({
+        id: artifact.id,
+        title: artifact.title,
+        fileType: artifact.fileType,
+        owner: artifact.owner,
+        status: artifact.status,
+        summary: artifact.summary,
+        r2Key: artifact.r2Key,
+        version: artifact.version,
+        parentArtifactId: artifact.parentArtifactId,
+        commitMessage: artifact.commitMessage,
+        modifiedAt: artifact.artifactDate,
+        source: "artifacts",
+      }),
+    );
+  const registryArtifacts = await listModifiedRegistryArtifacts(d1, project, windowStart, windowEnd);
+  const modifiedArtifacts = [...localModifiedArtifacts, ...registryArtifacts].sort(
+    (left, right) => Date.parse(left.modifiedAt) - Date.parse(right.modifiedAt),
+  );
+
   return {
-    asanaTasks: asanaTasks as AsanaTaskRow[],
+    asanaTasks: (asanaTasks as AsanaTaskRow[]).filter(isCompletedAsanaTask),
     messages: messages as ChatMessageRow[],
+    modifiedArtifacts,
+    persistedRisks: persistedRisks as PersistedRiskRow[],
     riskSignals: riskSignals as RiskSignalRow[],
-    tasks: tasks as TaskRow[],
+    tasks: (tasks as TaskRow[]).filter((task) => task.asanaTaskGid && isClosedTaskStatus(task.status)),
   };
 }
 
 function buildXmlContext({
   asanaTasks,
   messages,
+  modifiedArtifacts,
+  persistedRisks,
   project,
   riskSignals,
   tasks,
@@ -445,20 +695,31 @@ function buildXmlContext({
 }: {
   asanaTasks: AsanaTaskRow[];
   messages: ChatMessageRow[];
+  modifiedArtifacts: ModifiedArtifactRow[];
+  persistedRisks: PersistedRiskRow[];
   project: BriefingProjectRow;
   riskSignals: RiskSignalRow[];
   tasks: TaskRow[];
   windowEnd: Date;
   windowStart: Date;
 }) {
-  const completedAsanaTasks = asanaTasks.filter((task) => {
-    const status = (task.status ?? "").toLowerCase();
-    return status.includes("complete") || task.changeField === "completed" || task.changeAction === "changed";
-  });
+  const compactedMessages = compactChronologicalRows(messages, contextLimits.messages);
+  const compactedTasks = compactChronologicalRows(tasks, contextLimits.tasks);
+  const compactedAsanaTasks = compactChronologicalRows(asanaTasks, contextLimits.asanaTasks);
+  const compactedRiskSignals = compactChronologicalRows(riskSignals, contextLimits.riskSignals);
+  const compactedPersistedRisks = compactChronologicalRows(persistedRisks, contextLimits.persistedRisks);
+  const compactedArtifacts = compactChronologicalRows(modifiedArtifacts, contextLimits.artifacts);
 
   return [
     `<briefing_context generated_at="${xmlEscape(windowEnd.toISOString())}">`,
     `  <reporting_window start="${xmlEscape(windowStart.toISOString())}" end="${xmlEscape(windowEnd.toISOString())}" />`,
+    "  <source_counts>",
+    `    <chat_messages total="${messages.length}" included="${compactedMessages.length}" omitted="${Math.max(0, messages.length - compactedMessages.length)}" />`,
+    `    <closed_asana_linked_tasks total="${tasks.length + asanaTasks.length}" workspace_tasks="${tasks.length}" webhook_tasks="${asanaTasks.length}" included="${compactedTasks.length + compactedAsanaTasks.length}" />`,
+    `    <risk_signals total="${riskSignals.length}" included="${compactedRiskSignals.length}" omitted="${Math.max(0, riskSignals.length - compactedRiskSignals.length)}" />`,
+    `    <risk_register_items total="${persistedRisks.length}" included="${compactedPersistedRisks.length}" />`,
+    `    <modified_artifacts total="${modifiedArtifacts.length}" included="${compactedArtifacts.length}" omitted="${Math.max(0, modifiedArtifacts.length - compactedArtifacts.length)}" />`,
+    "  </source_counts>",
     "  <project>",
     `    <id>${xmlEscape(project.id)}</id>`,
     `    <name>${xmlEscape(project.name)}</name>`,
@@ -467,62 +728,89 @@ function buildXmlContext({
     `    <description>${xmlEscape(project.description)}</description>`,
     "  </project>",
     "  <chat_messages>",
-    ...messages.map((message) =>
+    ...compactedMessages.map((message) =>
       [
         `    <message id="${xmlEscape(message.id)}" chat="${xmlEscape(message.chatTitle)}" role="${xmlEscape(message.role)}" author="${xmlEscape(message.author)}" created_at="${xmlEscape(message.createdAt)}">`,
-        `      ${xmlEscape(truncate(message.body, 900))}`,
+        `      ${xmlEscape(truncate(message.body, 1200))}`,
         "    </message>",
       ].join("\n"),
     ),
     "  </chat_messages>",
-    '  <tasks source="workspace_actions">',
-    ...tasks.map((task) =>
+    '  <closed_asana_linked_tasks source="workspace_actions">',
+    ...compactedTasks.map((task) =>
       [
-        `    <task id="${xmlEscape(task.id)}" status="${xmlEscape(task.status)}" owner="${xmlEscape(task.owner)}" source="${xmlEscape(task.source)}" created_at="${xmlEscape(task.createdAt.toISOString())}">`,
+        `    <task id="${xmlEscape(task.id)}" asana_gid="${xmlEscape(task.asanaTaskGid)}" status="${xmlEscape(task.status)}" owner="${xmlEscape(task.owner)}" source="${xmlEscape(task.source)}" created_at="${xmlEscape(toIso(task.createdAt))}">`,
         `      <title>${xmlEscape(task.title)}</title>`,
         "    </task>",
       ].join("\n"),
     ),
-    "  </tasks>",
-    "  <asana_tasks>",
-    ...asanaTasks.map((task) =>
+    "  </closed_asana_linked_tasks>",
+    '  <completed_asana_webhook_tasks source="asana_webhook_task_states">',
+    ...compactedAsanaTasks.map((task) =>
       [
-        `    <task gid="${xmlEscape(task.asanaTaskGid)}" project="${xmlEscape(task.asanaProjectName)}" status="${xmlEscape(task.status)}" action="${xmlEscape(task.action)}" change_action="${xmlEscape(task.changeAction)}" change_field="${xmlEscape(task.changeField)}" updated_at="${xmlEscape(task.updatedAt.toISOString())}" completed="${completedAsanaTasks.includes(task) ? "true" : "false"}">`,
+        `    <task gid="${xmlEscape(task.asanaTaskGid)}" project="${xmlEscape(task.asanaProjectName)}" status="${xmlEscape(task.status)}" action="${xmlEscape(task.action)}" change_action="${xmlEscape(task.changeAction)}" change_field="${xmlEscape(task.changeField)}" updated_at="${xmlEscape(toIso(task.updatedAt))}" completed="true">`,
         `      <name>${xmlEscape(task.taskName)}</name>`,
         "    </task>",
       ].join("\n"),
     ),
-    "  </asana_tasks>",
-    '  <risks source="risk_chats_and_status">',
+    "  </completed_asana_webhook_tasks>",
+    '  <new_operational_risk_signals source="chat_messages_and_project_status">',
     `    <project_status>${xmlEscape(project.status)}</project_status>`,
-    ...riskSignals.map((risk) =>
+    ...compactedRiskSignals.map((risk) =>
       [
         `    <risk_signal id="${xmlEscape(risk.id)}" chat="${xmlEscape(risk.chatTitle)}" author="${xmlEscape(risk.author)}" created_at="${xmlEscape(risk.createdAt)}">`,
-        `      ${xmlEscape(truncate(risk.body, 700))}`,
+        `      ${xmlEscape(truncate(risk.body, 900))}`,
         "    </risk_signal>",
       ].join("\n"),
     ),
-    "  </risks>",
+    "  </new_operational_risk_signals>",
+    '  <current_project_risk_register source="risks">',
+    ...compactedPersistedRisks.map((risk) =>
+      [
+        `    <risk id="${xmlEscape(risk.id)}" severity="${xmlEscape(risk.severity)}" status="${xmlEscape(risk.status)}">`,
+        `      <title>${xmlEscape(risk.title)}</title>`,
+        `      <description>${xmlEscape(truncate(risk.description, 700))}</description>`,
+        `      <mitigation>${xmlEscape(truncate(risk.mitigationStrategy, 700))}</mitigation>`,
+        "    </risk>",
+      ].join("\n"),
+    ),
+    "  </current_project_risk_register>",
+    "  <modified_artifacts>",
+    ...compactedArtifacts.map((artifact) =>
+      [
+        `    <artifact id="${xmlEscape(artifact.id)}" source="${xmlEscape(artifact.source)}" type="${xmlEscape(artifact.fileType)}" status="${xmlEscape(artifact.status)}" owner="${xmlEscape(artifact.owner)}" version="${xmlEscape(artifact.version)}" parent_id="${xmlEscape(artifact.parentArtifactId)}" modified_at="${xmlEscape(artifact.modifiedAt)}">`,
+        `      <title>${xmlEscape(artifact.title)}</title>`,
+        `      <summary>${xmlEscape(truncate(artifact.summary, 700))}</summary>`,
+        `      <commit_message>${xmlEscape(truncate(artifact.commitMessage, 240))}</commit_message>`,
+        `      <r2_key>${xmlEscape(artifact.r2Key)}</r2_key>`,
+        "    </artifact>",
+      ].join("\n"),
+    ),
+    "  </modified_artifacts>",
     "</briefing_context>",
   ].join("\n");
 }
 
 function buildSystemPrompt(project: BriefingProjectRow, windowEnd: Date, promptInstructions?: string | null) {
   const sharedRules = [
-    "You are a Chief of Staff preparing a concise executive briefing for senior Vertex Education stakeholders.",
+    "You are a Chief of Staff preparing the Weekly Briefing for senior Vertex Education stakeholders.",
     "Synthesize only the XML context provided. Do not invent owners, dates, risks, decisions, Asana completions, or project facts.",
-    "Use a strategic lens: identify decisions that matter, completed Asana work, and risks that should be escalated.",
+    "Use a strategic lens across the preceding seven-day reporting window: identify decisions that matter, completed Asana-linked work, newly surfaced operational risks, and modified artifacts.",
+    "Treat source_counts as coverage metadata. If rows were omitted by compaction, summarize that limitation in Source Coverage without speculating about omitted details.",
     "Return Markdown only.",
     "Use valid Markdown with real line breaks between the title, sections, paragraphs, and bullets. Do not return a single compressed paragraph.",
-    "Prefer crisp bullets with concrete evidence. If a section has no evidence, state that directly in one bullet.",
+    "Prefer crisp executive bullets with concrete evidence, source names, and dates when available. If a section has no evidence, state that directly in one bullet.",
   ];
   const defaultStructure = [
     "Use these headings in this order:",
-    "# Scheduled Intelligence Briefing",
-    "## Key Strategic Decisions",
-    "## Completed Asana Tasks",
-    "## Elevated Project Risks",
+    `# Weekly Briefing - ${project.name?.trim() || "Project"} - ${isoDateKey(windowEnd)}`,
+    "## Executive Summary",
+    "## Strategic Decisions and Direction",
+    "## Completed Asana-Linked Work",
+    "## Newly Surfaced Risks",
+    "## Modified Artifacts",
     "## Recommended Next Moves",
+    "## Source Coverage",
   ];
   const extra = formatCustomInstructionTemplate(resolveInstructionPlaceholders(promptInstructions, project, windowEnd));
   return extra
@@ -592,8 +880,15 @@ async function runBriefingAiAttempt(
     },
     {
       env,
+      identity: {
+        userId: "system",
+        workspaceId: project.workspaceId,
+        projectId: project.id,
+        scopeType: "weekly-briefing",
+      },
       metadata: {
-        feature: "scheduled-intelligence-briefing",
+        feature: "weekly-briefing-synthesis",
+        userId: "system",
         projectId: project.id,
         workspaceId: project.workspaceId,
         attempt: attempt.label,
@@ -660,12 +955,14 @@ export async function generateBriefingPreview(env: Env, input: BriefingGeneratio
 
   const reportingWindowHours = clampReportingWindowHours(input.reportingWindowHours);
   const windowStart = new Date(scheduledAt.getTime() - reportingWindowHours * 60 * 60 * 1000);
-  const intelligence = await collectProjectIntelligence(db, project, windowStart);
+  const intelligence = await collectProjectIntelligence(db, project, windowStart, scheduledAt, env.DB);
   const hasActivity =
     intelligence.messages.length > 0 ||
     intelligence.tasks.length > 0 ||
     intelligence.asanaTasks.length > 0 ||
-    intelligence.riskSignals.length > 0;
+    intelligence.riskSignals.length > 0 ||
+    intelligence.persistedRisks.length > 0 ||
+    intelligence.modifiedArtifacts.length > 0;
   const contextXml = buildXmlContext({ ...intelligence, project, windowEnd: scheduledAt, windowStart });
   const markdown = await generateBriefingMarkdown({
     contextXml,
@@ -687,6 +984,8 @@ export async function generateBriefingPreview(env: Env, input: BriefingGeneratio
       tasks: intelligence.tasks.length,
       asanaTasks: intelligence.asanaTasks.length,
       riskSignals: intelligence.riskSignals.length,
+      risks: intelligence.persistedRisks.length,
+      modifiedArtifacts: intelligence.modifiedArtifacts.length,
     },
   };
 }
@@ -717,8 +1016,10 @@ async function insertBriefingMessage(
       artifactType: null,
       artifactMeta: JSON.stringify({
         type: "briefing",
+        briefingKind: "weekly",
         generatedBy: source,
         model: vertexAiModelId,
+        readOnlyThread: true,
         scheduledAt: scheduledAt.toISOString(),
       }),
       attachmentsJson: null,
@@ -726,6 +1027,50 @@ async function insertBriefingMessage(
     }),
   ]);
   return id;
+}
+
+async function resolveBriefingEventTeamId(db: AppDb, project: BriefingProjectRow, sourceUserId: string) {
+  if (project.workspaceScope !== "team") return null;
+  const [rows] = await db.batch([
+    db
+      .select({ teamId: schema.projectMembers.teamId })
+      .from(schema.projectMembers)
+      .where(and(eq(schema.projectMembers.projectId, project.id), eq(schema.projectMembers.userId, sourceUserId)))
+      .limit(1),
+  ]);
+  return rows[0]?.teamId ?? null;
+}
+
+async function recordBriefingAvailableEvent(
+  d1: D1Database,
+  db: AppDb,
+  project: BriefingProjectRow,
+  chatId: string,
+  chatMessageId: string,
+  sourceUserId: string | null | undefined,
+) {
+  if (!sourceUserId) return;
+  try {
+    await recordRealtimeMutationEvent(d1, {
+      chatId,
+      entity: "chat_message",
+      entityId: chatMessageId,
+      invalidates: ["chats", "projects"],
+      mode: workspaceModeFromScope(project.workspaceScope),
+      operation: "insert",
+      projectId: project.id,
+      sourceClientId: null,
+      sourceUserId,
+      teamId: await resolveBriefingEventTeamId(db, project, sourceUserId),
+      workspaceId: project.workspaceId,
+    });
+  } catch (error) {
+    console.warn("[DailyBriefings] Briefing SSE mutation event was not recorded.", {
+      chatMessageId,
+      projectId: project.id,
+      message: error instanceof Error ? error.message : "Unknown realtime event error.",
+    });
+  }
 }
 
 export async function postBriefing(
@@ -742,13 +1087,14 @@ export async function postBriefing(
   if (!project) throw new Error("Briefing project was not found.");
 
   const markdown = input.markdown?.trim() || (await generateBriefingPreview(env, input)).markdown;
-  const chatId = await getOrCreateDailyBriefingsChat(db, project, input.chatId);
+  const chatId = await getOrCreateBriefingsChat(db, project);
   const marker = input.markerKey
     ? `<!-- scheduled-briefing:${input.markerKey} -->`
     : `<!-- scheduled-briefing:${project.id}:${scheduledAt.toISOString()} -->`;
   if (await briefingExists(db, chatId, marker)) return { chatId, chatMessageId: null, skipped: true };
 
   const chatMessageId = await insertBriefingMessage(db, chatId, project, marker, markdown, scheduledAt, input.source ?? "manual-test");
+  await recordBriefingAvailableEvent(env.DB, db, project, chatId, chatMessageId, input.sourceUserId);
   return { chatId, chatMessageId, skipped: false };
 }
 
@@ -861,12 +1207,13 @@ async function runSchedule(db: AppDb, env: Env, schedule: BriefingScheduleRow, s
   const runId = `briefing-run-${crypto.randomUUID()}`;
   try {
     if (!schedule.projectId) throw new Error("Schedule does not have a project selected.");
+    const reportingWindowHours = schedule.recurrence === "weekly" ? defaultWindowHours : schedule.reportingWindowHours;
     const preview = await generateBriefingPreview(env, {
       projectId: schedule.projectId,
       workspaceId: schedule.workspaceId,
       chatId: schedule.chatId,
       title: schedule.title,
-      reportingWindowHours: schedule.reportingWindowHours,
+      reportingWindowHours,
       promptInstructions: schedule.promptInstructions,
       scheduledAt,
       markerKey: `${schedule.id}:${scheduledAt.toISOString()}`,
@@ -874,14 +1221,15 @@ async function runSchedule(db: AppDb, env: Env, schedule: BriefingScheduleRow, s
     const postResult = await postBriefing(env, {
       projectId: schedule.projectId,
       workspaceId: schedule.workspaceId,
-      chatId: schedule.chatId,
+      chatId: null,
       title: schedule.title,
-      reportingWindowHours: schedule.reportingWindowHours,
+      reportingWindowHours,
       promptInstructions: schedule.promptInstructions,
       scheduledAt,
       markerKey: `${schedule.id}:${scheduledAt.toISOString()}`,
       markdown: preview.markdown,
       source: "cloudflare-cron",
+      sourceUserId: schedule.userId,
     });
     const nextRunAt = computeNextRunAfter(schedule, scheduledAt);
     await db.batch([
@@ -979,7 +1327,7 @@ export async function runLegacyOrgBriefings(env: Env, scheduledTime: number = Da
   const projects = await listActiveOrgProjects(db);
   for (const project of projects) {
     try {
-      const chatId = await getOrCreateDailyBriefingsChat(db, project);
+      const chatId = await getOrCreateBriefingsChat(db, project);
       const markerKey = `legacy:${project.id}:${isoDateKey(scheduledAt)}:${reportingWindowHours}h`;
       if (await briefingExists(db, chatId, `<!-- scheduled-briefing:${markerKey} -->`)) continue;
       const preview = await generateBriefingPreview(env, {

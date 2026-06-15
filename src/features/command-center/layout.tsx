@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { type WorkspacePresenceUser } from "@/lib/chat-sync";
+import { isAutomatedBriefingsChat } from "@/lib/briefing-thread";
 import { cn } from "@/lib/utils";
 import {
   type Approval,
@@ -529,7 +530,7 @@ export function ProjectNav({
                     {chat.title}
                   </span>
                 </button>
-                {canEdit ? (
+                {canEdit && !isAutomatedBriefingsChat(chat) ? (
                   <details className="group relative opacity-0 transition-opacity focus-within:opacity-100 group-hover/chat-row:opacity-100">
                     <summary className="grid size-7 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
                       <MoreHorizontal className="size-4" />
@@ -595,7 +596,7 @@ export function ProjectNav({
                 {chat.title}
               </span>
             </button>
-            {canEdit ? (
+            {canEdit && !isAutomatedBriefingsChat(chat) ? (
               <details className="group relative opacity-0 transition-opacity focus-within:opacity-100 group-hover/chat-row:opacity-100">
                 <summary className="grid size-8 cursor-pointer list-none place-items-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground">
                   <MoreHorizontal className="size-4" />

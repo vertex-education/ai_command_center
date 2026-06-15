@@ -1,8 +1,12 @@
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
 
-export const intentRoutingModelId = "@cf/meta/llama-3-8b-instruct";
+export const intentRoutingModelId = "@cf/zai-org/glm-4.7-flash";
 
-export type PromptIntent = "RAG_SEARCH" | "WEB_SEARCH" | "DIRECT_CHAT" | "ARTIFACT_GENERATION";
+export const promptIntentLabels = ["RAG_SEARCH", "DIRECT_CHAT", "WEB_SEARCH", "ENTITY_EXTRACTION", "ARTIFACT_GENERATION"] as const;
+
+export type PromptIntent = (typeof promptIntentLabels)[number];
+
+const promptIntentLabelSet = new Set<string>(promptIntentLabels);
 
 function extractGeneratedText(result: unknown) {
   if (typeof result === "string") return result;
@@ -42,9 +46,7 @@ export function normalizePromptIntent(value: string): PromptIntent | null {
     .toUpperCase()
     .replace(/[^A-Z]+/g, "_")
     .replace(/^_+|_+$/g, "");
-  if (normalized === "RAG_SEARCH" || normalized === "WEB_SEARCH" || normalized === "DIRECT_CHAT" || normalized === "ARTIFACT_GENERATION") {
-    return normalized;
-  }
+  if (promptIntentLabelSet.has(normalized)) return normalized as PromptIntent;
   return null;
 }
 
@@ -74,6 +76,12 @@ export function inferPromptIntentFallback(prompt: string): PromptIntent {
   const ragPatterns = [/\b(citation|source)\b/];
   if (ragPatterns.some((pattern) => pattern.test(normalized))) return "RAG_SEARCH";
 
+  const entityExtractionPatterns = [
+    /\b(extract|identify|find|pull|list)\b.*\b(action item|action items|task|tasks|approval|approvals|risk|risks|idea|ideas|entity|entities|owner|owners|deadline|deadlines|due date|due dates)\b/,
+    /\b(action item|action items|tasks?|approvals?|risks?|ideas?|entities)\b.*\b(from this|from the text|from the note|in this message|below)\b/,
+  ];
+  if (entityExtractionPatterns.some((pattern) => pattern.test(normalized))) return "ENTITY_EXTRACTION";
+
   return "DIRECT_CHAT";
 }
 
@@ -88,10 +96,11 @@ export async function classifyPromptIntent(prompt: string, ai: Ai): Promise<Prom
             role: "system",
             content: [
               "Classify the user's latest prompt for a scoped command-center assistant.",
-              "Return exactly one label with no explanation: RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, or ARTIFACT_GENERATION.",
+              `Return exactly one label with no explanation: ${promptIntentLabels.join(", ")}.`,
               "Use RAG_SEARCH when the user asks about existing workspace, team, project, uploaded artifact, document, file, record, history, source, citation, or prior generated content.",
               "Use WEB_SEARCH when the user asks for current, recent, latest, online, web, internet, news, pricing, public, cited external, or URL-based information.",
               "Use DIRECT_CHAT for greetings, administrative questions, general conversation, planning, brainstorming, explanation, or requests that do not need scoped records or external facts.",
+              "Use ENTITY_EXTRACTION when the user asks to extract, identify, or list tasks, approvals, risks, ideas, owners, deadlines, or other operational entities from text in the prompt.",
               "Use ARTIFACT_GENERATION when the user asks to draft, write, create, generate, format, compose, build, or produce a standalone artifact from the prompt itself.",
               "When unsure, choose RAG_SEARCH.",
             ].join(" "),
@@ -99,13 +108,19 @@ export async function classifyPromptIntent(prompt: string, ai: Ai): Promise<Prom
           { role: "user", content: prompt },
         ],
         max_completion_tokens: 8,
+        chat_template_kwargs: {
+          enable_thinking: false,
+          thinking: false,
+        },
         temperature: 0,
       },
       {
         feature: "intent-routing",
+        fallbackModel: null,
         metadata: {
           feature: "intent-routing",
           model: intentRoutingModelId,
+          turnLevelThinkingEnabled: false,
         },
       },
     );

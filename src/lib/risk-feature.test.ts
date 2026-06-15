@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getRiskStats, getScopedRisks, riskManagementHref, riskSeverityRank, type LightweightRisk } from "@/lib/risk-feature";
+import {
+  getRiskStats,
+  getScopedRisks,
+  riskManagementHref,
+  riskSeverityRank,
+  workspaceScopeFromId,
+  type LightweightRisk,
+} from "@/lib/risk-feature";
 
 const risks: LightweightRisk[] = [
   {
@@ -53,8 +60,15 @@ describe("risk feature helpers", () => {
     expect(ordered).toEqual(["critical", "high", "medium", "low"]);
   });
 
-  it("builds the dedicated risk management route only when a project is selected", () => {
-    expect(riskManagementHref("team", "project with spaces")).toBe("/workspace/ws-team/project/project%20with%20spaces/risks");
-    expect(riskManagementHref("team", null)).toBeNull();
+  it("builds command-center risk links scoped to mode and project", () => {
+    expect(riskManagementHref("team", "project with spaces")).toBe("/?mode=Team&tab=Risks&projectId=project+with+spaces");
+    expect(riskManagementHref("team", null)).toBe("/?mode=Team&tab=Risks");
+  });
+
+  it("resolves workspace ids back to workspace scope", () => {
+    expect(workspaceScopeFromId("ws-personal")).toBe("personal");
+    expect(workspaceScopeFromId("ws-team")).toBe("team");
+    expect(workspaceScopeFromId("ws-org")).toBe("org");
+    expect(workspaceScopeFromId("unknown")).toBeNull();
   });
 });

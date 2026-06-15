@@ -1,5 +1,6 @@
 import { getRequest } from "@tanstack/start-server-core";
 import { env } from "cloudflare:workers";
+import { isAdminRole } from "@/lib/auth-access-control";
 import { getAuth } from "@/lib/auth";
 import { vertexAiModelId } from "@/lib/prompts";
 
@@ -130,6 +131,10 @@ function getRuntimeEnv() {
   };
 }
 
+function configuredAiGatewayId() {
+  return getRuntimeEnv().CLOUDFLARE_AI_GATEWAY_ID?.trim() || defaultAiGatewayId;
+}
+
 async function getDb() {
   const env = getRuntimeEnv();
   const db = (env as Env).DB;
@@ -141,7 +146,7 @@ async function requireAdmin() {
   const request = getRequest();
   const session = (await getAuth(request).api.getSession({ headers: request.headers })) as AdminSession | null;
   if (!session?.user?.id) throw new Error("Sign in is required.");
-  if (session.user.role !== "admin") throw new Error("Admin privileges are required.");
+  if (!isAdminRole(session.user.role)) throw new Error("Admin privileges are required.");
   return session;
 }
 
@@ -211,7 +216,7 @@ async function getAiGatewayLog(logId: string) {
   if (!ai) return null;
 
   const promise = ai
-    .gateway(defaultAiGatewayId)
+    .gateway(configuredAiGatewayId())
     .getLog(logId)
     .then((log) => {
       gatewayLogCache.set(logId, {

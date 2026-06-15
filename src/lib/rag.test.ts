@@ -6,6 +6,7 @@ import {
   createR2Key,
   createTextSseResponse,
   firecrawlMarkdownFromPayload,
+  intentRequiresVectorSearch,
   normalizeSensitivityLabel,
   normalizeStreamReasoningLevel,
   safeFileName,
@@ -109,5 +110,13 @@ describe("scoped RAG utilities", () => {
       }),
     ).toContain("### Source\nURL: https://example.com\n# Source Details");
     expect(firecrawlMarkdownFromPayload({ data: [] })).toBe("Firecrawl did not return markdown content.");
+  });
+
+  it("only routes RAG and web-search intents through Vectorize", () => {
+    expect(intentRequiresVectorSearch("RAG_SEARCH")).toBe(true);
+    expect(intentRequiresVectorSearch("WEB_SEARCH")).toBe(true);
+    expect(intentRequiresVectorSearch("DIRECT_CHAT")).toBe(false);
+    expect(intentRequiresVectorSearch("ENTITY_EXTRACTION")).toBe(false);
+    expect(intentRequiresVectorSearch("ARTIFACT_GENERATION")).toBe(false);
   });
 });

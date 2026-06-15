@@ -1,6 +1,8 @@
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { type ColumnDef } from "@tanstack/react-table";
-import { CheckCircle2, Eye, UploadCloud, Plus, Search, Share2, ShieldAlert, Sparkles, Star, Trash2 } from "lucide-react";
+import { CheckCircle2, Eye, UploadCloud, Plus, Search, Share2, Sparkles, Star, Trash2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { ArtifactUploader } from "@/components/ArtifactUploader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +17,7 @@ import {
   type IdeaStatus,
   type ProjectSummary,
   type Risk,
+  type RiskSeverity,
   type Task,
   type WorkspaceMode,
   statusFilters,
@@ -40,6 +43,15 @@ export const approvalStatusOptions: Approval["status"][] = ["Not Reviewed", "Rev
 export const decisionStatusOptions: Decision["status"][] = ["Not Completed", "Completed"];
 
 export const ideaStatusOptions: IdeaStatus[] = ["Not Started", "Reviewing", "Convert to Project", "Dismiss"];
+
+const riskSeverityOptions: Array<RiskSeverity | "All"> = ["All", "critical", "high", "medium", "low"];
+
+const riskSeverityRank: Record<RiskSeverity, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+};
 
 export function WorkflowStatusSelect<TStatus extends string>({
   disabled,
@@ -520,14 +532,23 @@ export function TaskView({
       tasks.map((task) => {
         const syncControl = getTaskAsanaSyncControlState({
           asanaTaskGid: task.asanaTaskGid,
+          asanaSyncError: task.asanaSyncError,
+          asanaSyncQueuedAt: task.asanaSyncQueuedAt,
           canEdit,
           isSyncing: syncingTaskId === task.id || task.clientStatus === "pending",
         });
+        const syncMeta = task.asanaTaskGid
+          ? " / Synced to Asana"
+          : task.asanaSyncQueuedAt && !task.asanaSyncError
+            ? " / Queued for Asana"
+            : task.asanaSyncError
+              ? ` / Sync error: ${task.asanaSyncError}`
+              : "";
         return {
           id: task.id,
           title: task.title,
           originalText: task.originalText,
-          meta: `${task.owner} / ${task.source}${task.clientStatus === "pending" ? " / Pending" : ""}${task.asanaSyncError ? ` / Sync error: ${task.asanaSyncError}` : ""}`,
+          meta: `${task.owner} / ${task.source}${task.clientStatus === "pending" ? " / Pending" : ""}${syncMeta}`,
           pinned: task.pinned,
           statusControl:
             task.clientStatus === "pending" ? (
@@ -570,67 +591,241 @@ export function TaskView({
 }
 
 export function RiskView({
-  activeProject,
+  canEdit,
+  generatingRiskId,
+  projects = [],
   risks,
-  onManage,
+  scopeLabel = "selected scope",
+  searchTerm,
+  selectedRiskId,
+  onGenerateMitigation,
+  onSearchTerm,
   onPreview,
   onSelect,
 }: {
-  activeProject?: ProjectSummary;
+  canEdit: boolean;
+  generatingRiskId?: string | null;
+  projects?: ProjectSummary[];
   risks: Risk[];
-  onManage: () => void;
+  scopeLabel?: string;
+  searchTerm: string;
+  selectedRiskId?: string | null;
+  onGenerateMitigation: (risk: Risk) => void;
+  onSearchTerm: (value: string) => void;
   onPreview: (risk: Risk) => void;
   onSelect: (risk: Risk) => void;
 }) {
-  const risksById = useMemo(() => new Map(risks.map((risk) => [risk.id, risk])), [risks]);
+  const [severityFilter, setSeverityFilter] = useState<RiskSeverity | "All">("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [projectFilter, setProjectFilter] = useState("All");
   const criticalCount = risks.filter((risk) => risk.severity === "critical").length;
-  const items = useMemo<WorkflowLineItem[]>(
-    () =>
-      risks.map((risk) => ({
-        id: risk.id,
-        title: risk.description,
-        originalText: risk.mitigationStrategy || risk.description,
-        meta: `${risk.severity.toUpperCase()} / ${risk.status}${risk.mitigationStrategy ? " / Mitigation drafted" : ""}`,
-        complete: risk.severity === "critical" ? "destructive" : undefined,
-        statusControl: <SeverityBadge severity={risk.severity} />,
-      })),
-    [risks],
+  const mitigatedCount = risks.filter((risk) => risk.mitigationStrategy.trim()).length;
+  const statuses = useMemo(() => Array.from(new Set(risks.map((risk) => risk.status))).sort((a, b) => a.localeCompare(b)), [risks]);
+  const projectNameById = useMemo(() => new Map(projects.map((project) => [project.id, project.name])), [projects]);
+  const projectOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const risk of risks) {
+      const key = risk.projectId ?? "__workspace__";
+      options.set(key, risk.projectId ? (projectNameById.get(risk.projectId) ?? risk.projectId) : "Workspace-level");
+    }
+    return Array.from(options, ([id, label]) => ({ id, label })).sort((a, b) => a.label.localeCompare(b.label));
+  }, [projectNameById, risks]);
+  const projectCount = new Set(risks.map((risk) => risk.projectId).filter(Boolean)).size;
+  const workspaceLevelCount = risks.filter((risk) => !risk.projectId).length;
+  const filteredRisks = useMemo(() => {
+    const normalizedSearch = searchTerm.trim().toLowerCase();
+    return risks
+      .filter((risk) => {
+        const severityMatches = severityFilter === "All" || risk.severity === severityFilter;
+        const statusMatches = statusFilter === "All" || risk.status === statusFilter;
+        const projectMatches =
+          projectFilter === "All" || (projectFilter === "__workspace__" ? !risk.projectId : risk.projectId === projectFilter);
+        const projectName = risk.projectId ? (projectNameById.get(risk.projectId) ?? risk.projectId) : "Workspace-level";
+        const textMatches =
+          !normalizedSearch ||
+          [projectName, risk.title, risk.description, risk.severity, risk.status, risk.mitigationStrategy]
+            .join(" ")
+            .toLowerCase()
+            .includes(normalizedSearch);
+        return severityMatches && statusMatches && projectMatches && textMatches;
+      })
+      .sort(
+        (a, b) =>
+          riskSeverityRank[b.severity] - riskSeverityRank[a.severity] ||
+          (projectNameById.get(a.projectId ?? "") ?? "").localeCompare(projectNameById.get(b.projectId ?? "") ?? "") ||
+          a.title.localeCompare(b.title),
+      );
+  }, [projectFilter, projectNameById, risks, searchTerm, severityFilter, statusFilter]);
+  const columns = useMemo<ColumnDef<Risk>[]>(
+    () => [
+      {
+        accessorKey: "severity",
+        header: "Severity",
+        cell: ({ row }) => <SeverityBadge severity={row.original.severity} />,
+        sortingFn: (a, b) => riskSeverityRank[a.original.severity] - riskSeverityRank[b.original.severity],
+      },
+      {
+        accessorKey: "status",
+        header: "Status",
+        cell: ({ row }) => (
+          <Badge variant="outline" className="capitalize">
+            {row.original.status}
+          </Badge>
+        ),
+      },
+      {
+        id: "project",
+        accessorFn: (risk) => (risk.projectId ? (projectNameById.get(risk.projectId) ?? risk.projectId) : "Workspace-level"),
+        header: "Project",
+        cell: ({ row }) => (
+          <Badge variant="secondary" className="max-w-48 truncate">
+            {row.original.projectId ? (projectNameById.get(row.original.projectId) ?? row.original.projectId) : "Workspace-level"}
+          </Badge>
+        ),
+      },
+      {
+        accessorKey: "title",
+        header: "Risk",
+        cell: ({ row }) => (
+          <div className="max-w-[24rem]">
+            <strong className="block leading-5">{row.original.title}</strong>
+            <span className="mt-1 line-clamp-3 block text-xs leading-5 text-muted-foreground">{row.original.description}</span>
+          </div>
+        ),
+      },
+      {
+        accessorKey: "mitigationStrategy",
+        header: "Mitigation strategy",
+        cell: ({ row }) => {
+          const isGenerating = generatingRiskId === row.original.id;
+          if (isGenerating) {
+            return (
+              <div className="space-y-2">
+                <Badge variant="warning">Pending</Badge>
+                <p className="text-sm text-muted-foreground">Generating mitigation strategy...</p>
+              </div>
+            );
+          }
+          if (!row.original.mitigationStrategy) return <span className="text-muted-foreground">No mitigation generated yet.</span>;
+          return (
+            <div className="prose prose-sm max-w-[38rem] text-foreground prose-headings:mb-2 prose-headings:mt-0 prose-p:my-1 prose-ul:my-1">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{row.original.mitigationStrategy}</ReactMarkdown>
+            </div>
+          );
+        },
+      },
+      {
+        id: "actions",
+        header: "",
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className="flex justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+            <Button type="button" size="sm" variant="outline" onClick={() => onPreview(row.original)}>
+              <Eye />
+              Preview
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="whitespace-nowrap"
+              disabled={!canEdit || !row.original.projectId || Boolean(generatingRiskId)}
+              title={row.original.projectId ? "Generate mitigation" : "Select a project-scoped risk to generate mitigation"}
+              onClick={() => onGenerateMitigation(row.original)}
+            >
+              <Sparkles />
+              {generatingRiskId === row.original.id ? "Generating" : "Generate"}
+            </Button>
+          </div>
+        ),
+      },
+    ],
+    [canEdit, generatingRiskId, onGenerateMitigation, onPreview, projectNameById],
   );
+  const riskScopeDescription = `${risks.length} risks across ${projectCount} project${projectCount === 1 ? "" : "s"} in ${scopeLabel}${
+    workspaceLevelCount ? `, plus ${workspaceLevelCount} workspace-level risk${workspaceLevelCount === 1 ? "" : "s"}` : ""
+  }.`;
 
   return (
     <div className="space-y-4">
       <SectionHeader
         eyebrow="Risk status"
-        title="Scoped operational risks"
-        description={activeProject ? `${risks.length} risks tied to ${activeProject.name}` : `${risks.length} workspace-level risks`}
-        actions={
-          <Button type="button" variant="outline" onClick={onManage}>
-            <ShieldAlert />
-            Manage Risks
-          </Button>
-        }
+        title={`${filteredRisks.length} risks in view`}
+        description={riskScopeDescription}
+        actions={<RiskMetricSummary total={risks.length} critical={criticalCount} mitigated={mitigatedCount} />}
       />
+      <div className="grid gap-2 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <label className="flex h-9 items-center gap-2 rounded-md border bg-background px-3 text-muted-foreground">
+          <Search className="size-4" />
+          <Input
+            className="h-7 border-0 px-0 shadow-none focus-visible:ring-0"
+            placeholder="Search risks"
+            value={searchTerm}
+            onChange={(event) => onSearchTerm(event.target.value)}
+          />
+        </label>
+        <div className="scrollbar-thin flex gap-2 overflow-x-auto">
+          {riskSeverityOptions.map((severity) => (
+            <Button
+              key={severity}
+              type="button"
+              size="sm"
+              variant={severity === severityFilter ? "default" : "outline"}
+              onClick={() => setSeverityFilter(severity)}
+            >
+              {severity === "All" ? "All Severity" : titleCase(severity)}
+            </Button>
+          ))}
+          <WorkflowStatusSelect
+            label="Risk status filter"
+            options={["All", ...statuses]}
+            value={statusFilter}
+            onChange={(status) => setStatusFilter(status)}
+          />
+          <select
+            aria-label="Risk project filter"
+            title="Risk project filter"
+            className="h-8 rounded-md border bg-background px-2 text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+            value={projectFilter}
+            onChange={(event) => setProjectFilter(event.target.value)}
+          >
+            <option value="All">All Projects</option>
+            {projectOptions.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
       {criticalCount > 0 ? (
         <div className="rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {criticalCount} critical risk{criticalCount === 1 ? "" : "s"} in this scope.
         </div>
       ) : null}
-      <WorkflowLineList
-        canEdit={false}
-        emptyLabel="No risks in this scope."
-        items={items}
-        onDelete={() => undefined}
-        onPreview={(item) => {
-          const risk = risksById.get(item.id);
-          if (risk) onPreview(risk);
-        }}
-        onSelect={(item) => {
-          const risk = risksById.get(item.id);
-          if (risk) onSelect(risk);
-        }}
+      <DataTable
+        columns={columns}
+        data={filteredRisks}
+        getRowId={(risk) => risk.id}
+        selectedId={selectedRiskId ?? undefined}
+        onRowClick={onSelect}
       />
     </div>
   );
+}
+
+function RiskMetricSummary({ critical, mitigated, total }: { critical: number; mitigated: number; total: number }) {
+  return (
+    <div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex">
+      <span className="rounded-md border bg-background px-2 py-1">{total} total</span>
+      <span className="rounded-md border bg-background px-2 py-1">{critical} critical</span>
+      <span className="rounded-md border bg-background px-2 py-1">{mitigated} mitigated</span>
+    </div>
+  );
+}
+
+function titleCase(value: string) {
+  return value.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 export function workflowPreviewFromIdea(idea: Idea): NonNullable<WorkflowPreviewState> {
@@ -661,18 +856,19 @@ export function workflowPreviewFromApproval(approval: Approval): NonNullable<Wor
 }
 
 export function workflowPreviewFromTask(task: Task): NonNullable<WorkflowPreviewState> {
+  const syncMeta = task.asanaTaskGid ? " / Synced to Asana" : task.asanaSyncQueuedAt ? " / Queued for Asana" : "";
   return {
     kind: "Task",
     title: task.title,
     originalText: task.originalText || task.title,
-    meta: `${task.owner} / ${task.source}${task.asanaTaskGid ? " / Synced to Asana" : ""}`,
+    meta: `${task.owner} / ${task.source}${syncMeta}`,
   };
 }
 
 export function workflowPreviewFromRisk(risk: Risk): NonNullable<WorkflowPreviewState> {
   return {
     kind: "Risk",
-    title: risk.description,
+    title: risk.title,
     originalText: risk.mitigationStrategy || risk.description,
     meta: `${risk.severity.toUpperCase()} / ${risk.status}${risk.mitigationStrategy ? " / Mitigation drafted" : ""}`,
   };

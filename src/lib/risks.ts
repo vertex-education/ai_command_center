@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../db/schema";
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
+import { roleHasEntityPermission } from "@/lib/auth-access-control";
 import { getAuth } from "@/lib/auth";
 
 export type RiskSeverity = "low" | "medium" | "high" | "critical";
@@ -13,6 +14,7 @@ export type RiskRecord = {
   id: string;
   workspaceId: string;
   projectId: string;
+  title: string;
   description: string;
   severity: RiskSeverity;
   status: string;
@@ -71,7 +73,7 @@ async function currentSession() {
 }
 
 function canGenerateMitigations(session: AuthSession) {
-  return session.user.role === "admin" || session.user.role === "user";
+  return roleHasEntityPermission(session.user.role, "risks", "update");
 }
 
 function normalizeScopeInput(data: RiskScopeInput) {
@@ -184,6 +186,7 @@ export const generateRiskMitigation = createServerFn({ method: "POST" })
             content: [
               `Workspace: ${workspace.name} (${workspace.id})`,
               `Project: ${project.name} (${project.id})`,
+              `Risk title: ${risk.title}`,
               `Severity: ${risk.severity}`,
               `Status: ${risk.status}`,
               "Risk description:",
@@ -198,7 +201,14 @@ export const generateRiskMitigation = createServerFn({ method: "POST" })
         feature: "risk-mitigation-generation",
         model: mitigationModelId,
         projectId: project.id,
+        identity: {
+          userId: session.user.id,
+          workspaceId: workspace.id,
+          projectId: project.id,
+          scopeType: "risk-mitigation",
+        },
         metadata: {
+          userId: session.user.id,
           workspaceId: workspace.id,
           riskId: risk.id,
           severity: risk.severity,

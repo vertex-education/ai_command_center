@@ -6,6 +6,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import * as schema from "../../db/schema";
 import { getAuth } from "@/lib/auth";
+import { briefingsChatIdForProject, weeklyBriefingsChatDescription, weeklyBriefingsChatTitle } from "@/lib/briefing-thread";
 import { generateBriefingPreview } from "@/lib/daily-briefings";
 import type {
   BriefingPreviewResult,
@@ -70,13 +71,13 @@ function parseWeekdays(value: string | number[] | null | undefined) {
 }
 
 function normalizeScheduleInput(input: BriefingScheduleInput) {
-  const title = input.title.trim() || "Scheduled briefing";
-  const recurrence = recurrenceValues.has(input.recurrence) ? input.recurrence : "weekdays";
+  const title = input.title.trim() || "Weekly Project Briefing";
+  const recurrence = recurrenceValues.has(input.recurrence) ? input.recurrence : "weekly";
   const timeZone = input.timeZone.trim() || "America/New_York";
   const localTime = /^\d{2}:\d{2}$/.test(input.localTime) ? input.localTime : "08:00";
   const weekdays = parseWeekdays(input.weekdays);
   const monthDay = input.monthDay && input.monthDay >= 1 && input.monthDay <= 31 ? Math.floor(input.monthDay) : null;
-  const reportingWindowHours = Math.min(Math.max(Math.round(Number(input.reportingWindowHours) || 24), 1), 720);
+  const reportingWindowHours = Math.min(Math.max(Math.round(Number(input.reportingWindowHours) || 168), 1), 720);
   return {
     ...input,
     title,
@@ -344,38 +345,23 @@ async function getProjectScope(projectId: string) {
   return project;
 }
 
-async function resolveScheduleChatId(
-  db: ReturnType<typeof getDb>,
-  projectId: string,
-  workspaceId: string,
-  chatId: string | null,
-  newChatTitle: string | null,
-) {
-  if (chatId) {
-    const [chatRows] = await db.batch([
-      db
-        .select({ id: schema.chats.id })
-        .from(schema.chats)
-        .where(and(eq(schema.chats.id, chatId), eq(schema.chats.projectId, projectId)))
-        .limit(1),
-    ]);
-    if (!chatRows[0]) throw new Error("Choose a chat that belongs to the selected project.");
-    return chatId;
-  }
-
-  const title = newChatTitle?.trim();
-  if (!title) throw new Error("Choose an existing thread or enter a new thread name.");
-
-  const [existingRows, sortRows] = await db.batch([
+async function resolveScheduleChatId(db: ReturnType<typeof getDb>, projectId: string, workspaceId: string) {
+  const chatId = briefingsChatIdForProject(projectId);
+  const [existingById, existingByTitle, sortRows] = await db.batch([
     db
-      .select({ id: schema.chats.id })
+      .select({ id: schema.chats.id, description: schema.chats.description })
+      .from(schema.chats)
+      .where(and(eq(schema.chats.id, chatId), eq(schema.chats.projectId, projectId), eq(schema.chats.workspaceId, workspaceId)))
+      .limit(1),
+    db
+      .select({ id: schema.chats.id, description: schema.chats.description })
       .from(schema.chats)
       .where(
         and(
           eq(schema.chats.workspaceId, workspaceId),
           eq(schema.chats.projectId, projectId),
           eq(schema.chats.section, "project"),
-          eq(schema.chats.title, title),
+          eq(schema.chats.title, weeklyBriefingsChatTitle),
         ),
       )
       .limit(1),
@@ -385,23 +371,28 @@ async function resolveScheduleChatId(
       .where(and(eq(schema.chats.workspaceId, workspaceId), eq(schema.chats.projectId, projectId))),
   ]);
 
-  if (existingRows[0]?.id) return existingRows[0].id;
+  const existing = existingById[0] ?? existingByTitle[0];
+  if (existing?.id) {
+    if (existing.description !== weeklyBriefingsChatDescription) {
+      await db.update(schema.chats).set({ description: weeklyBriefingsChatDescription }).where(eq(schema.chats.id, existing.id));
+    }
+    return existing.id;
+  }
 
-  const newChatId = `briefing-thread-${projectId}-${crypto.randomUUID()}`;
   const nextSortOrder = Number(sortRows[0]?.nextSortOrder ?? 1);
   await db.batch([
     db.insert(schema.chats).values({
-      id: newChatId,
+      id: chatId,
       workspaceId,
       projectId,
       section: "project",
-      title,
-      description: "Automated briefing thread.",
+      title: weeklyBriefingsChatTitle,
+      description: weeklyBriefingsChatDescription,
       sortOrder: nextSortOrder,
     }),
   ]);
 
-  return newChatId;
+  return chatId;
 }
 
 export async function saveBriefingScheduleForCurrentUser(input: BriefingScheduleInput): Promise<BriefingScheduleView> {
@@ -413,7 +404,7 @@ export async function saveBriefingScheduleForCurrentUser(input: BriefingSchedule
   const nextRunAt = computeNextRunAtFromInput(normalized, now);
   const id = normalized.id?.trim() || `briefing-schedule-${crypto.randomUUID()}`;
   const runOnceAt = normalized.runOnceAt ? new Date(normalized.runOnceAt) : null;
-  const chatId = await resolveScheduleChatId(db, project.id, project.workspaceId, normalized.chatId, normalized.newChatTitle);
+  const chatId = await resolveScheduleChatId(db, project.id, project.workspaceId);
 
   const values = {
     id,

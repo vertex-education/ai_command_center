@@ -9,6 +9,7 @@ import {
   formatAsanaEventLine,
   getSignatureHeader,
   hexToBytes,
+  mapAsanaWebhookTaskStatusToWorkflowStatus,
   modeForScope,
   normalizeSignature,
   normalizeTaskStateEvent,
@@ -97,6 +98,9 @@ describe("Asana webhook utilities", () => {
 
   it("normalizes task-state events and extracts status changes", () => {
     expect(extractEventStatus(taskEvent)).toBe("completed");
+    expect(mapAsanaWebhookTaskStatusToWorkflowStatus("completed")).toBe("Completed");
+    expect(mapAsanaWebhookTaskStatusToWorkflowStatus("incomplete")).toBe("Open");
+    expect(mapAsanaWebhookTaskStatusToWorkflowStatus("custom")).toBeNull();
     expect(normalizeTaskStateEvent("workspace-1", taskEvent)).toMatchObject({
       asanaTaskGid: "task-1",
       asanaWorkspaceGid: "workspace-1",

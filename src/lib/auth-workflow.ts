@@ -1,5 +1,6 @@
-import { createServerFn } from "@tanstack/react-start";
-import { getRequest } from "@tanstack/start-server-core";
+import { createMiddleware, createServerFn } from "@tanstack/react-start";
+import { getRequest } from "@tanstack/react-start/server";
+import { isAdminRole, normalizeVertexRole, type VertexAuthRole } from "@/lib/auth-access-control";
 import { getAuth, getInternalSignupSecret, getMicrosoftEntraProviderId, isMicrosoftEntraConfigured, sendAuthEmail } from "@/lib/auth";
 import { env } from "cloudflare:workers";
 
@@ -20,9 +21,19 @@ type AuthSession = {
   };
 };
 
-export type InviteRole = "admin" | "user" | "viewer";
+type AuthSessionSnapshot = {
+  user: {
+    id: string;
+    email: string;
+    name: string;
+    role: VertexAuthRole;
+    emailVerified: boolean;
+  };
+};
 
-export type ManagedUserRole = "admin" | "user" | "viewer";
+export type InviteRole = VertexAuthRole;
+
+export type ManagedUserRole = VertexAuthRole;
 
 export type ManagedUserRecord = {
   id: string;
@@ -89,18 +100,39 @@ function inviteLink(token: string) {
   return `${requestOrigin()}/accept-invite?token=${encodeURIComponent(token)}`;
 }
 
-async function currentSession() {
-  const request = getRequest();
+async function sessionFromRequest(request: Request) {
   const session = await getAuth(request).api.getSession({
     headers: request.headers,
   });
   return session as AuthSession | null;
 }
 
+async function currentSession() {
+  return sessionFromRequest(getRequest());
+}
+
+function toSessionSnapshot(session: AuthSession): AuthSessionSnapshot {
+  return {
+    user: {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+      role: normalizeVertexRole(session.user.role),
+      emailVerified: Boolean(session.user.emailVerified),
+    },
+  };
+}
+
+const sessionMiddleware = createMiddleware({ type: "function" }).server(async ({ next }) => {
+  const request = getRequest();
+  const session = await sessionFromRequest(request);
+  return next({ context: { session } });
+});
+
 async function requireAdmin() {
   const session = await currentSession();
   if (!session) throw new Error("Sign in is required.");
-  if (session.user.role !== "admin") throw new Error("Admin privileges are required.");
+  if (!isAdminRole(session.user.role)) throw new Error("Admin privileges are required.");
   return session;
 }
 
@@ -134,6 +166,7 @@ async function createInviteRecord({
   role: InviteRole;
 }) {
   const normalizedEmail = normalizeEmail(email);
+  const normalizedRole = normalizeVertexRole(role);
   if (!isAllowedAccountEmail(normalizedEmail)) {
     throw new Error(`Only ${allowedDomain} emails are allowed. ${testInviteEmail} is enabled as the configured test account.`);
   }
@@ -148,7 +181,7 @@ async function createInviteRecord({
     .prepare(
       "INSERT INTO auth_invites (id, email, name, role, token_hash, invited_by_user_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(id, normalizedEmail, name.trim(), role, hash, invitedByUserId, expiresAt, now)
+    .bind(id, normalizedEmail, name.trim(), normalizedRole, hash, invitedByUserId, expiresAt, now)
     .run();
 
   const link = inviteLink(token);
@@ -160,7 +193,7 @@ async function createInviteRecord({
     html: `<p>You have been invited to VertexAI.</p><p><a href="${link}">Create your account</a></p><p>This link expires in 7 days.</p>`,
   });
 
-  return { id, email: normalizedEmail, role, inviteLink: link, emailResult };
+  return { id, email: normalizedEmail, role: normalizedRole, inviteLink: link, emailResult };
 }
 
 async function latestAuthActionUrl(email: string, subjectPrefix: string) {
@@ -174,19 +207,15 @@ async function latestAuthActionUrl(email: string, subjectPrefix: string) {
   return row;
 }
 
-export const getSessionSnapshot = createServerFn({ method: "GET" }).handler(async () => {
-  const session = await currentSession();
-  if (!session) return null;
-  return {
-    user: {
-      id: session.user.id,
-      email: session.user.email,
-      name: session.user.name,
-      role: session.user.role ?? "user",
-      emailVerified: Boolean(session.user.emailVerified),
-    },
-  };
-});
+export const getSession = createServerFn({ method: "GET" })
+  .middleware([sessionMiddleware])
+  .handler(async ({ context }) => {
+    const session = context.session;
+    if (!session) return null;
+    return toSessionSnapshot(session);
+  });
+
+export const getSessionSnapshot = getSession;
 
 export const startMicrosoftSignIn = createServerFn({ method: "POST" }).handler(async () => {
   if (!isMicrosoftEntraConfigured()) throw new Error("Microsoft sign-in is not configured.");
@@ -214,7 +243,7 @@ export const getInvitePreview = createServerFn({ method: "GET" })
     return {
       email: invite.email,
       name: invite.name,
-      role: invite.role,
+      role: normalizeVertexRole(invite.role),
       expiresAt: new Date(invite.expiresAt).toLocaleString(),
     };
   });
@@ -240,14 +269,15 @@ export const acceptInvite = createServerFn({ method: "POST" })
     const userId = (result as { user?: { id?: string } }).user?.id;
     if (!userId) throw new Error("Account was not created.");
 
-    await getDb().prepare('UPDATE "user" SET role = ?, updatedAt = ? WHERE id = ?').bind(invite.role, Date.now(), userId).run();
+    const role = normalizeVertexRole(invite.role);
+    await getDb().prepare('UPDATE "user" SET role = ?, updatedAt = ? WHERE id = ?').bind(role, Date.now(), userId).run();
     await getDb().prepare("UPDATE auth_invites SET accepted_at = ? WHERE id = ?").bind(Date.now(), invite.id).run();
 
     const verificationEmail = await latestAuthActionUrl(invite.email, "Verify your VertexAI email");
 
     return {
       email: invite.email,
-      role: invite.role,
+      role,
       verificationLink: verificationEmail?.sent ? null : verificationEmail?.actionUrl,
       verificationEmailError: verificationEmail?.sent ? null : verificationEmail?.failureReason,
       message: "Account created. Check your email to verify the address before signing in.",
@@ -276,6 +306,7 @@ export const listUserInvites = createServerFn({ method: "GET" }).handler(async (
 
   return (result.results ?? []).map((invite) => ({
     ...invite,
+    role: normalizeVertexRole(invite.role),
     expiresLabel: new Date(invite.expiresAt).toLocaleString(),
     createdLabel: new Date(invite.createdAt).toLocaleString(),
     status: invite.revokedAt ? "Revoked" : invite.acceptedAt ? "Accepted" : invite.expiresAt < Date.now() ? "Expired" : "Pending",
@@ -290,7 +321,7 @@ export const listManagedUsers = createServerFn({ method: "GET" }).handler(async 
 
   return (result.results ?? []).map((user) => ({
     ...user,
-    role: user.role === "admin" ? "admin" : user.role === "viewer" ? "viewer" : "user",
+    role: normalizeVertexRole(user.role),
     emailVerified: Boolean(user.emailVerified),
     createdLabel: new Date(user.createdAt).toLocaleString(),
     updatedLabel: new Date(user.updatedAt).toLocaleString(),
@@ -302,7 +333,7 @@ export const updateManagedUser = createServerFn({ method: "POST" })
   .handler(async ({ data }) => {
     await requireAdmin();
     const name = data.name.trim();
-    const role = data.role === "admin" ? "admin" : data.role === "viewer" ? "viewer" : "user";
+    const role = normalizeVertexRole(data.role);
     if (!name) throw new Error("Name is required.");
 
     const result = await getDb()

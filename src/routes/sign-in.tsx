@@ -7,11 +7,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { authClient } from "@/lib/auth-client";
-import { getSessionSnapshot, startMicrosoftSignIn } from "@/lib/auth-workflow";
+import { getSession, startMicrosoftSignIn } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/sign-in")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (session) throw redirect({ to: "/" });
   },
   head: () => ({

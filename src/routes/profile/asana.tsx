@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
 import {
   disconnectAsanaConnection,
   getAsanaConnectionSummary,
@@ -38,7 +38,7 @@ const expandableListPageSize = 5;
 
 export const Route = createFileRoute("/profile/asana")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },

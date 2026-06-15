@@ -8,10 +8,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { isAdminRole } from "@/lib/auth-access-control";
 import {
   createUserInvite,
   deleteManagedUser,
-  getSessionSnapshot,
+  getSession,
   listManagedUsers,
   listUserInvites,
   revokeUserInvite,
@@ -22,9 +23,9 @@ import {
 
 export const Route = createFileRoute("/admin/users")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
-    if (session.user.role !== "admin") throw redirect({ to: "/" });
+    if (!isAdminRole(session.user.role)) throw redirect({ to: "/" });
     return { session };
   },
   head: () => ({
@@ -51,7 +52,7 @@ function AdminUsersPage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("users");
   const [email, setEmail] = useState("rogerleecormier@gmail.com");
   const [name, setName] = useState("Roger Test User");
-  const [role, setRole] = useState<InviteRole>("user");
+  const [role, setRole] = useState<InviteRole>("contributor");
   const [userDrafts, setUserDrafts] = useState<Record<string, Pick<ListedUser, "name" | "role">>>({});
   const [message, setMessage] = useState("");
   const [inviteLink, setInviteLink] = useState("");
@@ -240,7 +241,8 @@ function AdminUsersPage() {
                         onChange={(event) => updateUserDraft(user.id, { role: event.target.value as ManagedUserRole })}
                       >
                         <option value="viewer">Viewer</option>
-                        <option value="user">User</option>
+                        <option value="contributor">Contributor</option>
+                        <option value="manager">Manager</option>
                         <option value="admin">Admin</option>
                       </select>
                     </TableCell>
@@ -314,7 +316,8 @@ function AdminUsersPage() {
                     onChange={(event) => setRole(event.target.value as InviteRole)}
                   >
                     <option value="viewer">Viewer</option>
-                    <option value="user">User</option>
+                    <option value="contributor">Contributor</option>
+                    <option value="manager">Manager</option>
                     <option value="admin">Admin</option>
                   </select>
                 </div>

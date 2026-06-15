@@ -1,4 +1,5 @@
 import { AppRail, type AppRailItem } from "@/components/AppRail";
+import { isAdminRole } from "@/lib/auth-access-control";
 import { authClient } from "@/lib/auth-client";
 
 type RailSession = {
@@ -26,7 +27,7 @@ export function AuthenticatedAppRail({
   return (
     <AppRail
       account={{
-        canAdmin: session.user.role === "admin",
+        canAdmin: isAdminRole(session.user.role),
         userEmail: session.user.email,
         userName: session.user.name,
         onSignOut: handleSignOut,

@@ -68,6 +68,8 @@ export type BriefingPreviewResult = {
     tasks: number;
     asanaTasks: number;
     riskSignals: number;
+    risks: number;
+    modifiedArtifacts: number;
   };
   project: {
     id: string;

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useForm } from "@tanstack/react-form";
 import { Download, Plus, Settings, Sparkles } from "lucide-react";
@@ -11,10 +11,18 @@ import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { listAsanaTaskStatusCustomFields, type AsanaTaskStatusCustomFieldOption } from "@/lib/asana-integration";
+import {
+  applyArtifactPatches,
+  parseArtifactPatchSequence,
+  type ArtifactPatchAction,
+  type ArtifactPatchAppliedChange,
+} from "@/lib/artifact-diff";
 import { cn } from "@/lib/utils";
 import {
   type AddIdeaInput,
   type Artifact,
+  type ArtifactPatchDraftResult,
+  type CommitArtifactPatchInput,
   type ChatSection,
   type Idea,
   type IdeaStatus,
@@ -802,6 +810,209 @@ export function ArtifactPreviewDialog({ artifact, onOpenChange }: { artifact: Ar
       </DialogContent>
     </Dialog>
   );
+}
+
+export function ArtifactPatchDialog({
+  artifact,
+  draft,
+  mode,
+  open,
+  pendingApprove,
+  pendingDraft,
+  onApprove,
+  onDraft,
+  onOpenChange,
+  onResetDraft,
+}: {
+  artifact: Artifact | null;
+  draft: ArtifactPatchDraftResult | null;
+  mode: WorkspaceMode;
+  open: boolean;
+  pendingApprove: boolean;
+  pendingDraft: boolean;
+  onApprove: (input: CommitArtifactPatchInput) => Promise<void>;
+  onDraft: (instruction: string) => Promise<void>;
+  onOpenChange: (open: boolean) => void;
+  onResetDraft: () => void;
+}) {
+  const [instruction, setInstruction] = useState("");
+  const [commitMessage, setCommitMessage] = useState("");
+  const parsedPatches = useMemo(() => (draft ? parseArtifactPatchSequence(draft.patchSequence) : []), [draft]);
+  const patchPreview = useMemo(() => (draft ? applyArtifactPatches(draft.baseText, parsedPatches) : null), [draft, parsedPatches]);
+  const warnings = [...(draft?.warnings ?? []), ...(patchPreview?.warnings ?? [])];
+  const canApprove = Boolean(draft && parsedPatches.length > 0 && patchPreview?.changes.length && warnings.length === 0);
+
+  useEffect(() => {
+    if (!open) return;
+    setCommitMessage(artifact ? `Approved AI diff patch for v${artifact.version}` : "");
+  }, [artifact, open]);
+
+  useEffect(() => {
+    if (open) return;
+    setInstruction("");
+    setCommitMessage("");
+  }, [open]);
+
+  async function handleDraftSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!instruction.trim()) return;
+    await onDraft(instruction);
+  }
+
+  async function handleApprove() {
+    if (!draft || !canApprove) return;
+    await onApprove({
+      artifactId: draft.artifactId,
+      baseR2Key: draft.baseR2Key,
+      commitMessage,
+      mode,
+      patches: parsedPatches,
+    });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] max-w-[min(1040px,calc(100vw-32px))] overflow-hidden p-0">
+        {artifact ? (
+          <>
+            <DialogHeader className="border-b px-5 py-4">
+              <DialogTitle>AI diff patch</DialogTitle>
+              <DialogDescription>
+                {artifact.title} / {artifact.type} / v{artifact.version}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid max-h-[70vh] min-h-0 gap-0 overflow-hidden lg:grid-cols-[320px_minmax(0,1fr)]">
+              <form className="space-y-4 border-r bg-muted/20 p-5" onSubmit={handleDraftSubmit}>
+                <div className="space-y-2">
+                  <Label htmlFor="artifact-patch-instruction">Requested change</Label>
+                  <Textarea
+                    id="artifact-patch-instruction"
+                    value={instruction}
+                    placeholder="Example: Update the launch date to July 15 and add one risk note about procurement timing."
+                    className="min-h-36"
+                    onChange={(event) => {
+                      setInstruction(event.target.value);
+                      if (draft) onResetDraft();
+                    }}
+                  />
+                </div>
+                <Button type="submit" disabled={pendingDraft || !instruction.trim()} className="w-full">
+                  <Sparkles />
+                  {pendingDraft ? "Drafting patch" : "Draft patch"}
+                </Button>
+                <div className="rounded-md border bg-background p-3 text-xs leading-5 text-muted-foreground">
+                  <strong className="block text-foreground">Patch model</strong>
+                  <span>{draft?.model ?? "Kimi K2.7 Code"}</span>
+                  <strong className="mt-3 block text-foreground">Base state</strong>
+                  <span>{draft ? `v${draft.baseVersion} / ${draft.baseText.length.toLocaleString()} characters` : "Not drafted"}</span>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="artifact-patch-commit-message">Commit message</Label>
+                  <Input
+                    id="artifact-patch-commit-message"
+                    value={commitMessage}
+                    placeholder="Approved AI diff patch"
+                    onChange={(event) => setCommitMessage(event.target.value)}
+                  />
+                </div>
+              </form>
+              <div className="min-h-0 overflow-auto p-5">
+                {draft && patchPreview ? (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant={warnings.length ? "destructive" : "secondary"}>{parsedPatches.length} patches</Badge>
+                      <Badge variant="outline">{patchPreview.changes.length} applicable</Badge>
+                      <Badge variant="outline">Base v{draft.baseVersion}</Badge>
+                    </div>
+                    {warnings.length ? (
+                      <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                        {warnings.map((warning) => (
+                          <p key={warning}>{warning}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="space-y-3">
+                      {patchPreview.changes.map((change, index) => (
+                        <ArtifactPatchChangePreview
+                          change={change}
+                          key={`${change.action}-${change.index}-${index}`}
+                          patch={parsedPatches[index]}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="grid min-h-72 place-items-center rounded-md border border-dashed bg-muted/20 p-6 text-center text-sm text-muted-foreground">
+                    Draft a patch to review exact replacements, insertions, and deletions before approval.
+                  </div>
+                )}
+              </div>
+            </div>
+            <DialogFooter className="border-t px-5 py-4">
+              <Button type="button" variant="outline" disabled={pendingDraft || pendingApprove} onClick={() => onOpenChange(false)}>
+                Close
+              </Button>
+              <Button type="button" disabled={!canApprove || pendingDraft || pendingApprove} onClick={handleApprove}>
+                {pendingApprove ? "Saving version" : "Approve patch"}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ArtifactPatchChangePreview({ change, patch }: { change: ArtifactPatchAppliedChange; patch?: ArtifactPatchAction }) {
+  return (
+    <div className="rounded-md border bg-background">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-muted/30 px-3 py-2">
+        <Badge variant="outline">{patchActionLabel(change.action)}</Badge>
+        <span className="text-xs text-muted-foreground">Occurrence {change.occurrence}</span>
+      </div>
+      <div className="space-y-2 p-3">
+        {change.rationale || patch?.rationale ? (
+          <p className="text-sm text-muted-foreground">{change.rationale ?? patch?.rationale}</p>
+        ) : null}
+        <pre className="whitespace-pre-wrap break-words rounded-md bg-muted/25 p-3 font-mono text-xs leading-5">
+          <span className="text-muted-foreground">{change.beforeContext}</span>
+          {change.action === "insert_before" ? <InsertedPatchText>{change.newString}</InsertedPatchText> : null}
+          <DeletedPatchText muted={change.action === "insert_before" || change.action === "insert_after"}>
+            {change.targetString}
+          </DeletedPatchText>
+          {change.action === "replace" || change.action === "insert_after" ? (
+            <InsertedPatchText>{change.newString}</InsertedPatchText>
+          ) : null}
+          <span className="text-muted-foreground">{change.afterContext}</span>
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function DeletedPatchText({ children, muted = false }: { children: string; muted?: boolean }) {
+  return (
+    <mark
+      className={cn(
+        "rounded-sm px-0.5 text-inherit",
+        muted ? "bg-secondary text-secondary-foreground" : "bg-destructive/15 text-destructive line-through decoration-destructive",
+      )}
+    >
+      {children}
+    </mark>
+  );
+}
+
+function InsertedPatchText({ children }: { children: string }) {
+  if (!children) return null;
+  return <mark className="rounded-sm bg-success/15 px-0.5 text-success">{children}</mark>;
+}
+
+function patchActionLabel(action: ArtifactPatchAction["action"]) {
+  if (action === "insert_before") return "Insert before";
+  if (action === "insert_after") return "Insert after";
+  if (action === "delete") return "Delete";
+  return "Replace";
 }
 
 export function WorkflowPreviewDialog({ onOpenChange, preview }: { onOpenChange: (open: boolean) => void; preview: WorkflowPreviewState }) {

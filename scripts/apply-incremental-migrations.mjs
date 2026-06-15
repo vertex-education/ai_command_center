@@ -622,6 +622,7 @@ const migrations = [
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
   description TEXT NOT NULL,
   severity TEXT NOT NULL CHECK (severity IN ('low', 'medium', 'high', 'critical')),
   status TEXT NOT NULL DEFAULT 'open',
@@ -630,6 +631,203 @@ const migrations = [
       "CREATE INDEX IF NOT EXISTS risks_scope_idx ON risks (workspace_id, project_id);",
       "CREATE INDEX IF NOT EXISTS risks_severity_idx ON risks (workspace_id, project_id, severity);",
       "CREATE INDEX IF NOT EXISTS risks_status_idx ON risks (workspace_id, project_id, status);",
+    ],
+  },
+  {
+    name: "0023_better_auth_organization",
+    isComplete: () =>
+      columnExists("session", "activeOrganizationId") &&
+      indexExists("session_active_organization_idx") &&
+      tableExists("organization") &&
+      tableExists("member") &&
+      tableExists("invitation") &&
+      indexExists("organization_slug_idx") &&
+      indexExists("member_user_id_idx") &&
+      indexExists("member_organization_id_idx") &&
+      indexExists("member_user_organization_idx") &&
+      indexExists("invitation_organization_id_idx") &&
+      indexExists("invitation_email_idx"),
+    steps: [
+      {
+        isComplete: () => columnExists("session", "activeOrganizationId"),
+        statement: 'ALTER TABLE "session" ADD COLUMN "activeOrganizationId" text;',
+      },
+      {
+        isComplete: () => indexExists("session_active_organization_idx"),
+        statement: 'CREATE INDEX IF NOT EXISTS "session_active_organization_idx" ON "session" ("activeOrganizationId");',
+      },
+      {
+        isComplete: () => tableExists("organization"),
+        statement: `CREATE TABLE IF NOT EXISTS "organization" (
+  "id" text PRIMARY KEY NOT NULL,
+  "name" text NOT NULL,
+  "slug" text NOT NULL,
+  "logo" text,
+  "createdAt" integer NOT NULL,
+  "metadata" text
+);`,
+      },
+      {
+        isComplete: () => indexExists("organization_slug_idx"),
+        statement: 'CREATE UNIQUE INDEX IF NOT EXISTS "organization_slug_idx" ON "organization" ("slug");',
+      },
+      {
+        isComplete: () => tableExists("member"),
+        statement: `CREATE TABLE IF NOT EXISTS "member" (
+  "id" text PRIMARY KEY NOT NULL,
+  "organizationId" text NOT NULL,
+  "userId" text NOT NULL,
+  "role" text NOT NULL,
+  "createdAt" integer NOT NULL,
+  FOREIGN KEY ("organizationId") REFERENCES "organization"("id") ON DELETE cascade,
+  FOREIGN KEY ("userId") REFERENCES "user"("id") ON DELETE cascade
+);`,
+      },
+      {
+        isComplete: () => indexExists("member_user_id_idx"),
+        statement: 'CREATE INDEX IF NOT EXISTS "member_user_id_idx" ON "member" ("userId");',
+      },
+      {
+        isComplete: () => indexExists("member_organization_id_idx"),
+        statement: 'CREATE INDEX IF NOT EXISTS "member_organization_id_idx" ON "member" ("organizationId");',
+      },
+      {
+        isComplete: () => indexExists("member_user_organization_idx"),
+        statement: 'CREATE UNIQUE INDEX IF NOT EXISTS "member_user_organization_idx" ON "member" ("userId", "organizationId");',
+      },
+      {
+        isComplete: () => tableExists("invitation"),
+        statement: `CREATE TABLE IF NOT EXISTS "invitation" (
+  "id" text PRIMARY KEY NOT NULL,
+  "organizationId" text NOT NULL,
+  "email" text NOT NULL,
+  "role" text,
+  "status" text NOT NULL DEFAULT 'pending',
+  "expiresAt" integer NOT NULL,
+  "inviterId" text NOT NULL,
+  "createdAt" integer NOT NULL,
+  FOREIGN KEY ("organizationId") REFERENCES "organization"("id") ON DELETE cascade,
+  FOREIGN KEY ("inviterId") REFERENCES "user"("id") ON DELETE cascade
+);`,
+      },
+      {
+        isComplete: () => indexExists("invitation_organization_id_idx"),
+        statement: 'CREATE INDEX IF NOT EXISTS "invitation_organization_id_idx" ON "invitation" ("organizationId");',
+      },
+      {
+        isComplete: () => indexExists("invitation_email_idx"),
+        statement: 'CREATE INDEX IF NOT EXISTS "invitation_email_idx" ON "invitation" ("email");',
+      },
+    ],
+  },
+  {
+    name: "0024_risks_title",
+    isComplete: () => columnExists("risks", "title"),
+    steps: [
+      {
+        isComplete: () => columnExists("risks", "title"),
+        statement: "ALTER TABLE risks ADD COLUMN title TEXT NOT NULL DEFAULT 'Untitled risk';",
+      },
+      {
+        isComplete: () => false,
+        statement: "UPDATE risks SET title = substr(trim(description), 1, 140) WHERE title = 'Untitled risk' AND trim(description) <> '';",
+      },
+    ],
+  },
+  {
+    name: "0025_asana_sync_queue",
+    isComplete: () => columnExists("workspace_actions", "asana_sync_queued_at"),
+    steps: [
+      {
+        isComplete: () => columnExists("workspace_actions", "asana_sync_queued_at"),
+        statement: "ALTER TABLE workspace_actions ADD COLUMN asana_sync_queued_at INTEGER;",
+      },
+    ],
+  },
+  {
+    name: "0026_scheduled_tasks",
+    isComplete: () =>
+      tableExists("scheduled_tasks") &&
+      indexExists("scheduled_tasks_due_idx") &&
+      indexExists("scheduled_tasks_org_type_idx") &&
+      indexExists("scheduled_tasks_workspace_idx"),
+    statements: [
+      `CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id TEXT PRIMARY KEY NOT NULL,
+  organization_id TEXT REFERENCES "organization"(id) ON DELETE CASCADE,
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('Weekly Briefing', 'Background Research', 'Artifact Validation')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'completed', 'failed', 'paused')),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  schedule_json TEXT NOT NULL DEFAULT '{}',
+  next_run_at INTEGER NOT NULL,
+  interval_minutes INTEGER,
+  retry_delay_minutes INTEGER NOT NULL DEFAULT 15,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  locked_at INTEGER,
+  last_run_at INTEGER,
+  last_completed_at INTEGER,
+  last_error TEXT,
+  result_json TEXT,
+  created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000),
+  updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER) * 1000)
+);`,
+      "CREATE INDEX IF NOT EXISTS scheduled_tasks_due_idx ON scheduled_tasks (enabled, status, next_run_at, priority);",
+      "CREATE INDEX IF NOT EXISTS scheduled_tasks_org_type_idx ON scheduled_tasks (organization_id, type, status, next_run_at);",
+      "CREATE INDEX IF NOT EXISTS scheduled_tasks_workspace_idx ON scheduled_tasks (workspace_id, status, next_run_at);",
+      `INSERT OR IGNORE INTO scheduled_tasks (
+  id,
+  type,
+  status,
+  enabled,
+  priority,
+  payload_json,
+  schedule_json,
+  next_run_at,
+  interval_minutes,
+  retry_delay_minutes,
+  max_attempts
+) VALUES (
+  'system-weekly-briefing-dispatch',
+  'Weekly Briefing',
+  'pending',
+  1,
+  100,
+  '{"runner":"due-briefing-schedules"}',
+  '{"cadence":"hourly"}',
+  0,
+  60,
+  15,
+  3
+);`,
+      `INSERT OR IGNORE INTO scheduled_tasks (
+  id,
+  type,
+  status,
+  enabled,
+  priority,
+  payload_json,
+  schedule_json,
+  next_run_at,
+  interval_minutes,
+  retry_delay_minutes,
+  max_attempts
+) VALUES (
+  'system-artifact-validation',
+  'Artifact Validation',
+  'pending',
+  1,
+  25,
+  '{"staleAfterHours":24}',
+  '{"cadence":"hourly"}',
+  0,
+  60,
+  15,
+  3
+);`,
     ],
   },
 ];

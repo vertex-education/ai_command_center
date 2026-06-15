@@ -11,7 +11,7 @@ const baseInput: BriefingScheduleInput = {
   projectId: "project-1",
   promptInstructions: "",
   recurrence: "weekdays",
-  reportingWindowHours: 24,
+  reportingWindowHours: 168,
   runOnceAt: null,
   timeZone: "America/New_York",
   title: "Morning status",
@@ -88,7 +88,7 @@ describe("briefing schedule next-run calculation", () => {
     expect(next?.toISOString()).toBe("2026-05-31T12:00:00.000Z");
   });
 
-  it("normalizes invalid recurrence and local time input to safe defaults", () => {
+  it("normalizes invalid recurrence and local time input to safe weekly defaults", () => {
     const next = computeNextRunAtFromInput(
       {
         ...baseInput,
@@ -99,6 +99,6 @@ describe("briefing schedule next-run calculation", () => {
       new Date("2026-06-12T20:00:00.000Z"),
     );
 
-    expect(next?.toISOString()).toBe("2026-06-15T12:00:00.000Z");
+    expect(next?.toISOString()).toBe("2026-06-19T12:00:00.000Z");
   });
 });

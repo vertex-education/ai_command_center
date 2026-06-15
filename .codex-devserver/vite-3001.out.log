@@ -1,0 +1,11 @@
+
+> vertex-ai@0.1.0 dev
+> vite dev --host 127.0.0.1 --port 3001
+
+⎔ Establishing remote connection...
+Using secrets defined in .dev.vars
+
+  [32m[1mVITE[22m v8.0.16[39m  [2mready in [0m[1m16419[22m[2m[0m ms[22m
+
+  [32m➜[39m  [1mLocal[22m:   [36mhttp://127.0.0.1:[1m3001[22m/[39m
+  [32m➜[39m  [1mDebug[22m:   [2m[33mhttp://127.0.0.1:[1m3001[22m[2m/__debug[39m[22m

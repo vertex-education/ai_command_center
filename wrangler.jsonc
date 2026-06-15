@@ -7,6 +7,9 @@
   "preview_urls": true,
   "compatibility_date": "2026-05-22",
   "compatibility_flags": ["nodejs_compat"],
+  "limits": {
+    "cpu_ms": 300000,
+  },
   "assets": {
     "directory": "./dist/client",
   },
@@ -80,6 +83,14 @@
         "binding": "GRAPH_WEBHOOK_QUEUE",
         "queue": "graph-webhook-notifications",
       },
+      {
+        "binding": "ASANA_SYNC_QUEUE",
+        "queue": "asana-sync-queue",
+      },
+      {
+        "binding": "AUTONOMOUS_RESEARCH_QUEUE",
+        "queue": "autonomous-research-queue",
+      },
     ],
     "consumers": [
       {
@@ -88,10 +99,17 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
       },
+      {
+        "queue": "asana-sync-queue",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "asana-sync-queue-dlq",
+      },
     ],
   },
   "triggers": {
-    "crons": ["*/15 * * * *"],
+    "crons": ["0 * * * *"],
   },
   "ai": {
     "binding": "AI",

@@ -32,8 +32,20 @@ type EmbeddingResponse = {
   data?: number[][];
 };
 
-type VectorMetadataValue = string | number | boolean | string[];
-type VectorMetadata = Record<string, VectorMetadataValue>;
+export type VectorMetadataValue = string | number | boolean | string[];
+export type VectorMetadata = Record<string, VectorMetadataValue>;
+export type ScopedRagMarkdownDocumentInput = {
+  rawText: string;
+  documentName: string;
+  r2Key: string;
+  teamId: string;
+  projectId: string;
+  feature: string;
+  sensitivityLabel?: "Standard" | "Confidential";
+  restricted?: boolean;
+  embeddingMetadata?: Record<string, string | number | boolean | null>;
+  vectorMetadata?: VectorMetadata;
+};
 
 export type DocumentIngestionEnv = Env & {
   ARTIFACTS_BUCKET: R2Bucket;
@@ -195,9 +207,16 @@ async function embedTexts(
         usageDb: env.DB,
         teamId: scope.teamId,
         projectId: scope.projectId,
+        identity: {
+          userId: "system",
+          teamId: scope.teamId,
+          projectId: scope.projectId,
+          scopeType: "document-ingestion",
+        },
         metadata: {
           feature: scope.feature,
           model: embeddingModelId,
+          userId: "system",
           batchSize: batch.length,
           batchIndex: index / embeddingBatchSize,
           ...scope.metadata,
@@ -428,21 +447,34 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
   if (!object) throw new Error(`R2 object not found: ${job.r2Key}`);
 
   const rawText = await object.text();
-  const chunks = chunkText(rawText);
-  if (chunks.length === 0) throw new Error("No text chunks were created.");
-  const sensitivityLabel = inferSensitivityLabel({
+  await ingestScopedRagMarkdownDocument(env, {
+    rawText,
     documentName: job.documentName,
-    metadata: object.customMetadata,
-  });
-  const restricted = sensitivityLabel === "Confidential";
-
-  const embeddings = await embedTexts(env, chunks, {
-    feature: "scoped-rag-generated-artifact-embedding",
+    r2Key: job.r2Key,
     teamId: job.teamId,
     projectId: job.projectId,
-    metadata: {
+    feature: "scoped-rag-generated-artifact-embedding",
+    sensitivityLabel: inferSensitivityLabel({
+      documentName: job.documentName,
+      metadata: object.customMetadata,
+    }),
+    embeddingMetadata: {
       documentName: job.documentName,
     },
+  });
+}
+
+export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv, input: ScopedRagMarkdownDocumentInput) {
+  const chunks = chunkText(input.rawText);
+  if (chunks.length === 0) throw new Error("No text chunks were created.");
+  const sensitivityLabel = input.sensitivityLabel ?? "Standard";
+  const restricted = input.restricted ?? sensitivityLabel === "Confidential";
+
+  const embeddings = await embedTexts(env, chunks, {
+    feature: input.feature,
+    teamId: input.teamId,
+    projectId: input.projectId,
+    metadata: input.embeddingMetadata,
   });
   const createdAt = new Date().toISOString();
   const rows = chunks.map((content, index) => ({
@@ -457,13 +489,14 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
       id: row.id,
       values: row.embedding,
       metadata: clampVectorMetadata({
-        team_id: job.teamId,
-        project_id: job.projectId,
-        document_name: job.documentName,
-        r2_key: job.r2Key,
+        team_id: input.teamId,
+        project_id: input.projectId,
+        document_name: input.documentName,
+        r2_key: input.r2Key,
         confidentiality: sensitivityLabel,
         restricted,
         chunk_index: row.chunkIndex,
+        ...(input.vectorMetadata ?? {}),
       }),
     })),
   );
@@ -482,7 +515,17 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
           restricted,
           created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(row.id, job.teamId, job.projectId, job.documentName, job.r2Key, row.content, sensitivityLabel, restricted ? 1 : 0, createdAt),
+      ).bind(
+        row.id,
+        input.teamId,
+        input.projectId,
+        input.documentName,
+        input.r2Key,
+        row.content,
+        sensitivityLabel,
+        restricted ? 1 : 0,
+        createdAt,
+      ),
     ),
   );
 }

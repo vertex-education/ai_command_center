@@ -15,6 +15,7 @@ import {
   Lock,
   MessageCircle,
   Search,
+  ShieldAlert,
   ShieldCheck,
   Sparkles,
   Users,
@@ -25,13 +26,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { AppRail } from "@/components/AppRail";
+import { isAdminRole } from "@/lib/auth-access-control";
 import { cn } from "@/lib/utils";
 import { authClient } from "@/lib/auth-client";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/docs")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },
@@ -162,7 +164,9 @@ const docSections: DocSection[] = [
       "Project-scoped chat uses context-aware routing before RAG so direct chat, web search, artifact generation, and Vectorize retrieval use separate backend paths.",
       "Project-scoped RAG chat uses /sse/workspace-events with stream=scoped-rag and the browser EventSource API when Team project context, AI, Vectorize, queue, DB, and R2 bindings are configured.",
       "Scoped RAG tokens are appended to the optimistic assistant message as SSE token events arrive, so Markdown renders incrementally during generation.",
-      "Assistant responses render through ArtifactRenderer, which interprets streaming Markdown, tables, action task-list syntax, and supported action JSON schemas.",
+      "Assistant responses render through ArtifactRenderer, which interprets streaming Markdown, tables, Risk Flag chips, action task-list syntax, and supported action JSON schemas.",
+      "ArtifactRenderer enables GFM through remark-gfm, LaTeX math through remark-math and rehype-katex, syntax-highlighted code through PrismJS, and structured tabular previews through shared Radix Table primitives without requiring a user or admin setting.",
+      "Ordinary chat text normalizes loose visible LaTeX arrow commands such as \\rightarrow while preserving fenced code, inline code, and real math spans; ChatView also runs a scoped post-render cleanup for legacy or over-escaped streamed text nodes.",
       "Markdown list items matching current approvals, decisions, ideas, or tasks, or explicit markers such as approval:team-approval-1, decision:team-decision-1, idea:team-idea-1, and task:team-task-1, mount inline workflow actions in the chat response.",
       "When a user asks for ideas, suggestion-sized assistant list items can surface Add Idea actions even when each line does not literally include the word idea.",
     ],
@@ -227,36 +231,45 @@ const docSections: DocSection[] = [
       "Profile > Asana includes a Repair webhooks action that reruns webhook setup for all mapped projects available to the connected user.",
       "During webhook creation, the receiver stores X-Hook-Secret in KV and returns 200 OK with the exact same X-Hook-Secret response header.",
       "For event deliveries, the receiver verifies X-Hook-Signature or X-Asana-Request-Signature against the raw request body with Web Crypto importKey and crypto.subtle.verify before parsing JSON.",
-      "Verified task events are upserted into asana_webhook_task_states through Drizzle before project chats are resolved through asana_project_mappings and the optional legacy env map.",
+      "Verified task events are upserted into asana_webhook_task_states through Drizzle before project chats are resolved through asana_project_mappings and the optional legacy env map; linked local tasks are updated when the Asana gid matches workspace_actions.asana_task_gid.",
+      "VertexAI task sync writes the local D1 task first, queues an ASANA_SYNC_QUEUE job, creates the remote Asana task in the consumer, then stores asana_task_gid and asana_synced_at back on workspace_actions.",
       "The existing /api/chat-events stream delivers the chat append while /sse/workspace-events invalidates project, chat, and workspace caches.",
     ],
   },
   {
     id: "daily-briefings",
-    title: "Proactive Status Briefs",
+    title: "Scheduled Status Briefs",
     category: "Automation",
     icon: CalendarClock,
     status: "Available",
-    summary: "A Cloudflare Worker cron job writes daily executive project summaries into each active Org project.",
+    summary:
+      "Cloudflare cron runs due project briefing schedules and writes executive Markdown summaries into dedicated read-only Briefings chats.",
     howTo: [
-      "Open an active Org project and select the Daily Briefings project chat.",
-      "Review the generated Markdown summary for Key Decisions, Artifact Updates, and Active Blockers.",
-      "Use the thread as the historical briefing log for recurring stakeholder status checks.",
+      "Open Profile > Briefings to create a daily, weekday, weekly, monthly, or one-time schedule.",
+      "Choose the project, local time, time zone, reporting window, and custom instructions. Weekly schedules default to the preceding seven days.",
+      "Admins can open Admin Settings > Scheduled Tasks to review central task health, edit retry settings, disable a task, or queue it for the next scheduler tick.",
+      "Review generated Markdown summaries in the project's Briefings chat and use briefing_runs for audit history.",
     ],
     details: [
-      "The standalone Cloudflare Worker schedule runs daily at 12:00 UTC by default.",
-      "The briefing window covers the preceding 24 hours from the scheduled execution time.",
-      "The job creates the Daily Briefings project chat automatically when one does not already exist.",
-      "Cron retries are idempotent per project and UTC date, so the same daily briefing is not inserted twice.",
+      "The standalone Cloudflare Worker schedule wakes hourly and dispatches due rows from scheduled_tasks.",
+      "Each saved schedule stores the local run time, recurrence, time zone, reporting window, selected project, and prompt instructions.",
+      "The app automatically resolves or creates the project's Briefings chat and blocks normal user messages, rename, and delete actions on that thread.",
+      "The briefing window uses each schedule's configured reportingWindowHours from the scheduled execution time; weekly runs use a 168-hour window.",
+      "Schedule retries are idempotent per schedule and timestamp marker, so the same briefing is not inserted twice.",
     ],
     technicalDetails: [
-      "wrangler.jsonc defines the cron trigger as 0 12 * * * under triggers.crons.",
-      "src/worker.ts implements the scheduled handler and passes controller.scheduledTime into runDailyProjectBriefings.",
-      "src/lib/daily-briefings.ts selects Org projects with status Active, In Progress, or Watch.",
-      "The job queries D1 for project-scoped events, newly inserted ideas, artifact mutation events, and chat_messages from the last 24 hours.",
-      "Workers AI receives the aggregated JSON payload and must return Markdown with Key Decisions, Artifact Updates, and Active Blockers headings.",
-      "The generated summary is inserted as an assistant chat_messages row in the project-scoped Daily Briefings chat.",
-      "If Workers AI fails, the job records a conservative fallback briefing instead of fabricating project details.",
+      "wrangler.jsonc defines the hourly cron trigger as 0 * * * * under triggers.crons.",
+      "src/worker.ts implements the scheduled handler and passes controller.scheduledTime into runScheduledTaskEngine.",
+      "scheduled_tasks stores global temporal jobs for Weekly Briefing, Background Research, and Artifact Validation dispatch.",
+      "The Weekly Briefing task delegates to runDailyProjectBriefings, which currently runs due user-defined briefing schedules from Profile > Briefings.",
+      "Due schedules query D1 for project-scoped chat transcripts, closed Asana-linked tasks, completed Asana webhook task states, risk signals, current risks, and modified artifacts within the configured reporting window.",
+      "The source payload is aggressively compacted into XML-bounded context and sent to the Gemma 4 reasoning model through the AI Gateway wrapper.",
+      "The generated summary is inserted as an automated assistant chat_messages row in the project's Briefings chat.",
+      "Successful inserts record a realtime chat_message mutation so /sse/workspace-events subscribers can refresh project and chat state.",
+      "briefing_runs records each scheduled run status, while briefing_schedules stores last_run_at, last_status, last_error, and next_run_at.",
+      "Admin Settings > Scheduled Tasks is backed by scheduled-task admin server functions that read and update scheduled_tasks through the Worker D1 binding.",
+      "Queue actions set next_run_at to the current timestamp; the hourly cron-backed Worker still performs the execution work.",
+      "The Cloudflare-account Worker deployment must have the existing DB, AI, CHAT_SYNC, and cron-backed scheduled task engine available.",
       "The feature depends on the Cloudflare-account Worker deployment path; Codex Sites hosting may not execute wrangler cron triggers.",
     ],
   },
@@ -266,7 +279,8 @@ const docSections: DocSection[] = [
     category: "Content",
     icon: Archive,
     status: "Available",
-    summary: "Artifacts track DOCX, XLSX, and PPTX outputs with previews, downloads, pins, and R2-backed files.",
+    summary:
+      "Artifacts track document, workbook, presentation, and text outputs with previews, downloads, pins, AI diff reviews, and R2-backed files.",
     howTo: [
       "Open the Artifacts tab to review files for the current workspace or project.",
       "Select an artifact to view metadata and preview details in the right panel.",
@@ -274,6 +288,7 @@ const docSections: DocSection[] = [
       "Pin important artifacts to keep them visible in the workspace strip.",
       "Use the Pinned Items rail arrows when pinned ideas, approvals, decisions, tasks, and artifacts exceed the available width.",
       "Use the version history timeline to preview older versions read-only or restore one as a new latest version.",
+      "For editable text artifacts, select AI diff, describe the requested change, review the red/green patch preview, then approve the patch to save a new version.",
     ],
     details: [
       "Review the artifact summary before downloading so you know whether the file is final, draft, or pinned.",
@@ -282,6 +297,8 @@ const docSections: DocSection[] = [
       "Pin high-value artifacts that should remain visible from the workspace overview.",
       "Pinned items stay in the current workspace scope; carousel arrows appear only when more pinned cards exist off-screen and move one full card into view per click.",
       "Artifact history is immutable; restoring an older version creates a new current version instead of replacing or deleting prior files.",
+      "AI diff does not require a separate user preference or admin toggle. It follows the existing artifact edit permission matrix, so Viewer users do not see the action.",
+      "AI diff currently supports UTF-8 text-like artifacts such as Markdown, TXT, JSON, YAML, XML, and CSV. Binary Office containers are blocked rather than patched unsafely.",
       "Pin changes update immediately and show a Pending badge while the background artifact write completes.",
       "Generated table exports show a Saving badge in the artifact list until the XLSX file and metadata are committed.",
     ],
@@ -289,6 +306,11 @@ const docSections: DocSection[] = [
       "Artifact metadata is stored in D1 artifacts rows with title, type, owner, status, r2_key, href, preview_json, pinned, version, parent_artifact_id, and commit_message fields.",
       "File bytes are resolved from R2 through /api/artifacts for generated or seeded R2-backed artifacts, with public seed copies also available under public/artifacts.",
       "Each artifact version maps to a distinct R2 object key. saveTableArtifact and restoreArtifactVersion insert new rows and never overwrite the previous object.",
+      "draftArtifactPatch resolves the latest artifact lineage row, reads the current artifact text from a short-lived R2 edge cache backed by ARTIFACTS_BUCKET, and sends Kimi K2.7 Code a strict JSON-delta prompt.",
+      "The artifact diff model is @cf/moonshotai/kimi-k2.7-code through artifactDiffModelId and uses the existing AI Gateway, DB, ARTIFACTS_BUCKET, AI, and RBAC configuration.",
+      "src/lib/artifact-diff.ts parses JSON patch envelopes, arrays, and newline-delimited streamed JSON actions, then applies replace, delete, insert_before, and insert_after deltas to active UI state.",
+      "ArtifactPatchDialog renders each applicable patch with red deletion and green insertion highlighting so the user must approve discrete changes before persistence.",
+      "commitArtifactPatch verifies the reviewed baseR2Key is still current, reapplies approved patches server-side, writes the unified text to a versioned R2 key, and inserts a new parented artifacts row.",
       "toggleArtifactPin updates the D1 pinned flag and refreshes merged artifact state.",
       "deleteArtifact rejects destructive deletion so historical D1 rows and R2 objects remain available for time-travel and audit history.",
       "XLSX preview uses a client-side ExcelJS dynamic import, reads visible sheets, and caps preview rendering at 100 rows by 30 columns.",
@@ -355,12 +377,42 @@ const docSections: DocSection[] = [
       "Decisions, approvals, and tasks are persisted in D1 workspace_actions rows and hydrated into typed ScopedWorkspaceState action arrays.",
       "Decision status is Not Completed or Completed; completed decisions render with green strikethrough styling.",
       "Approval status is Not Reviewed, Reviewing, Approved, or Not Approved; Approved renders green strikethrough and Not Approved renders red strikethrough.",
-      "Tasks do not expose completion controls in the app; each task can be manually synced to Asana once, or auto-synced on creation when the user's Asana setting is enabled.",
+      "Tasks can be marked Open or Completed in the app; each task can also be manually synced to Asana once, or auto-synced on creation when the user's Asana setting is enabled.",
       "toggleWorkflowActionPin updates workspace_actions.pinned and refreshes merged workspace state.",
       "ArtifactRenderer recognizes approvals, decisions, ideas, suggestedIdeas, assignedTasks, and tasks JSON arrays when assistant output should become interactive action rows.",
       "Inline workflow actions rendered inside chat create persisted ideas, approvals, decisions, or tasks through the same server-side permission checks as the tabs.",
       "Each action item can carry a nullable projectId, and the UI filters action arrays by the active scopedProjectId.",
       "Status, pin, create, and delete mutations are protected by requireWorkspaceEditor and publish workspace mutation events for cache refresh.",
+    ],
+  },
+  {
+    id: "risks",
+    title: "Risk Management",
+    category: "Workflow Tracking",
+    icon: ShieldAlert,
+    status: "Available",
+    summary: "Risks are detected from project chat, shown as inline Risk Flag chips, and managed in an all-project Risks page.",
+    howTo: [
+      "Open Risks from the blue rail to see every risk across projects in the selected Personal, Team, or Org scope.",
+      "Use the Personal, Team, and Org scope tabs at the top to change the risk register scope.",
+      "Search or filter by project, severity, and status to narrow the table.",
+      "Click a Risk Flag chip in chat to open the scoped Risks page with that risk selected.",
+      "Use Generate on a project-scoped risk to create a mitigation strategy when your role allows risk updates.",
+    ],
+    details: [
+      "The Risks page is intentionally not limited to the currently selected project; it is an operating register across all projects in the selected scope.",
+      "Risk detection creates the risk title, description, severity, status, workspace id, and project id. Mitigation strategy starts blank until generated or persisted later.",
+      "Mitigation generation uses the selected risk's title, description, severity, status, workspace, and project. It does not invent external project facts.",
+      "Viewer users can read risks. Contributor, Manager, and Admin users can update risks and generate mitigation strategies.",
+      "Project-scoped risks can generate mitigation. Workspace-level risk rows can be read in the grid, but generation requires a project id.",
+    ],
+    technicalDetails: [
+      "Risk detection uses the shared risk contract in src/lib/risk-contract.ts so streamed Risk Flag JSON and persisted D1 risk rows share normalized ids, severity, title, description, status, and mitigation fields.",
+      "Scoped RAG appends fenced JSON blocks with schema vertex.risk.v1 after entity extraction; ArtifactRenderer removes those blocks from Markdown and renders inline Risk Flag chips.",
+      "persistScopedRagChatTurn passes extracted entities through normalizeRiskEntities before INSERT OR IGNORE into the D1 risks table.",
+      "The command-center Risks rail page renders RiskView through CategoryTablePage and passes the complete workspace.risks array plus workspace.projects for project labels.",
+      "generateRiskMitigation is a TanStack Start server function that checks risks.update permission, loads the risk by workspace/project/risk id, calls Workers AI through runTrackedAiGateway, and stores the returned markdown in risks.mitigation_strategy.",
+      "No extra user preference or admin feature toggle is required; the feature depends on D1 migrations, the AI binding, scoped project access, and the existing Viewer/Contributor/Manager/Admin role matrix.",
     ],
   },
   {
@@ -412,6 +464,7 @@ const docSections: DocSection[] = [
     technicalDetails: [
       "chat-export contains helpers for CSV, XLSX, HTML table parsing, export request parsing, and browser downloads.",
       "ArtifactRenderer maps Markdown table nodes onto the shared Table primitives so streamed assistant tables match the rest of the workspace UI.",
+      "ArtifactRenderer maps structured previewJson shapes from vision and document extraction, including row arrays, explicit columns, OCR cell grids, and extracted field maps, onto the shared Radix Table primitives.",
       "RenderedTableExportControls detects rendered table export opportunities and posts FormData to saveTableArtifact.",
       "saveTableArtifact validates mode, optional project_id, source chat title, title, and rows_json before writing.",
       "XLSX generation uses xlsxBlobFromRows, stores the blob in R2, and inserts artifact metadata into D1.",
@@ -425,7 +478,7 @@ const docSections: DocSection[] = [
     category: "Collaboration",
     icon: Users,
     status: "Available",
-    summary: "Team owners and workspace editors can create teams, projects, chats, and scoped invites.",
+    summary: "Managers and Admins can create teams, projects, chats, and scoped invites.",
     howTo: [
       "Create a team from Team scope when you need a shared workspace.",
       "Invite a teammate to a team or project by email.",
@@ -470,7 +523,7 @@ const docSections: DocSection[] = [
       "Use the Invites area in User Settings to review and accept scoped team or project invitations.",
     ],
     technicalDetails: [
-      "Protected routes call getSessionSnapshot in their loaders and redirect unauthenticated users to /sign-in.",
+      "Protected routes call getSession in their loaders and redirect unauthenticated users to /sign-in.",
       "Better Auth powers email/password sign-in, Microsoft Entra ID OAuth with PKCE, session lookup, sign-out, verification, and invite account creation.",
       "startMicrosoftSignIn creates the Microsoft authorization URL in a TanStack Start server function; the client receives only the URL and never handles provider tokens.",
       "The Microsoft OAuth callback exchanges the code server-side, requires the configured tenant issuer, validates the ID token issuer, and stores provider tokens only in the server-side account table.",
@@ -494,7 +547,7 @@ const docSections: DocSection[] = [
     details: [
       "Use Users to review known accounts, change a display name, change a role, or remove an account.",
       "Use Invites to create first-use account invitations for allowed email addresses.",
-      "Create a viewer invite for read-only users and a user invite for collaborators who should edit workspace records.",
+      "Create a Viewer invite for read-only users, a Contributor invite for artifact/risk collaborators, a Manager invite for project operators, and an Admin invite for account administrators.",
       "Use admin invites only for people who should manage other user accounts.",
       "Revoke pending invites that were sent to the wrong person or are no longer needed.",
     ],
@@ -554,7 +607,7 @@ const docSections: DocSection[] = [
     details: [
       "Use scoped RAG when a Team project needs answers grounded in previously generated or ingested project artifacts.",
       "The prompt router runs before retrieval work, so only RAG_SEARCH and WEB_SEARCH prompts pay the project chunk retrieval cost.",
-      "The router recognizes RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, and ARTIFACT_GENERATION as strict intent categories.",
+      "The router recognizes RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, ENTITY_EXTRACTION, and ARTIFACT_GENERATION as strict intent categories.",
       "Artifact uploads are accepted immediately after the raw asset is stored and the ingestion job is published, so the UI is not blocked by document processing.",
       "The artifact status starts as pending, moves to processing in the Queue consumer, and finishes as completed or failed after background ingestion.",
       "Ask questions that name the project artifact, decision history, or prior output you want the assistant to use.",
@@ -574,10 +627,10 @@ const docSections: DocSection[] = [
       "Generated scoped RAG artifacts can pass sensitivityLabel Confidential or restricted true to store matching R2 metadata before queue ingestion.",
       "RAG_SEARCH embeds the prompt, queries Vectorize with team_id, project_id, and role-sensitive confidentiality metadata filters, loads matching chunks from D1, and streams a cited answer.",
       "WEB_SEARCH calls fetchConsolidatedWebSearch, loads scoped D1-backed historical chunks through role-filtered Vectorize matches, and streams an answer from both context sections.",
-      "DIRECT_CHAT and ARTIFACT_GENERATION bypass embeddings, Vectorize, and web search, then stream from the primary generation model with the same priority workspace context and role directive.",
+      "DIRECT_CHAT, ENTITY_EXTRACTION, and ARTIFACT_GENERATION bypass embeddings, Vectorize, and web search, then stream from the primary generation model with the same priority workspace context and role directive.",
       "chatWithScopedRag remains a TanStack Start server function wrapper, but native browser streaming uses GET /sse/workspace-events with stream=scoped-rag and query parameters for prompt, teamId, workspaceId, and projectId.",
-      "The scoped RAG SSE contract emits citations, token, done, and stream-error events. The client closes the EventSource on done or stream-error, while transport failures use the native onerror path.",
-      "Intent routing uses @cf/meta/llama-3-8b-instruct to choose RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, or ARTIFACT_GENERATION.",
+      "The scoped RAG SSE contract emits trace, citations, thinking, token, entities, done, and stream-error events. The client closes the EventSource on done or stream-error, while transport failures use the native onerror path.",
+      "Intent routing uses @cf/zai-org/glm-4.7-flash with turn-level thinking disabled to choose RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, ENTITY_EXTRACTION, or ARTIFACT_GENERATION.",
       "Citation metadata includes vector id, document name, R2 key, and match score when available.",
     ],
   },
@@ -599,7 +652,7 @@ const docSections: DocSection[] = [
       "Workspace context needs a picker so users can deliberately attach projects, artifacts, or previous chats.",
       "Artifact sharing needs a modal that shows target audience, permission level, and link behavior before a link is copied.",
       "Notifications need an actionable center with unread state, decision flags, approval reminders, and owner routing.",
-      "Docs can later be personalized by role so admins, editors, viewers, and technical users see the most relevant starting points.",
+      "Docs can later be personalized by role so Admins, Managers, Contributors, Viewers, and technical users see the most relevant starting points.",
     ],
     technicalDetails: [
       "Attachment and workspace context buttons currently emit toast messages from the workspace route and do not transmit files or change context state.",
@@ -677,7 +730,7 @@ const technicalArticles: DocArticle[] = [
           "Before generation, the system prepends an absolute role directive and a priority workspace context header from D1 with workspace name, active project name, project status, and detailed project description.",
           "Generated scoped RAG artifacts can pass sensitivityLabel Confidential or restricted true to store matching R2 metadata before queue ingestion.",
           "RAG_SEARCH embeds the prompt, queries Vectorize with team_id, project_id, and role-sensitive confidentiality metadata filters, loads matching chunks from D1, and streams a cited answer.",
-          "The scoped RAG SSE contract emits citations, token, done, and stream-error events. The client closes the EventSource on done or stream-error, while transport failures use the native onerror path.",
+          "The scoped RAG SSE contract emits trace, citations, thinking, token, entities, done, and stream-error events. The client closes the EventSource on done or stream-error, while transport failures use the native onerror path.",
           "Citation metadata includes vector id, document name, R2 key, and match score when available.",
         ],
       },
@@ -700,7 +753,7 @@ const technicalArticles: DocArticle[] = [
           "Vector queries are filtered by team_id and project_id so project chat retrieval stays scoped to the active team project.",
           "New vectors include confidentiality and restricted metadata; viewer queries exclude Confidential or restricted chunks before D1 chunk text is loaded into the model context.",
           "D1 remains the source of chunk metadata and readable content, while Vectorize provides similarity search and match scores.",
-          "Prompt embedding happens for RAG_SEARCH and WEB_SEARCH intents; direct chat and artifact generation bypass embeddings and Vectorize.",
+          "Prompt embedding happens for RAG_SEARCH and WEB_SEARCH intents; direct chat, entity extraction, and artifact generation bypass embeddings and Vectorize.",
           "Retrieved matches are converted into cited context before generation so the answer can expose source keys instead of only free-form prose.",
         ],
       },
@@ -719,9 +772,9 @@ const technicalArticles: DocArticle[] = [
         variant: "technical",
         items: [
           "Project-scoped chat uses context-aware routing before RAG so direct chat, web search, artifact generation, and Vectorize retrieval use separate backend paths.",
-          "Intent routing chooses RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, or ARTIFACT_GENERATION.",
+          "Intent routing chooses RAG_SEARCH, WEB_SEARCH, DIRECT_CHAT, ENTITY_EXTRACTION, or ARTIFACT_GENERATION.",
           "WEB_SEARCH calls fetchConsolidatedWebSearch, loads scoped D1-backed historical chunks through Vectorize matches, and streams an answer from both context sections.",
-          "DIRECT_CHAT and ARTIFACT_GENERATION bypass embeddings, Vectorize, and web search, then stream from the primary generation model with the D1-backed priority workspace context header.",
+          "DIRECT_CHAT, ENTITY_EXTRACTION, and ARTIFACT_GENERATION bypass embeddings, Vectorize, and web search, then stream from the primary generation model with the D1-backed priority workspace context header.",
           "Reasoning profiles map to scoped context budgets, max completion tokens, optional reasoning_effort, and thinking visibility settings.",
         ],
       },
@@ -811,7 +864,8 @@ const technicalArticles: DocArticle[] = [
     category: "Technical Reference",
     icon: Archive,
     status: "Available",
-    summary: "Artifact metadata, R2 files, preview rendering, pin/delete mutations, and generated XLSX exports share one storage model.",
+    summary:
+      "Artifact metadata, R2 files, preview rendering, AI diff patching, pin/delete mutations, and generated XLSX exports share one storage model.",
     blocks: [
       {
         title: "Implementation Details",
@@ -928,7 +982,7 @@ function DocsPage() {
       <div className="workspace-shadow grid h-full grid-cols-[72px_minmax(0,1fr)] overflow-hidden border bg-card lg:rounded-xl">
         <AppRail
           account={{
-            canAdmin: session.user.role === "admin",
+            canAdmin: isAdminRole(session.user.role),
             userEmail: session.user.email,
             userName: session.user.name,
             onSignOut: handleSignOut,
@@ -1004,8 +1058,8 @@ function DocsPage() {
                           <strong className="text-sm">Access Notes</strong>
                         </div>
                         <p className="text-sm leading-6 text-muted-foreground">
-                          Docs follow the signed-in app shell. Viewer accounts can read docs and workspace data, while user and admin roles
-                          unlock write actions.
+                          Docs follow the signed-in app shell. Viewer accounts can read docs and workspace data, while Contributor, Manager,
+                          and Admin roles unlock write actions.
                         </p>
                       </CardContent>
                     </Card>

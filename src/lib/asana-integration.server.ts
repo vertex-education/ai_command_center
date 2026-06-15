@@ -2,8 +2,15 @@
 
 import { env } from "cloudflare:workers";
 import { getRequest } from "@tanstack/start-server-core";
+import {
+  publishAutonomousResearchTrigger,
+  type AutonomousResearchJob,
+  type AutonomousResearchProducerEnv,
+} from "@/lib/autonomous-research-queue";
+import { roleCanModifyState } from "@/lib/auth-access-control";
 import { getAuth } from "@/lib/auth";
 import { deleteAsanaTokens, getValidAsanaTokens, storeAsanaTokens, type AsanaTokenVaultEnv } from "@/lib/asana-token-vault";
+import { enqueueAsanaTaskSync, type AsanaTaskSyncJob } from "@/lib/asana-task-sync-queue";
 import type { DocumentIngestionJob } from "@/lib/document-ingestion-queue";
 import type { ProjectStatus, WorkspaceMode, WorkspaceScope } from "@/lib/pmo-data";
 
@@ -12,6 +19,8 @@ type AsanaIntegrationEnv = AsanaTokenVaultEnv & {
   ASANA_CLIENT_SECRET?: string;
   ASANA_USE_FULL_PERMISSIONS?: string;
   ASANA_WEBHOOK_ORIGIN?: string;
+  ASANA_SYNC_QUEUE?: Queue<AsanaTaskSyncJob>;
+  AUTONOMOUS_RESEARCH_QUEUE?: Queue<AutonomousResearchJob>;
   ARTIFACTS_BUCKET?: R2Bucket;
   DOCUMENT_INGESTION_QUEUE?: Queue<DocumentIngestionJob>;
 };
@@ -423,7 +432,7 @@ async function requireSignedInUser(request = getRequest()) {
 
 async function requireWorkspaceEditor() {
   const user = await requireSignedInUser();
-  if (user.role !== "admin" && user.role !== "user") throw new Error("Viewer accounts cannot manage Asana integrations.");
+  if (!roleCanModifyState(user.role)) throw new Error("Viewer accounts cannot manage Asana integrations.");
   return user;
 }
 
@@ -754,6 +763,73 @@ export async function createAsanaTaskForWorkflowTaskForCurrentUser(data: {
     body: JSON.stringify({ data: payload }),
   });
   return { gid: created.gid, name: created.name };
+}
+
+export async function enqueueAsanaTaskSyncForWorkflowTaskForCurrentUser(data: {
+  mode: WorkspaceMode;
+  notes: string;
+  sourceClientId?: string | null;
+  taskId: string;
+  teamId?: string | null;
+  title: string;
+  vertexProjectId?: string | null;
+  workspaceId: string;
+}) {
+  const user = await requireWorkspaceEditor();
+  const title = data.title.trim();
+  if (!title) throw new Error("Task title is required.");
+
+  const tokenSet = await getValidAsanaTokens({ env: integrationEnv(), userId: user.id });
+  if (!tokenSet) throw new Error("Reconnect Asana before submitting tasks.");
+
+  const connection = await getConnectionForUser(user.id);
+  if (!connection) throw new Error("Connect Asana before submitting tasks.");
+  const scopes = parseScopes(connection.scopes);
+  if (!hasAsanaScope(scopes, "tasks:write")) throw new Error("Reconnect Asana with tasks:write before submitting tasks.");
+
+  if (data.vertexProjectId) {
+    const mapping = await getDb()
+      .prepare(
+        `SELECT can_write_tasks as canWriteTasks
+         FROM asana_project_mappings
+         WHERE user_id = ?
+           AND vertex_project_id = ?
+         LIMIT 1`,
+      )
+      .bind(user.id, data.vertexProjectId)
+      .first<{ canWriteTasks: number | boolean }>();
+    if (!mapping) throw new Error("This VertexAI project is not mapped to Asana.");
+    if (!Boolean(mapping.canWriteTasks))
+      throw new Error("Your Asana permission for this project is read-only. Task submission is disabled.");
+  }
+
+  const queuedAt = Date.now();
+  await enqueueAsanaTaskSync(integrationEnv(), {
+    kind: "asana-task-create",
+    mode: data.mode,
+    notes: data.notes,
+    projectId: data.vertexProjectId ?? null,
+    requestId: `asana-sync-${crypto.randomUUID()}`,
+    requestedAt: queuedAt,
+    sourceClientId: data.sourceClientId ?? null,
+    taskId: data.taskId,
+    teamId: data.teamId ?? null,
+    title,
+    userId: user.id,
+    workspaceId: data.workspaceId,
+  });
+
+  return {
+    asanaTaskGid: null,
+    asanaSyncedAt: null,
+    asanaSyncError: null,
+    asanaSyncQueuedAt: queuedAt,
+  } satisfies {
+    asanaTaskGid: string | null;
+    asanaSyncedAt: number | null;
+    asanaSyncError: string | null;
+    asanaSyncQueuedAt: number | null;
+  };
 }
 
 async function resolveDefaultAsanaWorkspaceForUser(userId: string, asanaUser: AsanaUser) {
@@ -2715,6 +2791,18 @@ async function scaffoldVertexProjectForAsana(userId: string, asanaProject: Asana
     .run();
 
   const chatId = await createDefaultProjectChat({ workspaceId: workspace.id, projectId: id, projectName: asanaProject.name, mode });
+  await publishAutonomousResearchTrigger(integrationEnv() as AutonomousResearchProducerEnv, {
+    entityType: "project",
+    entityId: id,
+    workspaceId: workspace.id,
+    workspaceMode: mode,
+    teamId: mode === "Team" ? teamId : null,
+    projectId: id,
+    title: asanaProject.name,
+    description,
+    tags: ["Asana", asanaProject.workspaceName, mode, status],
+    sourceUserId: userId,
+  });
   return {
     id,
     name: asanaProject.name,

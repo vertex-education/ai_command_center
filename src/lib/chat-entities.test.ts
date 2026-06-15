@@ -28,6 +28,7 @@ describe("chat entity JSON extraction", () => {
         owner: "Ops",
         dueDate: "Friday",
         priority: "High",
+        severity: null,
         sourceQuote: "follow up with operations",
         confidence: 0.92,
         status: "active",
@@ -57,6 +58,7 @@ describe("chat entity JSON extraction", () => {
         id: "risk-1",
         type: "Risk",
         title: "Approval may slip",
+        severity: null,
         confidence: 0.8,
       },
     ]);
@@ -90,9 +92,36 @@ describe("chat entity JSON extraction", () => {
       id: "idea-1",
       type: "Idea",
       priority: null,
+      severity: null,
       confidence: 0.02,
       status: "active",
     });
+  });
+
+  it("normalizes explicit risk severity on risk entities only", () => {
+    expect(
+      normalizeChatOperationalEntities([
+        {
+          id: "risk-critical",
+          type: "Risk",
+          title: "Launch dependency may fail",
+          description: "A vendor dependency could block launch.",
+          severity: "critical",
+          confidence: 0.9,
+        },
+        {
+          id: "task-with-severity",
+          type: "Task",
+          title: "Update rollout owner",
+          description: "The rollout owner should be confirmed.",
+          severity: "high",
+          confidence: 0.8,
+        },
+      ]),
+    ).toMatchObject([
+      { id: "risk-critical", severity: "critical" },
+      { id: "task-with-severity", severity: null },
+    ]);
   });
 
   it("throws on malformed non-json output so the extractor can run the repair pass", () => {

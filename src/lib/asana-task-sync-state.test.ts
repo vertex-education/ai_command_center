@@ -32,6 +32,7 @@ describe("Asana task sync state", () => {
       title: "Follow up with school ops",
       asanaTaskGid: null,
       asanaSyncedAt: null,
+      asanaSyncQueuedAt: null,
       asanaSyncError: null,
     });
   });
@@ -62,7 +63,36 @@ describe("Asana task sync state", () => {
       }),
     ).toEqual({
       disabled: true,
-      label: "Syncing...",
+      label: "Queueing...",
+      visible: true,
+    });
+  });
+
+  it("shows queued tasks as waiting for the queue worker", () => {
+    expect(
+      getTaskAsanaSyncControlState({
+        asanaSyncQueuedAt: 123,
+        canEdit: true,
+        isSyncing: false,
+      }),
+    ).toEqual({
+      disabled: true,
+      label: "Queued",
+      visible: true,
+    });
+  });
+
+  it("allows failed queued syncs to be retried", () => {
+    expect(
+      getTaskAsanaSyncControlState({
+        asanaSyncError: "Reconnect Asana before submitting tasks.",
+        asanaSyncQueuedAt: null,
+        canEdit: true,
+        isSyncing: false,
+      }),
+    ).toEqual({
+      disabled: false,
+      label: "Retry Sync",
       visible: true,
     });
   });
@@ -103,5 +133,8 @@ describe("Asana task sync state", () => {
     expect(migration).toContain("ALTER TABLE workspace_actions ADD COLUMN asana_synced_at INTEGER");
     expect(migration).toContain("ALTER TABLE workspace_actions ADD COLUMN asana_sync_error TEXT");
     expect(migration).toContain("ALTER TABLE asana_connections ADD COLUMN auto_sync_tasks_enabled INTEGER DEFAULT 0 NOT NULL");
+    const queueMigrationPath = fileURLToPath(new URL("../../drizzle/0025_asana_sync_queue.sql", import.meta.url));
+    const queueMigration = readFileSync(queueMigrationPath, "utf8");
+    expect(queueMigration).toContain("ALTER TABLE workspace_actions ADD COLUMN asana_sync_queued_at INTEGER");
   });
 });

@@ -1,11 +1,11 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
 import { PMOCommandCenter } from "@/features/command-center/command-center";
 import { CommandCenterPageSkeleton } from "@/features/command-center/skeletons";
 
 export const Route = createFileRoute("/")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },

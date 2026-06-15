@@ -6,11 +6,11 @@ import { VertexAIBrand } from "@/components/VertexAIBrand";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { acceptScopedInvite, listMyScopedInvites } from "@/lib/team-workflow";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
 
 export const Route = createFileRoute("/profile/invites")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },

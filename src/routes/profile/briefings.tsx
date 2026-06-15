@@ -22,7 +22,8 @@ import {
   type BriefingScheduleInput,
   type BriefingScheduleView,
 } from "@/lib/briefing-schedules";
-import { getSessionSnapshot } from "@/lib/auth-workflow";
+import { getSession } from "@/lib/auth-workflow";
+import { weeklyBriefingsChatTitle } from "@/lib/briefing-thread";
 
 type DraftSchedule = BriefingScheduleInput;
 
@@ -85,7 +86,7 @@ const customInstructionFormatHelpers = [
 
 export const Route = createFileRoute("/profile/briefings")({
   loader: async () => {
-    const session = await getSessionSnapshot();
+    const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
     return { session };
   },
@@ -101,15 +102,15 @@ function createDefaultDraft(projectId = ""): DraftSchedule {
   tomorrow.setHours(8, 0, 0, 0);
   return {
     id: null,
-    title: "Morning Project Briefing",
+    title: "Weekly Project Briefing",
     enabled: true,
-    recurrence: "weekdays",
+    recurrence: "weekly",
     timeZone: timeZone || "America/New_York",
     localTime: "08:00",
-    weekdays: [1, 2, 3, 4, 5],
+    weekdays: [1],
     monthDay: 1,
     runOnceAt: toDatetimeLocalValue(tomorrow),
-    reportingWindowHours: 24,
+    reportingWindowHours: 168,
     promptInstructions: "",
     projectId,
     chatId: null,
@@ -136,8 +137,7 @@ function BriefingSettingsPage() {
 
   const selectedProject = summaryQuery.data?.projects.find((project) => project.id === draft.projectId);
   const schedules = summaryQuery.data?.schedules ?? [];
-  const threadSelectValue = draft.newChatTitle !== null && draft.newChatTitle !== undefined ? "__new__" : (draft.chatId ?? "");
-  const canSave = Boolean(draft.projectId && (draft.chatId || draft.newChatTitle?.trim()));
+  const canSave = Boolean(draft.projectId);
 
   const saveMutation = useMutation({
     mutationFn: (input: DraftSchedule) => saveBriefingSchedule({ data: input }),
@@ -219,7 +219,7 @@ function BriefingSettingsPage() {
                     Automated Briefings
                   </CardTitle>
                   <CardDescription>
-                    Schedules run from the Cloudflare cron tick and save Markdown briefings into project threads.
+                    Schedules run from the Cloudflare cron tick and save Markdown briefings into each project's read-only Briefings thread.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3">
@@ -296,29 +296,13 @@ function BriefingSettingsPage() {
                           ))}
                         </select>
                       </Field>
-                      <Field label="Thread">
-                        <select
-                          className="h-9 rounded-md border bg-background px-3 text-sm"
-                          value={threadSelectValue}
-                          onChange={(event) => {
-                            if (event.target.value === "__new__") updateDraft({ chatId: null, newChatTitle: "Scheduled briefing" });
-                            else updateDraft({ chatId: event.target.value || null, newChatTitle: null });
-                          }}
-                        >
-                          <option value="">Select existing thread</option>
-                          {(selectedProject?.chatOptions ?? []).map((chat) => (
-                            <option key={chat.id} value={chat.id}>
-                              {chat.title}
-                            </option>
-                          ))}
-                          <option value="__new__">Create New Thread</option>
-                        </select>
+                      <Field label="Destination Thread">
+                        <Input
+                          value={`${weeklyBriefingsChatTitle}${selectedProject ? ` / ${selectedProject.projectName}` : ""}`}
+                          disabled
+                          aria-label="Automated briefing destination"
+                        />
                       </Field>
-                      {threadSelectValue === "__new__" ? (
-                        <Field label="New Thread Name">
-                          <Input value={draft.newChatTitle ?? ""} onChange={(event) => updateDraft({ newChatTitle: event.target.value })} />
-                        </Field>
-                      ) : null}
                       <Field label="Reporting Window">
                         <select
                           className="h-9 rounded-md border bg-background px-3 text-sm"
@@ -534,6 +518,8 @@ function PreviewPanel({ preview }: { preview: BriefingPreviewResult | null }) {
             <Badge variant="secondary">{counts.tasks} tasks</Badge>
             <Badge variant="secondary">{counts.asanaTasks} Asana tasks</Badge>
             <Badge variant="secondary">{counts.riskSignals} risk signals</Badge>
+            <Badge variant="secondary">{counts.risks} risks</Badge>
+            <Badge variant="secondary">{counts.modifiedArtifacts} modified artifacts</Badge>
           </div>
         ) : null}
         <div className="max-h-[520px] overflow-auto rounded-md border bg-background p-4 text-sm">
@@ -593,9 +579,14 @@ function toDatetimeLocalValue(date: Date) {
 }
 
 function prepareDraftForServer(draft: DraftSchedule): DraftSchedule {
-  if (draft.recurrence !== "once" || !draft.runOnceAt) return draft;
-  return {
+  const normalized = {
     ...draft,
+    chatId: null,
+    newChatTitle: null,
+  };
+  if (draft.recurrence !== "once" || !draft.runOnceAt) return normalized;
+  return {
+    ...normalized,
     runOnceAt: new Date(draft.runOnceAt).toISOString(),
   };
 }

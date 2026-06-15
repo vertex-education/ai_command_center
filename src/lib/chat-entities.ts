@@ -1,8 +1,10 @@
 export const chatEntityTypes = ["Task", "Approval", "Idea", "Risk"] as const;
+export const chatRiskSeverities = ["low", "medium", "high", "critical"] as const;
 
 export type ChatEntityType = (typeof chatEntityTypes)[number];
+export type ChatRiskSeverity = (typeof chatRiskSeverities)[number];
 
-export type ChatEntityStatus = "active" | "acknowledged" | "rejected" | "synced";
+export type ChatEntityStatus = "active" | "acknowledged" | "queued" | "rejected" | "synced";
 
 export type ChatOperationalEntity = {
   id: string;
@@ -12,6 +14,7 @@ export type ChatOperationalEntity = {
   owner?: string | null;
   dueDate?: string | null;
   priority?: "Low" | "Medium" | "High" | null;
+  severity?: ChatRiskSeverity | null;
   sourceQuote?: string | null;
   confidence: number;
   status?: ChatEntityStatus;
@@ -33,6 +36,12 @@ function normalizeOptionalString(value: unknown, maxLength: number) {
 
 function normalizePriority(value: unknown): ChatOperationalEntity["priority"] {
   return value === "Low" || value === "Medium" || value === "High" ? value : null;
+}
+
+function normalizeSeverity(value: unknown): ChatRiskSeverity | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return chatRiskSeverities.includes(normalized as ChatRiskSeverity) ? (normalized as ChatRiskSeverity) : null;
 }
 
 function normalizeConfidence(value: unknown) {
@@ -63,6 +72,7 @@ export function normalizeChatOperationalEntities(value: unknown): ChatOperationa
       owner: normalizeOptionalString(item.owner, 80),
       dueDate: normalizeOptionalString(item.dueDate, 40),
       priority: normalizePriority(item.priority),
+      severity: item.type === "Risk" ? normalizeSeverity(item.severity) : null,
       sourceQuote: normalizeOptionalString(item.sourceQuote, 180),
       confidence: normalizeConfidence(item.confidence),
       status: "active",

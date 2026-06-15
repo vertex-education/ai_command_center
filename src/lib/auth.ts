@@ -1,8 +1,10 @@
 import { env } from "cloudflare:workers";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { betterAuth } from "better-auth";
-import { admin } from "better-auth/plugins";
+import { admin, organization } from "better-auth/plugins";
 import { genericOAuth, type GenericOAuthConfig } from "better-auth/plugins/generic-oauth";
+import { tanstackStartCookies } from "better-auth/tanstack-start";
+import { vertexAccessControl, vertexAuthRoles } from "@/lib/auth-access-control";
 import { storeMicrosoftGraphTokens, type MicrosoftTokenVaultEnv } from "@/lib/microsoft-token-vault";
 
 type EmailAddress = {
@@ -149,13 +151,24 @@ export function getAuth(request?: Request) {
     },
     plugins: [
       admin({
-        defaultRole: "user",
+        ac: vertexAccessControl,
         adminRoles: ["admin"],
+        defaultRole: "contributor",
+        roles: vertexAuthRoles,
+      }),
+      organization({
+        ac: vertexAccessControl,
+        allowUserToCreateOrganization: false,
+        creatorRole: "admin",
+        roles: vertexAuthRoles,
       }),
       ...getMicrosoftEntraPlugins(),
+      tanstackStartCookies(),
     ],
   });
 }
+
+export type Auth = ReturnType<typeof getAuth>;
 
 function getMicrosoftEntraPlugins() {
   const runtimeEnv = getRuntimeEnv();

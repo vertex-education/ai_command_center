@@ -2,13 +2,14 @@
 
 import serverEntry from "@tanstack/react-start/server-entry";
 import { Hono } from "hono";
+import { handleAsanaTaskSyncQueue, isAsanaTaskSyncJob, type AsanaTaskSyncEnv, type AsanaTaskSyncJob } from "./lib/asana-task-sync-queue";
 import { handleAsanaWebhookRequest } from "./lib/asana-webhook";
-import { runDailyProjectBriefings } from "./lib/daily-briefings";
 import {
   processMicrosoftGraphWebhookJob,
   type MicrosoftGraphWebhookEnv,
   type MicrosoftGraphWebhookJob,
 } from "./lib/microsoft-graph-webhooks";
+import { runScheduledTaskEngine } from "./lib/scheduled-tasks";
 
 export { ChatSyncRealtimeDurableObject } from "./lib/chat-sync";
 
@@ -31,10 +32,19 @@ export default {
     return serverEntry.fetch(request, requestOptions);
   },
 
-  async queue(batch: MessageBatch<MicrosoftGraphWebhookJob>, env: MicrosoftGraphWebhookEnv) {
+  async queue(batch: MessageBatch<MicrosoftGraphWebhookJob | AsanaTaskSyncJob>, env: MicrosoftGraphWebhookEnv & AsanaTaskSyncEnv) {
+    if (batch.queue === "asana-sync-queue") {
+      await handleAsanaTaskSyncQueue(batch as MessageBatch<AsanaTaskSyncJob>, env);
+      return;
+    }
+
     for (const message of batch.messages) {
       try {
         const job = message.body;
+        if (isAsanaTaskSyncJob(job)) {
+          await handleAsanaTaskSyncQueue({ ...batch, messages: [message as Message<AsanaTaskSyncJob>] }, env);
+          continue;
+        }
         if (!isMicrosoftGraphWebhookJob(job)) throw new Error("Unexpected job body in Graph webhook queue.");
         await processMicrosoftGraphWebhookJob(env, job);
         message.ack();
@@ -47,8 +57,8 @@ export default {
     }
   },
 
-  scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runDailyProjectBriefings(env, controller.scheduledTime));
+  async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
+    await runScheduledTaskEngine(env, controller.scheduledTime);
   },
 };
 

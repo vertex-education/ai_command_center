@@ -4,20 +4,24 @@ import { FileText, Paperclip, PanelRightOpen, Settings, Send, X, Zap } from "luc
 import { type ExtractedChatAttachment } from "@/lib/attachment-extraction";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { isAdminRole, roleCanModifyState } from "@/lib/auth-access-control";
 import { authClient } from "@/lib/auth-client";
+import { isAutomatedBriefingsChat } from "@/lib/briefing-thread";
 import { type ChatMessageInsertEvent, type WorkspacePresenceUser } from "@/lib/chat-sync";
 import { type ChatOperationalEntity } from "@/lib/chat-entities";
 import { createOptimisticId, runServerMutation } from "@/lib/optimistic-mutations";
 import { cn } from "@/lib/utils";
-import { getScopedRisks, riskManagementHref } from "@/lib/risk-feature";
+import { generateRiskMitigation } from "@/lib/risks";
 import {
   type AddIdeaInput,
   type Approval,
   type Artifact,
+  type ArtifactPatchDraftResult,
   type ChatAttachment,
   type ChatMessage,
   type ChatReasoningLevel,
   type ChatSection,
+  type CommitArtifactPatchInput,
   type CreateWorkflowSuggestionInput,
   type CreateTaskInput,
   type ChatSummary,
@@ -28,6 +32,7 @@ import {
   type PmoWorkspaceState,
   type ProjectSummary,
   type RailName,
+  type Risk,
   type TabName,
   type Task,
   type WorkspaceMode,
@@ -35,10 +40,12 @@ import {
   avatarAlex,
   chatReasoningLevels,
   chatReasoningProfiles,
+  commitArtifactPatch,
   createApprovalFromSuggestion,
   createDecisionFromSuggestion,
   createIdeaFromSuggestion,
   createTaskFromSuggestion,
+  draftArtifactPatch,
   getConversationKey,
   pmoWorkspaceQueryKey,
   pmoWorkspaceQueryOptions,
@@ -133,6 +140,7 @@ import { CategoryTablePage } from "./category-tables";
 import { DetailPanel } from "./detail-panel";
 import {
   AddIdeaDialog,
+  ArtifactPatchDialog,
   ArtifactPreviewDialog,
   BrandedConfirmDialog,
   BrandedInputDialog,
@@ -268,6 +276,8 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const [inputDialog, setInputDialog] = useState<InputDialogState>(null);
   const [previewArtifact, setPreviewArtifact] = useState<Artifact | null>(null);
+  const [patchArtifact, setPatchArtifact] = useState<Artifact | null>(null);
+  const [artifactPatchDraft, setArtifactPatchDraft] = useState<ArtifactPatchDraftResult | null>(null);
   const [workflowPreview, setWorkflowPreview] = useState<WorkflowPreviewState>(null);
   const [rightOpen, setRightOpen] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
@@ -279,7 +289,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   });
   const [isTutorialOpen, setIsTutorialOpen] = useState(false);
   const [tutorialStepIndex, setTutorialStepIndex] = useState(0);
-  const canEdit = session.user.role === "admin" || session.user.role === "user";
+  const canEdit = roleCanModifyState(session.user.role);
   useWorkspaceEventSource({
     enabled: activeMode !== "Team" || Boolean(selectedTeam),
     mode: activeMode,
@@ -293,17 +303,56 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     const requestedMode = params.get("mode") as WorkspaceMode | null;
     const requestedTab = params.get("tab") as TabName | null;
     const requestedIdeaId = params.get("idea");
+    const requestedProjectId = params.get("projectId");
+    const requestedRiskId = params.get("riskId");
     if (requestedMode && workspaceModes.includes(requestedMode)) setActiveMode(requestedMode);
-    if (requestedTab === "Ideas") {
-      setActiveRail("Workspaces");
-      setActiveTab("Ideas");
+    if (requestedTab && tabs.includes(requestedTab)) {
+      setActiveRail(requestedTab === "Risks" ? "Risks" : "Workspaces");
+      setActiveTab(requestedTab);
     }
     if (requestedIdeaId) {
       setSelectedIdeaId(requestedIdeaId);
       setRightOpen(true);
     }
-    shareLinkHandledRef.current = Boolean(requestedMode || requestedTab || requestedIdeaId);
+    if (requestedProjectId) {
+      window.sessionStorage.setItem("vertex-target-project-id", requestedProjectId);
+      if (requestedTab) window.sessionStorage.setItem("vertex-target-tab", requestedTab);
+    }
+    if (requestedRiskId) {
+      window.sessionStorage.setItem("vertex-target-risk-id", requestedRiskId);
+      setSelectedRiskId(requestedRiskId);
+      if (requestedTab !== "Risks") setRightOpen(true);
+    }
+    shareLinkHandledRef.current = Boolean(requestedMode || requestedTab || requestedIdeaId || requestedProjectId || requestedRiskId);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || isScopedWorkspaceLoading) return;
+    const requestedProjectId = window.sessionStorage.getItem("vertex-target-project-id");
+    if (!requestedProjectId) return;
+    const project = visibleWorkspace.projects.find((item) => item.id === requestedProjectId);
+    if (!project) {
+      window.sessionStorage.removeItem("vertex-target-project-id");
+      window.sessionStorage.removeItem("vertex-target-tab");
+      window.sessionStorage.removeItem("vertex-target-risk-id");
+      updateToast("The linked project is not available in this scope.");
+      return;
+    }
+    const requestedTab = window.sessionStorage.getItem("vertex-target-tab") as TabName | null;
+    const requestedRiskId = window.sessionStorage.getItem("vertex-target-risk-id");
+    setActiveProjectId(project.id);
+    setActiveChatSection("project");
+    setActiveChatId(project.projectChats[0]?.id ?? "");
+    if (requestedTab && tabs.includes(requestedTab)) {
+      setActiveRail(requestedTab === "Risks" ? "Risks" : "Workspaces");
+      setActiveTab(requestedTab);
+    }
+    if (requestedRiskId) setSelectedRiskId(requestedRiskId);
+    setRightOpen(requestedTab !== "Risks");
+    window.sessionStorage.removeItem("vertex-target-project-id");
+    window.sessionStorage.removeItem("vertex-target-tab");
+    window.sessionStorage.removeItem("vertex-target-risk-id");
+  }, [isScopedWorkspaceLoading, visibleWorkspace.projects]);
 
   useEffect(() => {
     const requestedRail = window.sessionStorage.getItem("vertex-target-rail") as RailName | null;
@@ -328,7 +377,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   const invalidateChats = () => queryClient.invalidateQueries({ queryKey: ["scoped-chats"] });
 
   const addIdeaMutation = useMutation({
-    mutationFn: (input: AddIdeaInput) => addIdea({ data: { ...input, mode: activeMode, projectId: scopedProjectId } }),
+    mutationFn: (input: AddIdeaInput) =>
+      addIdea({
+        data: { ...input, mode: activeMode, projectId: scopedProjectId, teamId: activeMode === "Team" ? (selectedTeam?.id ?? null) : null },
+      }),
     onSuccess: invalidateWorkspace,
   });
   const sendMessageMutation = useMutation({
@@ -390,10 +442,34 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     mutationFn: (id: string) => syncTaskToAsana({ data: { id, mode: activeMode } }),
     onSuccess: (result) => {
       queryClient.setQueryData(pmoWorkspaceQueryKey, result.workspace);
-      updateToast("Task synced to Asana");
+      updateToast("Task queued for Asana sync");
     },
     onError: (error) => {
       updateToast(error instanceof Error ? error.message : "Could not sync task to Asana.");
+      void invalidateWorkspace();
+    },
+  });
+  const generateRiskMitigationMutation = useMutation({
+    mutationFn: (risk: Risk) => {
+      const riskProjectId = risk.projectId;
+      if (!riskProjectId) throw new Error("Select a project-scoped risk before generating mitigation.");
+      return runServerMutation("Risk mitigation generation", () =>
+        generateRiskMitigation({
+          data: {
+            workspaceId: `ws-${visibleWorkspace.scope}`,
+            projectId: riskProjectId,
+            riskId: risk.id,
+          },
+        }),
+      );
+    },
+    onSuccess: async (risk) => {
+      setSelectedRiskId(risk.id);
+      updateToast("Mitigation strategy generated and saved.");
+      await invalidateWorkspace();
+    },
+    onError: (error) => {
+      updateToast(error instanceof Error ? error.message : "Could not generate mitigation strategy.");
       void invalidateWorkspace();
     },
   });
@@ -464,6 +540,30 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     },
     onSettled: async () => {
       await invalidateWorkspace();
+    },
+  });
+  const draftArtifactPatchMutation = useMutation({
+    mutationFn: (input: { artifactId: string; instruction: string; mode: WorkspaceMode }) => draftArtifactPatch({ data: input }),
+    onSuccess: (draft) => {
+      setArtifactPatchDraft(draft);
+      updateToast("AI diff patch drafted");
+    },
+    onError: (error) => {
+      updateToast(error instanceof Error ? error.message : "Could not draft artifact patch.");
+    },
+  });
+  const commitArtifactPatchMutation = useMutation({
+    mutationFn: (input: CommitArtifactPatchInput) => commitArtifactPatch({ data: input }),
+    onSuccess: async (result) => {
+      queryClient.setQueryData(pmoWorkspaceQueryKey, result.workspace);
+      setSelectedArtifactTitle(result.artifact.title);
+      setPatchArtifact(null);
+      setArtifactPatchDraft(null);
+      updateToast("Artifact patch approved");
+      await invalidateWorkspace();
+    },
+    onError: (error) => {
+      updateToast(error instanceof Error ? error.message : "Could not approve artifact patch.");
     },
   });
   const removeApprovalMutation = useMutation({
@@ -574,9 +674,11 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       originalText: [entity.description, entity.sourceQuote ? `Source: ${entity.sourceQuote}` : ""].filter(Boolean).join("\n"),
       owner: entity.owner ?? "You",
       source: "Chat entity extraction",
+      syncToAsana: true,
     });
-    await syncTaskToAsanaMutation.mutateAsync(result.task.id);
-    updateToast("Entity synced to Asana");
+    updateToast(
+      result.task.asanaSyncError ? `Entity saved; Asana sync failed: ${result.task.asanaSyncError}` : "Entity queued for Asana sync",
+    );
   }
   const createApprovalMutation = useMutation({
     mutationFn: (input: CreateWorkflowSuggestionInput) => createApprovalFromSuggestion({ data: input }),
@@ -669,6 +771,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     onSettled: async () => {
       await invalidateChats();
       await invalidateProjects();
+      await invalidateWorkspace();
     },
   });
   const branchChatMutation = useMutation({
@@ -704,8 +807,17 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       : (visibleWorkspace.workspaceChats.find((chat) => chat.id === activeChatId) ??
         transientChats[activeChatId] ??
         visibleWorkspace.workspaceChats[0]);
+  const activeChatReadOnly = isAutomatedBriefingsChat(activeChat);
+  const canWriteActiveChat = canEdit && !activeChatReadOnly;
   const scopedProjectId = activeChatSection === "project" ? (activeProject?.id ?? null) : null;
   const conversationKey = activeChat ? getConversationKey(activeMode, scopedProjectId, activeChat.id) : "";
+  const canUseAsanaSearch = Boolean(scopedProjectId);
+  const visibleAsanaSearchEnabled = canUseAsanaSearch && asanaSearchEnabled;
+  const asanaSearchTitle = !canUseAsanaSearch
+    ? "Asana search is only available in project chats because Asana tasks, stories, and status updates are mapped to a VertexAI project."
+    : asanaSearchEnabled
+      ? "Asana search on: pull mapped project tasks, stories, and status updates into Gemma context"
+      : "Asana search off: do not pull mapped Asana project context into Gemma";
   const workspaceTitle = `${workspaceModeLabel(activeMode)} workspace`;
   const isWorkspaceRail = activeRail === "Workspaces";
   const scopeContextLabel = activeProject && scopedProjectId ? activeProject.name : visibleWorkspace.unassignedProjectLabel;
@@ -738,7 +850,6 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     () => visibleWorkspace.tasks.filter((task) => task.projectId === scopedProjectId),
     [scopedProjectId, visibleWorkspace.tasks],
   );
-  const scopedRisks = useMemo(() => getScopedRisks(visibleWorkspace.risks, scopedProjectId), [scopedProjectId, visibleWorkspace.risks]);
   const scopedPrompts = useMemo(() => promptTemplates.map((prompt) => `${scopeContextLabel}: ${prompt}`), [scopeContextLabel]);
   const currentMessages = activeChat ? (visibleWorkspace.conversations[conversationKey] ?? []) : [];
 
@@ -753,7 +864,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     scopedApprovals.find((approval) => !["Approved", "Not Approved"].includes(approval.status)) ??
     scopedApprovals[0];
   const selectedTask = scopedTasks.find((task) => task.id === selectedTaskId) ?? scopedTasks[0];
-  const selectedRisk = scopedRisks.find((risk) => risk.id === selectedRiskId) ?? scopedRisks[0];
+  const selectedRisk = visibleWorkspace.risks.find((risk) => risk.id === selectedRiskId) ?? visibleWorkspace.risks[0];
 
   const pinnedIdeas = visibleWorkspace.pinnedIdeaIds
     .map((id) => scopedIdeas.find((idea) => idea.id === id))
@@ -784,7 +895,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     pinnedArtifacts,
     queryState: workspaceQuery.isFetching ? "Syncing" : "Fresh",
     scopeContextLabel,
-    risks: scopedRisks,
+    risks: visibleWorkspace.risks,
     tasks: scopedTasks,
     updatedAt: visibleWorkspace.updatedAt,
   });
@@ -805,10 +916,13 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
         : (scopedApprovals.find((approval) => !["Approved", "Not Approved"].includes(approval.status))?.id ?? scopedApprovals[0]?.id ?? ""),
     );
     setSelectedTaskId((current) => (current && scopedTasks.some((task) => task.id === current) ? current : (scopedTasks[0]?.id ?? "")));
-    setSelectedRiskId((current) => (current && scopedRisks.some((risk) => risk.id === current) ? current : (scopedRisks[0]?.id ?? "")));
-  }, [scopedApprovals, scopedArtifacts, scopedDecisions, scopedIdeas, scopedRisks, scopedTasks]);
+    setSelectedRiskId((current) =>
+      current && visibleWorkspace.risks.some((risk) => risk.id === current) ? current : (visibleWorkspace.risks[0]?.id ?? ""),
+    );
+  }, [scopedApprovals, scopedArtifacts, scopedDecisions, scopedIdeas, scopedTasks, visibleWorkspace.risks]);
 
   useEffect(() => {
+    if (isScopedWorkspaceLoading) return;
     const activeProjectExists = activeProjectId ? visibleWorkspace.projects.some((project) => project.id === activeProjectId) : true;
     if (!activeProjectExists) {
       setActiveProjectId("");
@@ -819,9 +933,11 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     const projectWithActiveChat = visibleWorkspace.projects.find((project) =>
       project.projectChats.some((chat) => chat.id === activeChatId),
     );
+    const selectedProjectWithoutChat = activeChatSection === "project" && Boolean(activeProject) && !activeChatId;
     const activeChatExists =
       (activeChatSection === "workspace" && workspaceChatExists) ||
       (activeChatSection === "project" && Boolean(projectWithActiveChat)) ||
+      selectedProjectWithoutChat ||
       Boolean(transientChats[activeChatId]);
 
     if (!activeChatExists) {
@@ -844,7 +960,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     if (activeChatSection === "project" && projectWithActiveChat && projectWithActiveChat.id !== activeProjectId) {
       setActiveProjectId(projectWithActiveChat.id);
     }
-  }, [activeChatId, activeChatSection, activeProjectId, transientChats, visibleWorkspace]);
+  }, [activeChatId, activeChatSection, activeProjectId, isScopedWorkspaceLoading, transientChats, visibleWorkspace]);
 
   useEffect(() => {
     if (activeMode === "Team" && teams.length > 0 && !teams.some((team) => team.id === activeTeamId)) {
@@ -911,10 +1027,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   }, [activeMode, queryClient, scopedChatsQueryKey, selectedTeam, session.user.email, session.user.id, session.user.name]);
 
   useEffect(() => {
-    if (canEdit && activeTab === "Chat" && activeChatId) {
+    if (canWriteActiveChat && activeTab === "Chat" && activeChatId) {
       focusChatComposer();
     }
-  }, [activeChatId, activeTab, canEdit]);
+  }, [activeChatId, activeTab, canWriteActiveChat]);
 
   function updateToast(message: string, link?: ToastLink) {
     setToast(message);
@@ -938,11 +1054,6 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   }
 
   function handleRailClick(label: RailName) {
-    if (label === "Risks" && activeProject) {
-      const href = riskManagementHref(visibleWorkspace.scope, activeProject.id);
-      if (href) window.location.href = href;
-      return;
-    }
     setActiveRail(label);
     const nextTab: Partial<Record<RailName, TabName>> = {
       Workspaces: "Chat",
@@ -1068,6 +1179,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   function handleCreateTeam() {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
+      return;
+    }
+    if (activeChatReadOnly) {
+      updateToast("Briefings is read-only. Weekly briefings are posted automatically.");
       return;
     }
     setIsCreateTeamOpen(true);
@@ -1227,7 +1342,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     chatTitle: string;
     key: string;
     mode: WorkspaceMode;
-    projectId: string;
+    projectId: string | null;
     prompt: string;
     reasoningLevel: ChatReasoningLevel;
     teamId: string;
@@ -1245,7 +1360,11 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       text: prompt,
     };
     const assistantMessageId = `msg-stream-assistant-${crypto.randomUUID()}`;
-    const streamingPlaceholder = asanaSearchEnabled || webSearchEnabled ? "Preparing project context..." : "Preparing response...";
+    const streamingPlaceholder = asanaSearchEnabled
+      ? "Preparing project context..."
+      : webSearchEnabled
+        ? "Preparing web context..."
+        : "Preparing response...";
     const assistantMessage: ChatMessage = {
       id: assistantMessageId,
       author: "VertexAI",
@@ -1276,7 +1395,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     setIsScopedRagStreaming(true);
     try {
       await consumeScopedRagEventSource(
-        { prompt, teamId, workspaceId, projectId, chatId, asanaSearchEnabled, reasoningLevel, webSearchEnabled },
+        { assistantMessageId, prompt, teamId, workspaceId, projectId, chatId, asanaSearchEnabled, reasoningLevel, webSearchEnabled },
         {
           onTrace: (trace) => {
             traceMessages = trace.messages;
@@ -1386,6 +1505,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
         assistantMessageId,
         prompt,
         response: responseText,
+        entities: detectedEntities,
       });
     } catch (error) {
       queryClient.setQueryData(scopedChatsQueryKey, previousScopedChats ?? emptyScopedChatsResult);
@@ -1482,6 +1602,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       updateToast("Viewer access is read-only");
       return;
     }
+    if (isAutomatedBriefingsChat(chat)) {
+      updateToast("Briefings is read-only. Weekly briefings are posted automatically.");
+      return;
+    }
     if (activeMode === "Team" && !selectedTeam) {
       updateToast("Select a team before deleting a team chat.");
       return;
@@ -1525,6 +1649,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   function handleRenameChat({ chat, project, section }: { chat: ChatSummary; project?: ProjectSummary; section: ChatSection }) {
     if (!canEdit) {
       updateToast("Viewer access is read-only");
+      return;
+    }
+    if (isAutomatedBriefingsChat(chat)) {
+      updateToast("Briefings is read-only. Weekly briefings are posted automatically.");
       return;
     }
     if (activeMode === "Team" && !selectedTeam) {
@@ -1693,16 +1821,13 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       setActiveTab("Chat");
       setRightOpen(true);
       const teamId = activeMode === "Team" ? (selectedTeam?.id ?? "") : "";
-      if (!target.projectId) {
-        updateToast("Streaming RAG chat is available in project chats. Select or create a project chat first.");
-        return;
-      }
       if (readyAttachments.length > 0) {
         updateToast("Streaming file attachment context is not wired yet. Remove attachments and send again.");
         setChatInput(text);
         setChatAttachments(readyAttachments);
         return;
       }
+      const targetAsanaSearchEnabled = Boolean(target.projectId) && asanaSearchEnabled;
       await runScopedRagStream({
         chatId: target.chat.id,
         chatTitle: target.chat.title,
@@ -1714,7 +1839,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
         teamId,
         webSearchEnabled,
         workspaceId: `ws-${activeWorkspace.scope}`,
-        asanaSearchEnabled,
+        asanaSearchEnabled: targetAsanaSearchEnabled,
       });
       updateToast("VertexAI response streamed");
       return;
@@ -1797,7 +1922,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
       <div className="workspace-shadow relative grid h-full overflow-hidden border bg-card lg:grid-cols-[72px_minmax(0,1fr)] lg:rounded-xl">
         <PrimaryRail
           activeRail={activeRail}
-          canAdmin={session.user.role === "admin"}
+          canAdmin={isAdminRole(session.user.role)}
           userEmail={session.user.email}
           userName={session.user.name}
           onRailClick={handleRailClick}
@@ -1806,7 +1931,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
 
         <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background">
           <Topbar
-            canAdmin={session.user.role === "admin"}
+            canAdmin={isAdminRole(session.user.role)}
             presenceUsers={presenceUsers}
             searchTerm={searchTerm}
             userEmail={session.user.email}
@@ -2018,17 +2143,16 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                         ) : null}
                         {activeTab === "Risks" ? (
                           <RiskView
-                            activeProject={activeProject}
-                            risks={scopedRisks}
-                            onManage={() => {
-                              const href = riskManagementHref(visibleWorkspace.scope, activeProject?.id);
-                              if (!href) {
-                                updateToast("Select a project to open risk management.");
-                                return;
-                              }
-                              window.location.href = href;
-                            }}
+                            canEdit={canEdit}
+                            generatingRiskId={generateRiskMitigationMutation.variables?.id ?? null}
+                            projects={visibleWorkspace.projects}
+                            risks={visibleWorkspace.risks}
+                            scopeLabel={workspaceModeLabel(activeMode)}
+                            searchTerm={searchTerm}
+                            selectedRiskId={selectedRiskId}
+                            onGenerateMitigation={(risk) => generateRiskMitigationMutation.mutate(risk)}
                             onPreview={(risk) => setWorkflowPreview(workflowPreviewFromRisk(risk))}
+                            onSearchTerm={setSearchTerm}
                             onSelect={(risk) => {
                               setSelectedRiskId(risk.id);
                               setRightOpen(true);
@@ -2049,7 +2173,7 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                     </>
                   )}
 
-                  {isScopedWorkspaceLoading ? null : canEdit ? (
+                  {isScopedWorkspaceLoading ? null : canWriteActiveChat ? (
                     <form
                       ref={chatFormRef}
                       className={cn(
@@ -2120,36 +2244,37 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                         </button>
                         <button
                           type="button"
-                          aria-pressed={asanaSearchEnabled}
+                          aria-disabled={!canUseAsanaSearch}
+                          aria-pressed={visibleAsanaSearchEnabled}
                           className={cn(
                             "inline-flex h-7 items-center gap-1.5 rounded-full border px-2 text-xs font-semibold transition-colors",
-                            asanaSearchEnabled
+                            visibleAsanaSearchEnabled
                               ? "border-primary bg-primary text-primary-foreground"
                               : "border-input bg-background text-muted-foreground hover:bg-accent hover:text-foreground",
+                            !canUseAsanaSearch && "cursor-not-allowed opacity-60 hover:bg-background hover:text-muted-foreground",
                           )}
-                          title={
-                            asanaSearchEnabled
-                              ? "Asana search on: pull mapped project tasks, stories, and status updates into Gemma context"
-                              : "Asana search off: do not pull mapped Asana project context into Gemma"
-                          }
-                          onClick={() => setAsanaSearchEnabled((enabled) => !enabled)}
+                          title={asanaSearchTitle}
+                          onClick={() => {
+                            if (!canUseAsanaSearch) return;
+                            setAsanaSearchEnabled((enabled) => !enabled);
+                          }}
                         >
                           <span>Asana</span>
                           <span
                             aria-hidden="true"
                             className={cn(
                               "relative inline-flex h-4 w-7 items-center rounded-full transition-colors",
-                              asanaSearchEnabled ? "bg-primary-foreground/25" : "bg-muted",
+                              visibleAsanaSearchEnabled ? "bg-primary-foreground/25" : "bg-muted",
                             )}
                           >
                             <span
                               className={cn(
                                 "block size-3 rounded-full bg-current transition-transform",
-                                asanaSearchEnabled ? "translate-x-3.5" : "translate-x-0.5",
+                                visibleAsanaSearchEnabled ? "translate-x-3.5" : "translate-x-0.5",
                               )}
                             />
                           </span>
-                          <span className="w-5 text-left">{asanaSearchEnabled ? "On" : "Off"}</span>
+                          <span className="w-5 text-left">{visibleAsanaSearchEnabled ? "On" : "Off"}</span>
                         </button>
                         {showTokenUsage ? (
                           <span className="ml-auto text-xs text-muted-foreground">
@@ -2238,7 +2363,9 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                         rightOpen ? "lg:right-104 xl:right-106.5" : "lg:right-18 xl:right-18",
                       )}
                     >
-                      Viewer access is read-only.
+                      {activeChatReadOnly
+                        ? "Briefings is read-only. Weekly briefings are posted automatically."
+                        : "Viewer access is read-only."}
                     </div>
                   )}
                 </section>
@@ -2266,6 +2393,10 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                       task={selectedTask}
                       workspaceTitle={workspaceTitle}
                       onClose={() => setRightOpen(false)}
+                      onPatchArtifact={(artifact) => {
+                        setPatchArtifact(artifact);
+                        setArtifactPatchDraft(null);
+                      }}
                       onPreviewArtifact={(artifact) => setPreviewArtifact(artifact)}
                       onRestoreArtifactVersion={(artifactId) => restoreArtifactMutation.mutate({ mode: activeMode, artifactId })}
                       onShare={() => {
@@ -2287,12 +2418,9 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
                       onDeleteTask={(id) => removeTaskMutation.mutate(id)}
                       onPreviewWorkflow={(preview) => setWorkflowPreview(preview)}
                       onManageRisks={() => {
-                        const href = riskManagementHref(visibleWorkspace.scope, activeProject?.id);
-                        if (!href) {
-                          updateToast("Select a project to open risk management.");
-                          return;
-                        }
-                        window.location.href = href;
+                        setActiveRail("Risks");
+                        setActiveTab("Risks");
+                        setRightOpen(false);
                       }}
                       onRefreshIdeaAssessment={() => selectedIdea && refreshIdeaAssessmentMutation.mutate(selectedIdea.id)}
                       onUsePrompt={(prompt) => {
@@ -2322,8 +2450,15 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
               <CategoryTablePage
                 activeMode={activeMode}
                 canEdit={canEdit}
+                generatingRiskId={generateRiskMitigationMutation.variables?.id ?? null}
                 rail={activeRail}
+                selectedRiskId={selectedRiskId}
                 workspace={visibleWorkspace}
+                onGenerateRiskMitigation={(risk) => generateRiskMitigationMutation.mutate(risk)}
+                onPreviewRisk={(risk) => setWorkflowPreview(workflowPreviewFromRisk(risk))}
+                onSelectRisk={(risk) => {
+                  setSelectedRiskId(risk.id);
+                }}
                 onUsePrompt={(prompt) => {
                   setChatInput(prompt);
                   setActiveRail("Workspaces");
@@ -2409,6 +2544,27 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
         onOpenChange={(open) => {
           if (!open) setInputDialog(null);
         }}
+      />
+      <ArtifactPatchDialog
+        artifact={patchArtifact}
+        draft={artifactPatchDraft}
+        mode={activeMode}
+        open={Boolean(patchArtifact)}
+        pendingApprove={commitArtifactPatchMutation.isPending}
+        pendingDraft={draftArtifactPatchMutation.isPending}
+        onApprove={async (input) => {
+          await commitArtifactPatchMutation.mutateAsync(input);
+        }}
+        onDraft={async (instruction) => {
+          if (!patchArtifact) return;
+          await draftArtifactPatchMutation.mutateAsync({ artifactId: patchArtifact.id, instruction, mode: activeMode });
+        }}
+        onOpenChange={(open) => {
+          if (open) return;
+          setPatchArtifact(null);
+          setArtifactPatchDraft(null);
+        }}
+        onResetDraft={() => setArtifactPatchDraft(null)}
       />
       <ArtifactPreviewDialog artifact={previewArtifact} onOpenChange={(open) => !open && setPreviewArtifact(null)} />
       <WorkflowPreviewDialog preview={workflowPreview} onOpenChange={(open) => !open && setWorkflowPreview(null)} />

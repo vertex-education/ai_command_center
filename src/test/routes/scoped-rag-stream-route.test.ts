@@ -19,10 +19,20 @@ describe("scoped RAG stream route helpers", () => {
       workspaceId: "ws-team",
       projectId: "project-1",
       chatId: "chat-1",
+      assistantMessageId: null,
       asanaSearchEnabled: true,
       webSearchEnabled: true,
       reasoningLevel: "high",
     });
+  });
+
+  it("parses missing project ids as workspace-scoped chat input", () => {
+    const input = parseScopedRagStreamInput(
+      new Request("https://app.test/api/scoped-rag-stream?prompt=hello&teamId=team-1&workspaceId=ws-team&chatId=chat-1"),
+    );
+
+    expect(input.projectId).toBeNull();
+    expect(input.asanaSearchEnabled).toBe(false);
   });
 
   it("normalizes unsupported reasoning levels to low", () => {
