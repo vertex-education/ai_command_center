@@ -12,7 +12,7 @@ import { getSession, startMicrosoftSignIn } from "@/lib/auth-workflow";
 export const Route = createFileRoute("/sign-in")({
   loader: async () => {
     const session = await getSession();
-    if (session) throw redirect({ to: "/" });
+    if (session) throw redirect({ to: "/workspace" });
   },
   head: () => ({
     meta: [{ title: "Sign in | VertexAI" }],
@@ -62,14 +62,14 @@ function SignInPage() {
 
       setMessage("Signed in. Opening VertexAI...");
       window.setTimeout(() => {
-        if (window.location.pathname === "/sign-in") window.location.replace("/");
+        if (window.location.pathname === "/sign-in") window.location.replace("/workspace");
       }, 750);
 
       try {
         await router.invalidate();
-        await router.navigate({ to: "/", replace: true });
+        await router.navigate({ to: "/workspace", replace: true });
       } catch {
-        window.location.replace("/");
+        window.location.replace("/workspace");
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Sign in failed. Try again.");

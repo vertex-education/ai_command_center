@@ -40,7 +40,7 @@ function UserProfilePage() {
         <section className="scrollbar-thin min-h-0 overflow-auto bg-muted/30 p-4 lg:p-6">
           <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
             <div className="flex items-center justify-between gap-3">
-              <Button type="button" variant="outline" onClick={() => (window.location.href = "/")}>
+              <Button type="button" variant="outline" onClick={() => (window.location.href = "/workspace")}>
                 Back
               </Button>
               <VertexAIBrand />
@@ -178,7 +178,7 @@ function UserProfilePage() {
 
 function relaunchTutorial() {
   window.sessionStorage.setItem("vertex-onboarding-tutorial-relaunch", "1");
-  window.location.href = "/";
+  window.location.href = "/workspace";
 }
 
 function getInitials(value: string) {

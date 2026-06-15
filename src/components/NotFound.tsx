@@ -10,7 +10,7 @@ export function NotFound({ children }: { children?: ReactNode }) {
         <p className="text-sm text-muted-foreground">{children ?? "The PMO workspace route you requested does not exist."}</p>
       </div>
       <Button asChild>
-        <Link to="/">Return to workspace</Link>
+        <Link to="/workspace">Return to workspace</Link>
       </Button>
     </main>
   );

@@ -82,7 +82,7 @@ function DocsHeader({ role }: { role?: string | null }) {
       </div>
       <div className="flex items-center gap-2">
         <Badge variant="secondary">{roleDisplayName(role)}</Badge>
-        <Button type="button" variant="outline" onClick={() => (window.location.href = "/")}>
+        <Button type="button" variant="outline" onClick={() => (window.location.href = "/workspace")}>
           Workspace
         </Button>
       </div>

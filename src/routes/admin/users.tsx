@@ -25,7 +25,7 @@ export const Route = createFileRoute("/admin/users")({
   loader: async () => {
     const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
-    if (!isAdminRole(session.user.role)) throw redirect({ to: "/" });
+    if (!isAdminRole(session.user.role)) throw redirect({ to: "/workspace" });
     return { session };
   },
   head: () => ({

@@ -26,7 +26,7 @@ function openRailItem(label: AppRailItem) {
     return;
   }
   window.sessionStorage.setItem("vertex-target-rail", label);
-  window.location.href = "/";
+  window.location.href = "/workspace";
 }
 
 export function AppRail({

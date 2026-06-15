@@ -19,7 +19,15 @@ export const Route = createRootRouteWithContext<{
         content: "VertexAI workspace powered by TanStack Start, Query, Table, shadcn/ui, and Tailwind CSS.",
       },
     ],
-    links: [{ rel: "icon", href: "/favicon.svg" }],
+    links: [
+      { rel: "preconnect", href: "https://fonts.googleapis.com" },
+      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Red+Hat+Display:wght@600;700;800&display=swap",
+      },
+      { rel: "icon", href: "/favicon.svg" },
+    ],
   }),
   errorComponent: (props) => (
     <RootDocument>

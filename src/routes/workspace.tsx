@@ -11,7 +11,7 @@ export const Route = createFileRoute("/workspace")({
   },
   pendingComponent: CommandCenterPageSkeleton,
   head: () => ({
-    meta: [{ title: "VertexAI" }],
+    meta: [{ title: "Workspace | VertexAI" }],
   }),
   component: CommandCenterRoute,
 });

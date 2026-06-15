@@ -11,7 +11,7 @@ export const Route = createFileRoute("/admin")({
   loader: async () => {
     const session = await getSession();
     if (!session) throw redirect({ to: "/sign-in" });
-    if (!isAdminRole(session.user.role)) throw redirect({ to: "/" });
+    if (!isAdminRole(session.user.role)) throw redirect({ to: "/workspace" });
     return { session };
   },
   head: () => ({
@@ -47,7 +47,7 @@ function AdminLayout() {
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <Button type="button" variant="outline" onClick={() => (window.location.href = "/")}>
+                <Button type="button" variant="outline" onClick={() => (window.location.href = "/workspace")}>
                   <ArrowLeft className="size-4" />
                   Workspace
                 </Button>
