@@ -227,6 +227,70 @@ function normalizeChatTitle(title: string) {
   return trimmed ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "";
 }
 
+const chatTitleStopWords = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "build",
+  "building",
+  "create",
+  "creating",
+  "detailed",
+  "for",
+  "from",
+  "generate",
+  "generating",
+  "give",
+  "help",
+  "i",
+  "in",
+  "is",
+  "it",
+  "make",
+  "making",
+  "me",
+  "my",
+  "need",
+  "of",
+  "on",
+  "or",
+  "please",
+  "show",
+  "showing",
+  "summarize",
+  "summarizing",
+  "tell",
+  "the",
+  "this",
+  "today",
+  "to",
+  "tomorrow",
+  "tonight",
+  "very",
+  "want",
+  "with",
+  "write",
+  "writing",
+  "yesterday",
+  "you",
+]);
+const chatTitleMaxWords = 4;
+const chatTitleMaxCharacters = 36;
+
+function topicalChatTitle(text: string, fallback = "New request") {
+  const words = text
+    .split(" ")
+    .map((word) => word.trim())
+    .filter(Boolean);
+  const topicalWords = words.filter((word) => !chatTitleStopWords.has(word.toLowerCase()));
+  const title =
+    (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || fallback;
+  if (title.length <= chatTitleMaxCharacters) return title;
+  return title.slice(0, chatTitleMaxCharacters).trim().replace(/\s+\S*$/, "") || title;
+}
+
 function assertProjectChatTitleIsNotReserved(title: string, section: ChatSection) {
   if (section === "project" && isReservedBriefingsTitle(title)) {
     throw new Error("Briefings is reserved for automated weekly briefing output.");
@@ -240,20 +304,15 @@ async function assertChatIsMutable(chatId: string) {
 
 function conciseChatTitleFromRequest(text: string) {
   const cleaned = text
+    .replace(/[`*_#>\[\](){}]/g, " ")
     .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/\b(please|can you|could you|would you|help me|i need|we need)\b/gi, " ")
+    .replace(/\b(can|could|would|will)\s+you\b/gi, " ")
+    .replace(/\b(i\s+want|i\s+need|i\s+would\s+like|we\s+need|please|help\s+me)\b/gi, " ")
     .replace(/\b(create|make|build|write|generate|give|tell|show|summarize)\s+(me\s+)?\b/gi, " ")
     .replace(/[^a-z0-9\s&/+-]/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-  const words = cleaned
-    .split(" ")
-    .map((word) => word.trim())
-    .filter(Boolean)
-    .slice(0, 6);
-  const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
-  const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
-  return normalizeChatTitle(conciseTitle) || "New Request";
+  return normalizeChatTitle(topicalChatTitle(cleaned)) || "New Request";
 }
 
 function normalizeGeneratedInitialChatTitle(title: string, fallback: string) {
@@ -263,7 +322,7 @@ function normalizeGeneratedInitialChatTitle(title: string, fallback: string) {
     .replace(/^["'`]+|["'`.]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  return normalizeChatTitle(cleaned && cleaned.length >= 3 ? cleaned : fallback) || fallback;
+  return normalizeChatTitle(conciseChatTitleFromRequest(cleaned && cleaned.length >= 3 ? cleaned : fallback)) || fallback;
 }
 
 async function generateInitialChatTitle(
@@ -291,14 +350,15 @@ async function generateInitialChatTitle(
             {
               role: "system",
               content: [
-                "Name this chat from the user's initial message.",
-                "Return only a concise title, no quotes, no punctuation at the end.",
-                "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+                "Name this chat with a short topical label from the user's initial message.",
+                "Use 2 to 4 words, ideally a noun phrase.",
+                "Keep the main subject nouns and drop request phrasing, filler verbs, and dates unless essential.",
+                "Return only the title, no quotes, no punctuation at the end.",
               ].join(" "),
             },
             { role: "user", content: text.slice(0, 2_000) },
           ],
-          max_completion_tokens: 24,
+          max_completion_tokens: 16,
           temperature: 0.1,
         },
         {
@@ -340,19 +400,8 @@ function shouldAutoRenameInitialChat(chat: { title: string; description: string 
 }
 
 function branchContextTitle(messageText: string) {
-  const cleaned = messageText
-    .replace(/[`*_#>\[\](){}]/g, " ")
-    .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/[^a-z0-9\s&/+-]/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  const words = cleaned
-    .split(" ")
-    .map((word) => word.trim())
-    .filter(Boolean)
-    .filter((word) => word.length > 2)
-    .slice(0, 8);
-  return words.join(" ");
+  const title = conciseChatTitleFromRequest(messageText);
+  return title === "New Request" ? "" : title;
 }
 
 function fallbackBranchChatTitle(sourceChatTitle: string, messageText: string) {
@@ -387,7 +436,7 @@ function normalizeBranchGeneratedTitle(title: string, fallback: string) {
     .replace(/\s+/g, " ")
     .trim();
   const usable = cleaned && cleaned.length >= 3 ? cleaned : fallback.replace(/^Branch:\s*/i, "");
-  return normalizeChatTitle(`Branch: ${usable}`) || fallback;
+  return normalizeChatTitle(`Branch: ${conciseChatTitleFromRequest(usable)}`) || fallback;
 }
 
 async function generateBranchChatTitle(
@@ -417,13 +466,14 @@ async function generateBranchChatTitle(
               role: "system",
               content: [
                 "Name a branched chat from the selected source message.",
-                "Return only the contextual title without the word Branch.",
-                "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+                "Use 2 to 4 words, ideally a noun phrase.",
+                "Keep the main subject nouns and drop request phrasing, filler verbs, and dates unless essential.",
+                "Return only the contextual title without the word Branch, quotes, or punctuation at the end.",
               ].join(" "),
             },
             { role: "user", content: messageText.slice(0, 2_000) },
           ],
-          max_completion_tokens: 24,
+          max_completion_tokens: 16,
           temperature: 0.1,
         },
         {

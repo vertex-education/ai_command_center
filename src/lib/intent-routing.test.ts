@@ -7,6 +7,7 @@ describe("prompt intent routing", () => {
     expect(normalizePromptIntent("web_search\n")).toBe("WEB_SEARCH");
     expect(normalizePromptIntent("direct_chat")).toBe("DIRECT_CHAT");
     expect(normalizePromptIntent("entity extraction")).toBe("ENTITY_EXTRACTION");
+    expect(normalizePromptIntent("task extraction")).toBe("TASK_EXTRACTION");
     expect(normalizePromptIntent("artifact-generation")).toBe("ARTIFACT_GENERATION");
     expect(normalizePromptIntent("search_workspace")).toBeNull();
   });
@@ -27,6 +28,10 @@ describe("prompt intent routing", () => {
     expect(inferPromptIntentFallback("Extract action items from the uploaded project artifact")).toBe("RAG_SEARCH");
   });
 
+  it("routes prompt-local task extraction to task extraction", () => {
+    expect(inferPromptIntentFallback("Extract action items from this note: Maya owns launch QA by Friday")).toBe("TASK_EXTRACTION");
+  });
+
   it("routes prompt-local operational extraction to entity extraction", () => {
     expect(inferPromptIntentFallback("Extract action items and risks from this note: Maya owns launch QA by Friday")).toBe(
       "ENTITY_EXTRACTION",
@@ -37,7 +42,7 @@ describe("prompt intent routing", () => {
     expect(inferPromptIntentFallback("Brainstorm a better meeting agenda")).toBe("DIRECT_CHAT");
   });
 
-  it("uses GLM 4.7 Flash with turn-level thinking disabled for model classification", async () => {
+  it("uses Llama 3 8B with turn-level thinking disabled for model classification", async () => {
     let payload: unknown;
     const ai = {
       run(model: string, inputs: Record<string, unknown>, options: unknown) {

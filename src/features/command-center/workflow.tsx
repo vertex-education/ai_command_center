@@ -536,13 +536,14 @@ export function TaskView({
           asanaSyncQueuedAt: task.asanaSyncQueuedAt,
           canEdit,
           isSyncing: syncingTaskId === task.id || task.clientStatus === "pending",
+          syncStatus: task.syncStatus,
         });
         const syncMeta = task.asanaTaskGid
           ? " / Synced to Asana"
-          : task.asanaSyncQueuedAt && !task.asanaSyncError
+          : (task.asanaSyncQueuedAt && !task.asanaSyncError) || task.syncStatus === "Pending"
             ? " / Queued for Asana"
-            : task.asanaSyncError
-              ? ` / Sync error: ${task.asanaSyncError}`
+            : task.asanaSyncError || task.syncStatus === "Failed"
+              ? ` / Sync error: ${task.asanaSyncError ?? "Asana sync failed."}`
               : "";
         return {
           id: task.id,

@@ -19,6 +19,7 @@ describe("scoped RAG stream route helpers", () => {
       workspaceId: "ws-team",
       projectId: "project-1",
       chatId: "chat-1",
+      userMessageId: null,
       assistantMessageId: null,
       asanaSearchEnabled: true,
       webSearchEnabled: true,
@@ -32,6 +33,7 @@ describe("scoped RAG stream route helpers", () => {
     );
 
     expect(input.projectId).toBeNull();
+    expect(input.userMessageId).toBeNull();
     expect(input.asanaSearchEnabled).toBe(false);
   });
 

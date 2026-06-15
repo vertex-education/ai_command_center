@@ -14,6 +14,7 @@ type UseWorkspaceEventSourceInput = {
 export function useWorkspaceEventSource({ enabled = true, mode, teamId = null, userId }: UseWorkspaceEventSourceInput) {
   const queryClient = useQueryClient();
   const clientIdRef = useRef("");
+  const lastAppliedEventIdRef = useRef(0);
   const seenEventIdsRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
@@ -25,6 +26,7 @@ export function useWorkspaceEventSource({ enabled = true, mode, teamId = null, u
     const scopedTeamId = mode === "Team" ? teamId : null;
     const lastEventStorageKey = realtimeLastEventKey(mode, scopedTeamId, userId);
     const lastEventId = window.sessionStorage.getItem(lastEventStorageKey);
+    lastAppliedEventIdRef.current = Number(lastEventId) || 0;
     const params = new URLSearchParams({ mode, clientId });
     if (scopedTeamId) params.set("teamId", scopedTeamId);
     if (lastEventId) params.set("lastEventId", lastEventId);
@@ -39,15 +41,19 @@ export function useWorkspaceEventSource({ enabled = true, mode, teamId = null, u
     events.addEventListener("mutation", (mutationEvent) => {
       try {
         const event = JSON.parse(mutationEvent.data) as RealtimeMutationEvent;
-        if (event.sourceClientId && event.sourceClientId === clientIdRef.current) return;
-        if (seenEventIdsRef.current.has(event.id)) return;
+        const eventSourceId = Number((mutationEvent as MessageEvent).lastEventId);
+        const deliveredEventId = Number.isSafeInteger(eventSourceId) && eventSourceId > 0 ? eventSourceId : event.id;
+        if (deliveredEventId <= lastAppliedEventIdRef.current || seenEventIdsRef.current.has(deliveredEventId)) return;
 
-        seenEventIdsRef.current.add(event.id);
+        seenEventIdsRef.current.add(deliveredEventId);
         if (seenEventIdsRef.current.size > 500) {
           const oldest = seenEventIdsRef.current.values().next().value;
           if (typeof oldest === "number") seenEventIdsRef.current.delete(oldest);
         }
-        window.sessionStorage.setItem(lastEventStorageKey, String(event.id));
+        lastAppliedEventIdRef.current = deliveredEventId;
+        window.sessionStorage.setItem(lastEventStorageKey, String(deliveredEventId));
+
+        if (event.sourceClientId && event.sourceClientId === clientIdRef.current) return;
 
         if (event.invalidates.includes("workspace")) void invalidateWorkspace();
         if (event.invalidates.includes("teams")) void invalidateTeams();

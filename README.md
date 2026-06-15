@@ -42,8 +42,8 @@ The full feature catalog lives in [docs/vertexai-feature-catalog.md](docs/vertex
 - Cloudflare R2 for artifact files
 - Cloudflare Workers AI for assistant responses, embeddings, and prompt intent routing
 - Cloudflare Vectorize for scoped RAG artifact retrieval
-- Cloudflare Queues for document ingestion jobs, autonomous research indexing, Microsoft Graph webhook fan-out, and Asana task creation sync
-- Cloudflare Cron Triggers for scheduled project briefings
+- Cloudflare Queues for document ingestion jobs, autonomous research indexing, Microsoft Graph webhook fan-out, Asana task creation sync, Asana outbound requests, and workspace intelligence jobs
+- Cloudflare Cron Triggers for scheduled project briefings and weekly agentic briefings
 - Codex Sites metadata in `.openai/hosting.json`
 
 ## Prerequisites
@@ -135,6 +135,8 @@ For Cloudflare deployment, set these as Worker environment variables or secrets 
 
 The primary D1 schema lives in [db/schema.ts](db/schema.ts). Supplemental SQL for artifact registry upload tables lives in [schema_updates.sql](schema_updates.sql).
 
+Server code should resolve D1 through [src/db/index.ts](src/db/index.ts) or the request-scoped helper in [src/dbMiddleware.ts](src/dbMiddleware.ts), which keeps Drizzle construction tied to the current Worker binding instead of a module-level singleton.
+
 Core tables:
 
 - `workspaces`: Personal, Team, and Org scope records.
@@ -145,7 +147,11 @@ Core tables:
 - `artifacts`: immutable artifact metadata, version lineage, commit messages, and R2 object keys.
 - `artifacts_registry`: upload registry rows for asynchronous artifact ingestion, including R2 key, scope, tags, status, error, and chunk count.
 - `document_chunks` and `document_chunks_v2`: D1 chunk text stores paired with Vectorize metadata for scoped RAG retrieval.
-- `workspace_actions`: decisions, approvals, and tasks, including status, original assistant text, project scope, explicit pin state, and queued bidirectional Asana task sync metadata.
+- `vector_tenant_map`: compressed integer tenant ids for Vectorize metadata, mapping long workspace/team/project identifiers back to D1-owned scope records.
+- `workspace_actions`: decisions, approvals, and tasks, including status, original assistant text, project scope, explicit pin state, outbound status, and queued bidirectional Asana task sync metadata.
+- `extracted_tasks`: background task extraction results from workspace intelligence queue jobs.
+- `project_risks`: multi-agent idea evaluation risks with category, severity, and mitigation suggestions.
+- `briefings`: weekly agentic Markdown briefings keyed by a source data hash.
 - `risks`: project-scoped risks with title, description, severity, status, and mitigation strategy.
 - `organization`, `member`, and `invitation`: Better Auth organization plugin tables used for organization-aware roles.
 - `microsoft_graph_subscriptions`: Teams and Outlook Graph webhook subscription tracking, including active Teams subscription counts for the 10,000 tenant limit.
@@ -170,6 +176,8 @@ The Ideas rail uses the same workflow-row controls as Decisions, Approvals, and 
 
 The details panel shows `AI analysis` for Impact, Effort, and Confidence. On create, the server asks Workers AI with Gemma 4 to score the idea against Vertex Education context and provide concise score explanations. The scores, hover explanations, consideration type, and consideration text are stored on the idea row through the existing `impact`, `effort`, `confidence`, `metrics_json`, `next_step`, and `thread_json` fields. The Refresh button reruns the analysis ad hoc, disables while the request is pending, and writes the refreshed values back to D1.
 
+When `WORKSPACE_INTELLIGENCE_QUEUE` is bound, new ideas also enqueue a background multi-agent evaluation. The consumer stores normalized category, severity, and mitigation findings in `project_risks` without blocking the foreground create action.
+
 Ideas created manually or from assistant suggestions are not pinned automatically. Use the row or detail-panel pin control when an idea should appear in `Pinned Items`.
 
 Share creates a normal authenticated app URL such as `/?mode=Team&tab=Ideas&idea=<id>&teamId=<id>`. It does not create magic links; unauthenticated users still go through the sign-in route.
@@ -187,6 +195,8 @@ Standalone Cloudflare deployment uses [wrangler.jsonc](wrangler.jsonc):
 - `AUTONOMOUS_RESEARCH_QUEUE` -> Queue for background Firecrawl research indexing when projects or ideas are created
 - `GRAPH_WEBHOOK_QUEUE` -> Queue for Microsoft Graph Teams and Outlook change notifications
 - `ASANA_SYNC_QUEUE` -> Queue for creating approved VertexAI workflow tasks in Asana after the local D1 insert succeeds
+- `ASANA_OUTBOUND_QUEUE` -> Queue for isolated Asana outbound webhook-style HTTP calls
+- `WORKSPACE_INTELLIGENCE_QUEUE` -> Queue for background task extraction and multi-agent idea risk evaluation
 - `AI` -> Workers AI binding for chat generation, intent routing, and embeddings
 - `CLOUDFLARE_AI_GATEWAY_ID` -> AI Gateway name used by every inference request; defaults to `default`
 - `CLOUDFLARE_AI_GATEWAY_ORGANIZATION_ID` -> optional organization dimension for Gateway spend-limit metadata; defaults to `vertex-education`
@@ -210,7 +220,7 @@ The standalone Cloudflare Worker also defines a scheduler trigger:
 
 ```jsonc
 "triggers": {
-  "crons": ["0 * * * *"]
+  "crons": ["0 * * * *", "0 12 * * 1"]
 }
 ```
 
@@ -269,7 +279,7 @@ Asana account setup starts in Profile settings at `/profile/asana`.
 - The wizard lists projects discovered through the connected user's Asana team project memberships and portfolio memberships. Project write access is verified for selected mappings at save time and combined with the granted OAuth scopes.
 - Users can map an Asana project to an existing VertexAI project or scaffold a new VertexAI project and project chat from the selected Asana project.
 - Each saved mapping stores `can_write_tasks`. Task submission back to Asana is blocked unless the connected user has both `tasks:write` OAuth scope and confirmed Asana project-level write access.
-- Tasks created from VertexAI workflow suggestions stay local until the user clicks Sync to Asana, unless the user enables auto-sync in Profile > Asana. The local D1 task is inserted first, then `ASANA_SYNC_QUEUE` creates the remote task out of band and writes the Asana task gid back to `workspace_actions`.
+- Tasks created from VertexAI workflow suggestions stay local until the user clicks Sync to Asana, unless the user enables auto-sync in Profile > Asana. The local D1 task is inserted first, then `ASANA_SYNC_QUEUE` creates the remote task out of band and writes the Asana task gid plus `outbound_status` and `sync_status` back to `workspace_actions`.
 - Project-scoped tasks are added to the mapped Asana project without selecting a section, so Asana places them in the project's default task location. Non-project tasks are created in the connected user's Asana task list by setting `assignee` to that Asana user and using a single resolvable Asana workspace. Once a task has an Asana task gid, the Sync to Asana button is disabled and displayed as synced.
 - Verified Asana webhook deliveries update `asana_webhook_task_states`, post system messages to mapped project chats, publish SSE invalidation events, and update matching local task title/status/sync-error fields when the Asana gid matches `workspace_actions.asana_task_gid`. Webhooks do not create unrelated local tasks or delete local task records.
 - Asana's project membership and portfolio discovery endpoints currently require the OAuth app's Full permissions mode for this integration. Set `ASANA_USE_FULL_PERMISSIONS=true` and reconnect after enabling Full permissions in the Asana developer console when the mapping wizard must enforce membership/write-access guardrails.
@@ -386,7 +396,7 @@ The seed set includes separate DOCX, XLSX, and PPTX files for Personal, Team, an
 
 Artifact registry uploads use [src/lib/artifact-upload.ts](src/lib/artifact-upload.ts). The upload server function requires `DB`, `ARTIFACTS_BUCKET`, and `DOCUMENT_INGESTION_QUEUE`, writes the raw file buffer directly to R2, inserts an `artifacts_registry` row with `status = pending`, publishes an `artifact-registry-upload` queue job, and returns HTTP `202 Accepted` with `{ status: "queued" }`.
 
-The document ingestion consumer in [src/document-ingestion-worker.ts](src/document-ingestion-worker.ts) is deployed separately with [wrangler.document-ingestion.jsonc](wrangler.document-ingestion.jsonc). It retrieves the R2 object, extracts text, chunks Markdown by headings and paragraph breaks, embeds chunks with Workers AI through the AI Gateway wrapper, clamps Vectorize metadata to the 2048-byte limit, upserts vectors, writes D1 chunk rows, and updates the registry row to `processing`, `completed`, or `failed`.
+The document ingestion consumer in [src/document-ingestion-worker.ts](src/document-ingestion-worker.ts) is deployed separately with [wrangler.document-ingestion.jsonc](wrangler.document-ingestion.jsonc). It retrieves the R2 object, extracts text, chunks Markdown by headings and paragraph breaks, resolves a compressed `vector_tenant_id`, embeds chunks with Workers AI through the AI Gateway wrapper, clamps Vectorize metadata to the 2048-byte limit, upserts vectors, writes D1 chunk rows, and updates the registry row to `processing`, `completed`, or `failed`.
 
 ## Autonomous Research Indexing
 
@@ -399,7 +409,7 @@ Admin setup requirements:
 - Deploy [wrangler.autonomous-research.jsonc](wrangler.autonomous-research.jsonc) with `npm run deploy:autonomous-research`.
 - Keep `AUTONOMOUS_RESEARCH_QUEUE` configured as a producer binding in [wrangler.jsonc](wrangler.jsonc).
 
-The consumer in [src/autonomous-research-worker.ts](src/autonomous-research-worker.ts) routes queue batches into [src/lib/autonomous-research-queue.ts](src/lib/autonomous-research-queue.ts). The processor extracts the core project or idea text, builds up to three optimized Firecrawl search queries, accepts Markdown results from Firecrawl, chunks the Markdown through the shared document ingestion helper, embeds with `@cf/baai/bge-large-en-v1.5`, writes D1 `document_chunks`, and upserts Vectorize vectors with metadata including `source: "autonomous_research"`, `entity_type`, `entity_id`, `workspace_id`, `project_id`, `source_url`, `source_domain`, and `search_query`.
+The consumer in [src/autonomous-research-worker.ts](src/autonomous-research-worker.ts) routes queue batches into [src/lib/autonomous-research-queue.ts](src/lib/autonomous-research-queue.ts). The processor extracts the core project or idea text, builds up to three optimized Firecrawl search queries, accepts Markdown results from Firecrawl, chunks the Markdown through the shared document ingestion helper, embeds with `@cf/baai/bge-large-en-v1.5`, writes D1 `document_chunks`, and upserts Vectorize vectors with metadata including `source: "autonomous_research"`, `entity_type`, `entity_id`, `workspace_id`, `project_id`, `vector_tenant_id`, `source_url`, `source_domain`, and `search_query`.
 
 ## Scoped RAG Streaming
 
@@ -419,7 +429,7 @@ The legacy route `GET /api/scoped-rag-stream?...` remains as a compatibility wra
 - `done`: normal stream completion
 - `stream-error`: validation, retrieval, or model failure inside the SSE protocol
 
-The chat UI consumes this endpoint with the browser `EventSource` API and appends tokens to the optimistic assistant message as they arrive. See [docs/rag-infrastructure.md](docs/rag-infrastructure.md) for setup commands and the full event contract.
+The chat UI consumes this endpoint with the browser `EventSource` API and appends tokens to the optimistic assistant message as they arrive. The stream helper cancels the active Workers AI reader when the browser disconnects and suppresses duplicate close errors after edge headers have already been sent. See [docs/rag-infrastructure.md](docs/rag-infrastructure.md) for setup commands and the full event contract.
 
 ## Workspace Realtime And Optimistic UI
 
@@ -431,7 +441,7 @@ GET /sse/workspace-events?mode=Team&teamId=...&clientId=...
 
 [src/features/command-center/use-workspace-events.ts](src/features/command-center/use-workspace-events.ts) opens this EventSource, resumes from `Last-Event-ID` or the stored `lastEventId`, ignores events produced by the same browser `clientId`, and invalidates TanStack Query caches for workspace, team, project, and chat data based on each event's `invalidates` list. The server route polls D1 `events` every 2.5 seconds for `chat_message`, `idea`, `task`, and `asana_task` mutations scoped to the current Personal, Team, or Org view.
 
-Interactive command-center actions use TanStack Query optimistic cache updates where latency would otherwise be visible. Chat send inserts an optimistic user message with `clientStatus = sending`, scoped RAG inserts optimistic user and assistant messages before SSE tokens arrive, task creation inserts a temporary `optimistic-task-*` row with `clientStatus = pending`, and task removal/artifact pin/save flows snapshot the previous cache and roll back on mutation failure. Failures surface through the shared toast area with the failing operation included in the message.
+Interactive command-center actions use TanStack Query optimistic cache updates where latency would otherwise be visible. Chat send inserts an optimistic user message with `clientStatus = sending`, scoped RAG inserts optimistic user and assistant messages before SSE tokens arrive, task creation inserts a temporary `optimistic-task-*` row with `clientStatus = pending`, Asana sync immediately marks the task `Pending` before queue confirmation, and task removal/artifact pin/save flows snapshot the previous cache and roll back on mutation failure. Failures surface through the shared toast area with the failing operation included in the message.
 
 ### Role-Based LLM Guardrails
 
@@ -439,7 +449,7 @@ Scoped RAG enforces RBAC at the inference layer. Before generation, the backend 
 
 The directive tells the model the user role and requires viewer users to be refused for state-changing requests or summaries of restricted artifacts. `Admin`, `Manager`, and `Contributor` users are treated as having confidential artifact retrieval clearance; `Viewer` users are not.
 
-Vectorize retrieval also applies the role before chunks are returned. New indexed chunks carry `confidentiality` and `restricted` metadata, and viewer queries exclude chunks marked `Confidential` or `restricted = true` in the Vectorize metadata filter before D1 chunk text is loaded into the prompt context. Generated scoped RAG artifacts can pass `sensitivityLabel: "Confidential"` or `restricted: true` to `ingestGeneratedArtifact`. Create Vectorize metadata indexes for `team_id`, `project_id`, `confidentiality`, and `restricted`; reingest older vectors when confidentiality metadata must be applied to existing artifacts.
+Vectorize retrieval also applies the role before chunks are returned. New indexed chunks carry a compressed `vector_tenant_id`, `confidentiality`, and `restricted` metadata. Retrieval filters on that tenant id, then revalidates project/team/confidentiality against D1 chunk rows before any text is loaded into the prompt context. Generated scoped RAG artifacts can pass `sensitivityLabel: "Confidential"` or `restricted: true` to `ingestGeneratedArtifact`. Retrieved project chunks, Asana context, and web search context are wrapped as `<untrusted_context>` so prompt-injection instructions in external or retrieved material are treated as data only. Create Vectorize metadata indexes for `vector_tenant_id`, `confidentiality`, and `restricted`; reingest older vectors when tenant or confidentiality metadata must be applied to existing artifacts.
 
 ### Dynamic Multi-Modal Rendering
 
@@ -522,19 +532,22 @@ This block is placed at the absolute top of the system prompt before RAG chunks,
 
 ### Context-Aware Agentic Routing
 
-Before retrieval work, scoped project chat calls the lightweight intent router in [src/lib/intent-routing.ts](src/lib/intent-routing.ts). The router uses `@cf/zai-org/glm-4.7-flash` with turn-level thinking disabled to return one strict label:
+Before retrieval work, scoped project chat calls the lightweight intent router in [src/lib/intent-routing.ts](src/lib/intent-routing.ts). The router uses `@cf/meta/llama-3-8b-instruct` to return one strict label:
 
 - `RAG_SEARCH`: embed the prompt, query Vectorize with team/project and role-sensitive confidentiality metadata filters, load cited chunks, and stream a grounded answer.
 - `WEB_SEARCH`: call the configured external search providers, load scoped historical chunks with role-sensitive confidentiality filters, and stream an answer grounded in both live web context and project history.
 - `DIRECT_CHAT`: bypass Vectorize and web search, then send the prompt directly to the primary generation model with workspace/project context.
-- `ENTITY_EXTRACTION`: bypass Vectorize and web search, then extract prompt-local operational entities such as tasks, approvals, risks, ideas, owners, and deadlines.
+- `ENTITY_EXTRACTION`: bypass Vectorize and web search, then extract prompt-local operational entities such as approvals, risks, ideas, owners, and deadlines.
+- `TASK_EXTRACTION`: bypass Vectorize and web search, then queue background task extraction in `WORKSPACE_INTELLIGENCE_QUEUE` for prompts likely to contain actionable work items.
 - `ARTIFACT_GENERATION`: bypass Vectorize and web search, then use the primary generation model to draft the requested artifact.
 
 If intent classification fails, the route falls back to `RAG_SEARCH` so project-history questions remain evidence-first.
 
+Idea creation also publishes a workspace intelligence job when the queue binding is present. The queue runs a small multi-agent evaluation pass, normalizes risk patches, and stores durable findings in `project_risks` without blocking the user-facing create flow.
+
 ## Scheduled Project Briefings
 
-The Worker scheduled handler in [src/worker.ts](src/worker.ts) calls `runScheduledTaskEngine` in [src/lib/scheduled-tasks.ts](src/lib/scheduled-tasks.ts) once per configured cron run. The engine claims due rows from `scheduled_tasks`, dispatches by type, and routes `Weekly Briefing` tasks into `runDailyProjectBriefings` in [src/lib/daily-briefings.ts](src/lib/daily-briefings.ts).
+The Worker scheduled handler in [src/worker.ts](src/worker.ts) calls `runScheduledTaskEngine` in [src/lib/scheduled-tasks.ts](src/lib/scheduled-tasks.ts) once per configured cron run. The engine claims due rows from `scheduled_tasks`, dispatches by type, and routes `Weekly Briefing` tasks into `runDailyProjectBriefings` in [src/lib/daily-briefings.ts](src/lib/daily-briefings.ts). The Monday `0 12 * * 1` cron also runs `runWeeklyAgenticBriefings`, which summarizes recent workspace actions, chat activity, ideas, and web context into the `briefings` table keyed by a source-data hash.
 
 User-defined schedules:
 
@@ -552,7 +565,7 @@ Settings and deployment notes:
 
 - Admins can review, create, enable, disable, edit retry/schedule settings, and queue central scheduler rows from Admin Settings > Scheduled Tasks.
 - Users configure briefing cadence, project scope, local run time, time zone, reporting window, and prompt instructions from Profile > Briefings. The destination is fixed to the project's `Briefings` thread.
-- The Cloudflare-account Worker deployment path must have the existing `DB`, `AI`, and `CHAT_SYNC` bindings plus the cron-backed scheduled task engine enabled. Uploaded-artifact registry inputs use `artifacts_registry` when that table exists; missing registry rows are skipped rather than blocking the briefing.
+- The Cloudflare-account Worker deployment path must have the existing `DB`, `AI`, and `CHAT_SYNC` bindings plus the cron-backed scheduled task engine enabled. Weekly agentic briefings also use `TAVILY_API_KEY` and `FIRECRAWL_API_KEY` opportunistically through the existing consolidated web-search helper. Uploaded-artifact registry inputs use `artifacts_registry` when that table exists; missing registry rows are skipped rather than blocking the briefing.
 - Admin queue actions update `scheduled_tasks.next_run_at`; the hourly cron-backed Worker still performs the long-running orchestration under its configured scheduled-worker CPU allowance.
 
 ### Hybrid External Search
@@ -644,5 +657,5 @@ npm run r2:seed:remote
 - Remote R2 has been created as `ai-command-center-artifacts`.
 - Both remote D1 and R2 have been seeded with scoped dummy data.
 - `worker-configuration.d.ts` is generated by Wrangler and should be refreshed after binding changes.
-- Keep `.openai/hosting.json` and `wrangler.jsonc` aligned on binding names used by the deployed surface. The Cloudflare Worker path currently expects `DB`, `ARTIFACTS_BUCKET`, `VECTORIZE`, `DOCUMENT_INGESTION_QUEUE`, `AUTONOMOUS_RESEARCH_QUEUE`, `GRAPH_WEBHOOK_QUEUE`, `ASANA_SYNC_QUEUE`, `AI`, `CHAT_SYNC`, `MICROSOFT_TOKEN_VAULT`, and `ASANA_WEBHOOK_SECRETS`.
+- Keep `.openai/hosting.json` and `wrangler.jsonc` aligned on binding names used by the deployed surface. The Cloudflare Worker path currently expects `DB`, `ARTIFACTS_BUCKET`, `VECTORIZE`, `DOCUMENT_INGESTION_QUEUE`, `AUTONOMOUS_RESEARCH_QUEUE`, `GRAPH_WEBHOOK_QUEUE`, `ASANA_SYNC_QUEUE`, `ASANA_OUTBOUND_QUEUE`, `WORKSPACE_INTELLIGENCE_QUEUE`, `AI`, `CHAT_SYNC`, `MICROSOFT_TOKEN_VAULT`, and `ASANA_WEBHOOK_SECRETS`.
 - The briefing scheduler cron and Queue consumers are only configured in the Cloudflare-account Worker deployment path. Codex Sites hosting may not execute `wrangler.jsonc` cron triggers or queue consumers.

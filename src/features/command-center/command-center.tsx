@@ -116,6 +116,7 @@ import {
   removeWorkflowItemFromWorkspaceCache,
   updateArtifactInWorkspaceCache,
   updateChatMessageInCache,
+  updateTaskInWorkspaceCache,
 } from "./shared";
 import { useWorkspaceEventSource } from "./use-workspace-events";
 import { CategoryTablePageSkeleton, DetailPanelSkeleton, ProjectNavSkeleton, WorkspaceMainSkeleton } from "./skeletons";
@@ -441,13 +442,34 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
   });
   const syncTaskToAsanaMutation = useMutation({
     mutationFn: (id: string) => syncTaskToAsana({ data: { id, mode: activeMode } }),
+    onMutate: async (id) => {
+      await queryClient.cancelQueries({ queryKey: pmoWorkspaceQueryKey });
+      const previousWorkspace = queryClient.getQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey);
+      queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
+        updateTaskInWorkspaceCache(current, activeMode, id, (task) => ({
+          ...task,
+          asanaSyncError: null,
+          asanaSyncQueuedAt: task.asanaSyncQueuedAt ?? Date.now(),
+          outboundStatus: "Pending",
+          syncStatus: "Pending",
+        })),
+      );
+      return { previousWorkspace };
+    },
     onSuccess: (result) => {
       queryClient.setQueryData(pmoWorkspaceQueryKey, result.workspace);
-      updateToast("Task queued for Asana sync");
+      updateToast(
+        result.task.asanaSyncError || result.task.syncStatus === "Failed"
+          ? `Asana sync failed: ${result.task.asanaSyncError ?? "The background sync worker reported a failure."}`
+          : "Task queued for Asana sync",
+      );
     },
-    onError: (error) => {
+    onError: (error, _id, context) => {
+      if (context?.previousWorkspace) queryClient.setQueryData(pmoWorkspaceQueryKey, context.previousWorkspace);
       updateToast(error instanceof Error ? error.message : "Could not sync task to Asana.");
-      void invalidateWorkspace();
+    },
+    onSettled: async () => {
+      await invalidateWorkspace();
     },
   });
   const generateRiskMitigationMutation = useMutation({
@@ -643,6 +665,9 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
         owner: input.owner?.trim().slice(0, 80) || "You",
         source: input.source?.trim().slice(0, 96) || "VertexAI suggestion",
         status: "Open",
+        asanaSyncQueuedAt: input.syncToAsana ? Date.now() : null,
+        outboundStatus: input.syncToAsana ? "Pending" : "Pending",
+        syncStatus: input.syncToAsana ? "Pending" : "NotQueued",
         clientStatus: "pending",
       };
       queryClient.setQueryData<PmoWorkspaceState>(pmoWorkspaceQueryKey, (current) =>
@@ -1396,7 +1421,18 @@ export function PMOCommandCenter({ session }: { session: CommandCenterSession })
     setIsScopedRagStreaming(true);
     try {
       await consumeScopedRagEventSource(
-        { assistantMessageId, prompt, teamId, workspaceId, projectId, chatId, asanaSearchEnabled, reasoningLevel, webSearchEnabled },
+        {
+          assistantMessageId,
+          prompt,
+          teamId,
+          workspaceId,
+          projectId,
+          chatId,
+          asanaSearchEnabled,
+          reasoningLevel,
+          userMessageId,
+          webSearchEnabled,
+        },
         {
           onTrace: (trace) => {
             traceMessages = trace.messages;

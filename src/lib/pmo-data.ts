@@ -11,7 +11,14 @@ import {
   fetchAsanaProjectContextForCurrentUser,
   getAsanaTaskAutoSyncEnabledForCurrentUser,
 } from "@/lib/asana-integration.server";
-import { isMissingAsanaSyncColumnError, normalizePersistedTaskStatus, withDefaultAsanaSyncState } from "@/lib/asana-task-sync-state";
+import {
+  deriveAsanaTaskSyncStatus,
+  isMissingAsanaSyncColumnError,
+  normalizePersistedTaskStatus,
+  type AsanaOutboundStatus,
+  type AsanaTaskSyncStatus,
+  withDefaultAsanaSyncState,
+} from "@/lib/asana-task-sync-state";
 import {
   applyArtifactPatches,
   normalizeArtifactPatchActions,
@@ -24,6 +31,7 @@ import { assertMutableChatThread } from "@/lib/briefing-thread";
 import { publishChatMessageInserts, type ChatMessageInsertEvent } from "@/lib/chat-sync";
 import { cachedD1Statement } from "@/lib/d1-prepared";
 import { recordRealtimeMutationEvent, type RealtimeInvalidationTarget } from "@/lib/realtime-events";
+import { publishWorkspaceIntelligenceJob, type WorkspaceIntelligenceEnv } from "@/lib/workspace-intelligence-queue";
 import { xlsxBlobFromRows, type ExportTable } from "@/lib/chat-export";
 import type { ChatOperationalEntity } from "@/lib/chat-entities";
 import {
@@ -208,6 +216,8 @@ export type Task = {
   asanaSyncedAt?: number | null;
   asanaSyncQueuedAt?: number | null;
   asanaSyncError?: string | null;
+  outboundStatus?: AsanaOutboundStatus;
+  syncStatus?: AsanaTaskSyncStatus;
   pinned?: boolean;
   clientStatus?: "pending";
 };
@@ -358,24 +368,51 @@ const chatTitleStopWords = new Set([
   "and",
   "are",
   "as",
+  "build",
+  "building",
+  "create",
+  "creating",
+  "detailed",
   "for",
   "from",
+  "generate",
+  "generating",
+  "give",
+  "help",
   "i",
   "in",
   "is",
   "it",
+  "make",
+  "making",
   "me",
   "my",
+  "need",
   "of",
   "on",
   "or",
   "please",
+  "show",
+  "showing",
+  "summarize",
+  "summarizing",
+  "tell",
   "the",
   "this",
+  "today",
   "to",
+  "tomorrow",
+  "tonight",
+  "very",
+  "want",
   "with",
+  "write",
+  "writing",
+  "yesterday",
   "you",
 ]);
+const chatTitleMaxWords = 4;
+const chatTitleMaxCharacters = 36;
 
 export function conciseChatTitleFromRequest(text: string) {
   const cleaned = text
@@ -390,14 +427,14 @@ export function conciseChatTitleFromRequest(text: string) {
   const words = cleaned
     .split(" ")
     .map((word) => word.trim())
-    .filter(Boolean)
-    .filter((word, index) => index < 2 || !chatTitleStopWords.has(word.toLowerCase()))
-    .slice(0, 6);
-  while (words.length > 1 && chatTitleStopWords.has(words[0].toLowerCase())) {
-    words.shift();
-  }
-  const title = (words.length > 0 ? words : ["New", "request"]).join(" ");
-  const conciseTitle = title.length > 48 ? `${title.slice(0, 45).trim()}...` : title;
+    .filter(Boolean);
+  const topicalWords = words.filter((word) => !chatTitleStopWords.has(word.toLowerCase()));
+  const title =
+    (topicalWords.length > 0 ? topicalWords : words).slice(0, chatTitleMaxWords).join(" ") || "New request";
+  const conciseTitle =
+    title.length > chatTitleMaxCharacters
+      ? title.slice(0, chatTitleMaxCharacters).trim().replace(/\s+\S*$/, "") || title
+      : title;
   return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
 }
 
@@ -409,8 +446,7 @@ export function normalizeGeneratedChatTitle(title: string, fallback: string) {
     .replace(/\s+/g, " ")
     .trim();
   const usable = cleaned && cleaned.length >= 3 ? cleaned : fallback;
-  const conciseTitle = usable.length > 60 ? usable.slice(0, 57).trim() : usable;
-  return conciseTitle.charAt(0).toUpperCase() + conciseTitle.slice(1);
+  return conciseChatTitleFromRequest(usable);
 }
 
 async function generateChatTitleFromInitialMessage(
@@ -439,14 +475,15 @@ async function generateChatTitleFromInitialMessage(
               {
                 role: "system",
                 content: [
-                  "Name this chat from the user's initial message.",
-                  "Return only a concise title, no quotes, no punctuation at the end.",
-                  "Use 3 to 7 words. Preserve useful project, artifact, or technical nouns.",
+                  "Name this chat with a short topical label from the user's initial message.",
+                  "Use 2 to 4 words, ideally a noun phrase.",
+                  "Keep the main subject nouns and drop request phrasing, filler verbs, and dates unless essential.",
+                  "Return only the title, no quotes, no punctuation at the end.",
                 ].join(" "),
               },
               { role: "user", content: text.slice(0, 2_000) },
             ],
-            max_completion_tokens: 24,
+            max_completion_tokens: 16,
             temperature: 0.1,
           },
           {
@@ -1715,6 +1752,27 @@ async function queueAsanaSyncForTask(
   });
 }
 
+async function publishIdeaEvaluationJob({ idea, mode, userId }: { idea: Idea; mode: WorkspaceMode; userId: string }) {
+  if (!idea.projectId) return;
+  try {
+    await publishWorkspaceIntelligenceJob(env as WorkspaceIntelligenceEnv, {
+      kind: "workspace-idea-evaluation",
+      requestId: `idea-evaluation-${crypto.randomUUID()}`,
+      requestedAt: Date.now(),
+      workspaceId: workspaceIdForMode(mode),
+      projectId: idea.projectId,
+      ideaId: idea.id,
+      ideaText: [idea.title, idea.summary, idea.originalText ?? "", idea.nextStep].filter(Boolean).join("\n"),
+      userId,
+    });
+  } catch (error) {
+    console.warn("[WorkspaceIntelligence] Failed to publish idea evaluation job.", {
+      ideaId: idea.id,
+      message: error instanceof Error ? error.message : "Unknown idea evaluation queue error",
+    });
+  }
+}
+
 export function boundedScore(value: unknown, fallback: number) {
   const score = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(score)) return fallback;
@@ -2084,6 +2142,8 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
     asanaSyncedAt: number | null;
     asanaSyncQueuedAt: number | null;
     asanaSyncError: string | null;
+    outboundStatus: AsanaOutboundStatus;
+    syncStatus: AsanaTaskSyncStatus;
   }>;
   try {
     const result = await getPrepared(
@@ -2101,7 +2161,9 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
                 asana_task_gid as asanaTaskGid,
                 asana_synced_at as asanaSyncedAt,
                 asana_sync_queued_at as asanaSyncQueuedAt,
-                asana_sync_error as asanaSyncError
+                asana_sync_error as asanaSyncError,
+                COALESCE(outbound_status, 'Pending') as outboundStatus,
+                COALESCE(sync_status, 'NotQueued') as syncStatus
          FROM workspace_actions`,
     ).all<(typeof rows)[number]>();
     rows = result.results ?? [];
@@ -2120,7 +2182,12 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
                 status,
                 pinned
          FROM workspace_actions`,
-    ).all<Omit<(typeof rows)[number], "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncQueuedAt" | "asanaSyncError">>();
+    ).all<
+      Omit<
+        (typeof rows)[number],
+        "asanaTaskGid" | "asanaSyncedAt" | "asanaSyncQueuedAt" | "asanaSyncError" | "outboundStatus" | "syncStatus"
+      >
+    >();
     rows = (fallback.results ?? []).map(withDefaultAsanaSyncState);
   }
 
@@ -2142,6 +2209,8 @@ async function mergePersistedWorkflowActions(root: PmoWorkspaceState) {
         asanaSyncedAt: row.asanaSyncedAt,
         asanaSyncQueuedAt: row.asanaSyncQueuedAt,
         asanaSyncError: row.asanaSyncError,
+        outboundStatus: row.outboundStatus,
+        syncStatus: row.syncStatus || deriveAsanaTaskSyncStatus(row),
         pinned: Boolean(row.pinned),
       };
       workspace.tasks = [task, ...workspace.tasks.filter((item) => item.id !== task.id)];
@@ -2350,8 +2419,8 @@ async function persistIdea(mode: WorkspaceMode, idea: Idea, pinned: boolean) {
 async function persistWorkflowAction(mode: WorkspaceMode, kind: "approval" | "decision" | "task", item: Approval | Decision | Task) {
   await getPrepared(
     `INSERT OR REPLACE INTO workspace_actions (
-         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned, asana_task_gid, asana_synced_at, asana_sync_queued_at, asana_sync_error, created_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         id, workspace_id, kind, project_id, title, original_text, owner, due, source, status, pinned, asana_task_gid, asana_synced_at, asana_sync_queued_at, asana_sync_error, outbound_status, sync_status, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       item.id,
@@ -2369,6 +2438,16 @@ async function persistWorkflowAction(mode: WorkspaceMode, kind: "approval" | "de
       kind === "task" ? ((item as Task).asanaSyncedAt ?? null) : null,
       kind === "task" ? ((item as Task).asanaSyncQueuedAt ?? null) : null,
       kind === "task" ? ((item as Task).asanaSyncError ?? null) : null,
+      kind === "task" ? ((item as Task).outboundStatus ?? "Pending") : "Pending",
+      kind === "task"
+        ? ((item as Task).syncStatus ??
+            deriveAsanaTaskSyncStatus({
+              asanaTaskGid: (item as Task).asanaTaskGid ?? null,
+              asanaSyncedAt: (item as Task).asanaSyncedAt ?? null,
+              asanaSyncQueuedAt: (item as Task).asanaSyncQueuedAt ?? null,
+              asanaSyncError: (item as Task).asanaSyncError ?? null,
+            }))
+        : "NotQueued",
       Date.now(),
     )
     .run();
@@ -2388,19 +2467,39 @@ async function updatePersistedWorkflowActionStatus(
 async function updatePersistedTaskAsanaSync(
   mode: WorkspaceMode,
   id: string,
-  sync: { asanaTaskGid: string | null; asanaSyncedAt: number | null; asanaSyncQueuedAt: number | null; asanaSyncError: string | null },
+  sync: {
+    asanaTaskGid: string | null;
+    asanaSyncedAt: number | null;
+    asanaSyncQueuedAt: number | null;
+    asanaSyncError: string | null;
+    outboundStatus?: AsanaOutboundStatus;
+    syncStatus?: AsanaTaskSyncStatus;
+  },
 ) {
+  const syncStatus = sync.syncStatus ?? deriveAsanaTaskSyncStatus(sync);
+  const outboundStatus = sync.outboundStatus ?? (syncStatus === "Failed" ? "Failed" : syncStatus === "Sent" ? "Sent" : "Pending");
   await getPrepared(
     `UPDATE workspace_actions
        SET asana_task_gid = ?,
            asana_synced_at = ?,
            asana_sync_queued_at = ?,
-           asana_sync_error = ?
+           asana_sync_error = ?,
+           outbound_status = ?,
+           sync_status = ?
        WHERE id = ?
          AND workspace_id = ?
          AND kind = 'task'`,
   )
-    .bind(sync.asanaTaskGid, sync.asanaSyncedAt, sync.asanaSyncQueuedAt, sync.asanaSyncError, id, workspaceIdForMode(mode))
+    .bind(
+      sync.asanaTaskGid,
+      sync.asanaSyncedAt,
+      sync.asanaSyncQueuedAt,
+      sync.asanaSyncError,
+      outboundStatus,
+      syncStatus,
+      id,
+      workspaceIdForMode(mode),
+    )
     .run();
 }
 
@@ -2416,7 +2515,9 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
               asana_task_gid as asanaTaskGid,
               asana_synced_at as asanaSyncedAt,
               asana_sync_queued_at as asanaSyncQueuedAt,
-              asana_sync_error as asanaSyncError
+              asana_sync_error as asanaSyncError,
+              COALESCE(outbound_status, 'Pending') as outboundStatus,
+              COALESCE(sync_status, 'NotQueued') as syncStatus
        FROM workspace_actions
        WHERE id = ?
          AND workspace_id = ?
@@ -2436,6 +2537,8 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
       asanaSyncedAt: number | null;
       asanaSyncQueuedAt: number | null;
       asanaSyncError: string | null;
+      outboundStatus: AsanaOutboundStatus;
+      syncStatus: AsanaTaskSyncStatus;
     }>();
   if (!row) return null;
   return {
@@ -2451,6 +2554,8 @@ async function getPersistedTask(mode: WorkspaceMode, id: string): Promise<Task |
     asanaSyncedAt: row.asanaSyncedAt,
     asanaSyncQueuedAt: row.asanaSyncQueuedAt,
     asanaSyncError: row.asanaSyncError,
+    outboundStatus: row.outboundStatus,
+    syncStatus: row.syncStatus || deriveAsanaTaskSyncStatus(row),
   };
 }
 
@@ -2782,6 +2887,7 @@ export const addIdea = createServerFn({ method: "POST" })
       tags: [nextIdea.category, ...nextIdea.tags],
       sourceUserId: user.id,
     });
+    await publishIdeaEvaluationJob({ idea: nextIdea, mode, userId: user.id });
     return mergePersistedWorkspace(clone(getMutableRoot()));
   });
 
@@ -3926,6 +4032,8 @@ export const createTaskFromSuggestion = createServerFn({ method: "POST" })
           asanaSyncedAt: null,
           asanaSyncQueuedAt: null,
           asanaSyncError: syncError,
+          outboundStatus: "Failed" as const,
+          syncStatus: "Failed" as const,
         };
         Object.assign(task, syncState);
         workspace.tasks = workspace.tasks.map((item) => (item.id === task.id ? { ...item, ...syncState } : item));
@@ -3983,6 +4091,8 @@ export const syncTaskToAsana = createServerFn({ method: "POST" })
         asanaSyncedAt: null,
         asanaSyncQueuedAt: null,
         asanaSyncError: syncError,
+        outboundStatus: "Failed",
+        syncStatus: "Failed",
       });
       throw error;
     }
@@ -4140,6 +4250,7 @@ export const createIdeaFromSuggestion = createServerFn({ method: "POST" })
       tags: [idea.category, ...idea.tags],
       sourceUserId: user.id,
     });
+    await publishIdeaEvaluationJob({ idea, mode: data.mode, userId: user.id });
     return mergePersistedWorkspace(clone(getMutableRoot()));
   });
 

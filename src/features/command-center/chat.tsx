@@ -441,6 +441,7 @@ export function consumeScopedRagEventSource(
     prompt: string;
     reasoningLevel: ChatReasoningLevel;
     teamId: string;
+    userMessageId?: string | null;
     webSearchEnabled: boolean;
     workspaceId: string;
   },
@@ -518,6 +519,7 @@ export function scopedRagStreamUrl(input: {
   prompt: string;
   reasoningLevel: ChatReasoningLevel;
   teamId: string;
+  userMessageId?: string | null;
   webSearchEnabled: boolean;
   workspaceId: string;
 }) {
@@ -533,6 +535,7 @@ export function scopedRagStreamUrl(input: {
   });
   if (input.projectId) params.set("projectId", input.projectId);
   if (input.assistantMessageId) params.set("assistantMessageId", input.assistantMessageId);
+  if (input.userMessageId) params.set("userMessageId", input.userMessageId);
   return `/sse/workspace-events?${params.toString()}`;
 }
 

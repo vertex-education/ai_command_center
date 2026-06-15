@@ -44,8 +44,14 @@ describe("PMO workspace data helpers", () => {
 
   it("generates initials and concise chat titles from user text", () => {
     expect(initials("Maya Chen")).toBe("MC");
-    expect(conciseChatTitleFromRequest("Can you create a RAID summary for Vertex Hub this week?")).toBe("RAID summary Vertex Hub week");
+    expect(conciseChatTitleFromRequest("Can you create a RAID summary for Vertex Hub this week?")).toBe("RAID summary Vertex Hub");
+    expect(conciseChatTitleFromRequest("I need help building a very detailed launch readiness checklist for tomorrow")).toBe(
+      "Launch readiness checklist",
+    );
     expect(normalizeGeneratedChatTitle("Title: launch readiness review.", "Fallback")).toBe("Launch readiness review");
+    expect(normalizeGeneratedChatTitle("Create a detailed project governance and status reporting plan", "Fallback")).toBe(
+      "Project governance status reporting",
+    );
     expect(normalizeGeneratedChatTitle("  ", "Fallback title")).toBe("Fallback title");
   });
 

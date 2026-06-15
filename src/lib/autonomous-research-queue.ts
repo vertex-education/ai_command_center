@@ -246,6 +246,7 @@ export async function processAutonomousResearchJob(env: AutonomousResearchEnv, j
       rawText: formatAutonomousResearchMarkdown(job, document),
       documentName: document.title,
       r2Key: document.url,
+      workspaceId: job.workspaceId,
       teamId,
       projectId,
       feature: "autonomous-research-embedding",

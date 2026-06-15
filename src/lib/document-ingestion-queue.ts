@@ -1,6 +1,7 @@
 /// <reference path="../../worker-configuration.d.ts" />
 
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
+import { ensureVectorTenantId } from "@/lib/vector-tenant-map";
 
 export type ScopeLevel = "org" | "team" | "personal";
 
@@ -22,6 +23,7 @@ export type ScopedRagDocumentIngestionJob = {
   kind: "scoped-rag-generated-artifact";
   r2Key: string;
   documentName: string;
+  workspaceId?: string;
   teamId: string;
   projectId: string;
 };
@@ -38,6 +40,7 @@ export type ScopedRagMarkdownDocumentInput = {
   rawText: string;
   documentName: string;
   r2Key: string;
+  workspaceId?: string;
   teamId: string;
   projectId: string;
   feature: string;
@@ -451,6 +454,7 @@ async function processScopedRagGeneratedArtifactJob(env: DocumentIngestionEnv, j
     rawText,
     documentName: job.documentName,
     r2Key: job.r2Key,
+    workspaceId: job.workspaceId,
     teamId: job.teamId,
     projectId: job.projectId,
     feature: "scoped-rag-generated-artifact-embedding",
@@ -469,6 +473,12 @@ export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv,
   if (chunks.length === 0) throw new Error("No text chunks were created.");
   const sensitivityLabel = input.sensitivityLabel ?? "Standard";
   const restricted = input.restricted ?? sensitivityLabel === "Confidential";
+  const workspaceId = input.workspaceId ?? (await resolveWorkspaceIdForProject(env.DB, input.projectId));
+  const vectorTenantId = await ensureVectorTenantId(env.DB, {
+    workspaceId,
+    teamId: input.teamId,
+    projectId: input.projectId,
+  });
 
   const embeddings = await embedTexts(env, chunks, {
     feature: input.feature,
@@ -491,6 +501,7 @@ export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv,
       metadata: clampVectorMetadata({
         team_id: input.teamId,
         project_id: input.projectId,
+        vector_tenant_id: vectorTenantId,
         document_name: input.documentName,
         r2_key: input.r2Key,
         confidentiality: sensitivityLabel,
@@ -506,6 +517,7 @@ export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv,
       env.DB.prepare(
         `INSERT INTO document_chunks (
           id,
+          vector_tenant_id,
           team_id,
           project_id,
           document_name,
@@ -514,9 +526,10 @@ export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv,
           sensitivity_label,
           restricted,
           created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         row.id,
+        vectorTenantId,
         input.teamId,
         input.projectId,
         input.documentName,
@@ -528,6 +541,15 @@ export async function ingestScopedRagMarkdownDocument(env: DocumentIngestionEnv,
       ),
     ),
   );
+}
+
+async function resolveWorkspaceIdForProject(db: D1Database, projectId: string) {
+  const row = await db
+    .prepare("SELECT workspace_id as workspaceId FROM projects WHERE id = ? LIMIT 1")
+    .bind(projectId)
+    .first<{ workspaceId: string }>();
+  if (!row) throw new Error("Project was not found for Vectorize tenant mapping.");
+  return row.workspaceId;
 }
 
 function isScopedRagGeneratedArtifactJob(job: DocumentIngestionJob): job is ScopedRagDocumentIngestionJob {

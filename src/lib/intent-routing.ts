@@ -1,8 +1,15 @@
 import { runTrackedAiGateway } from "@/lib/ai-gateway";
 
-export const intentRoutingModelId = "@cf/zai-org/glm-4.7-flash";
+export const intentRoutingModelId = "@cf/meta/llama-3-8b-instruct";
 
-export const promptIntentLabels = ["RAG_SEARCH", "DIRECT_CHAT", "WEB_SEARCH", "ENTITY_EXTRACTION", "ARTIFACT_GENERATION"] as const;
+export const promptIntentLabels = [
+  "RAG_SEARCH",
+  "DIRECT_CHAT",
+  "WEB_SEARCH",
+  "ENTITY_EXTRACTION",
+  "TASK_EXTRACTION",
+  "ARTIFACT_GENERATION",
+] as const;
 
 export type PromptIntent = (typeof promptIntentLabels)[number];
 
@@ -76,11 +83,24 @@ export function inferPromptIntentFallback(prompt: string): PromptIntent {
   const ragPatterns = [/\b(citation|source)\b/];
   if (ragPatterns.some((pattern) => pattern.test(normalized))) return "RAG_SEARCH";
 
-  const entityExtractionPatterns = [
-    /\b(extract|identify|find|pull|list)\b.*\b(action item|action items|task|tasks|approval|approvals|risk|risks|idea|ideas|entity|entities|owner|owners|deadline|deadlines|due date|due dates)\b/,
-    /\b(action item|action items|tasks?|approvals?|risks?|ideas?|entities)\b.*\b(from this|from the text|from the note|in this message|below)\b/,
-  ];
-  if (entityExtractionPatterns.some((pattern) => pattern.test(normalized))) return "ENTITY_EXTRACTION";
+  const extractionVerbPattern = /\b(extract|identify|find|pull|list)\b/;
+  const taskTermPattern = /\b(action item|action items|task|tasks)\b/;
+  const nonTaskEntityTermPattern =
+    /\b(approval|approvals|risk|risks|idea|ideas|entity|entities|owner|owners|deadline|deadlines|due date|due dates)\b/;
+  const promptLocalSourcePattern = /\b(from this|from the text|from the note|in this message|below)\b/;
+
+  const asksForExtraction = extractionVerbPattern.test(normalized);
+  const hasTaskTerms = taskTermPattern.test(normalized);
+  const hasNonTaskEntityTerms = nonTaskEntityTermPattern.test(normalized);
+  const hasPromptLocalSource = promptLocalSourcePattern.test(normalized);
+
+  if ((asksForExtraction || hasPromptLocalSource) && hasTaskTerms && !hasNonTaskEntityTerms) {
+    return "TASK_EXTRACTION";
+  }
+
+  if ((asksForExtraction || hasPromptLocalSource) && (hasTaskTerms || hasNonTaskEntityTerms)) {
+    return "ENTITY_EXTRACTION";
+  }
 
   return "DIRECT_CHAT";
 }
@@ -100,7 +120,8 @@ export async function classifyPromptIntent(prompt: string, ai: Ai): Promise<Prom
               "Use RAG_SEARCH when the user asks about existing workspace, team, project, uploaded artifact, document, file, record, history, source, citation, or prior generated content.",
               "Use WEB_SEARCH when the user asks for current, recent, latest, online, web, internet, news, pricing, public, cited external, or URL-based information.",
               "Use DIRECT_CHAT for greetings, administrative questions, general conversation, planning, brainstorming, explanation, or requests that do not need scoped records or external facts.",
-              "Use ENTITY_EXTRACTION when the user asks to extract, identify, or list tasks, approvals, risks, ideas, owners, deadlines, or other operational entities from text in the prompt.",
+              "Use TASK_EXTRACTION when the user asks to extract, identify, or list concrete tasks or action items from text in the prompt.",
+              "Use ENTITY_EXTRACTION when the user asks to extract, identify, or list approvals, risks, ideas, owners, deadlines, or mixed operational entities from text in the prompt.",
               "Use ARTIFACT_GENERATION when the user asks to draft, write, create, generate, format, compose, build, or produce a standalone artifact from the prompt itself.",
               "When unsure, choose RAG_SEARCH.",
             ].join(" "),

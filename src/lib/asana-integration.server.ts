@@ -824,11 +824,15 @@ export async function enqueueAsanaTaskSyncForWorkflowTaskForCurrentUser(data: {
     asanaSyncedAt: null,
     asanaSyncError: null,
     asanaSyncQueuedAt: queuedAt,
+    outboundStatus: "Pending",
+    syncStatus: "Pending",
   } satisfies {
     asanaTaskGid: string | null;
     asanaSyncedAt: number | null;
     asanaSyncError: string | null;
     asanaSyncQueuedAt: number | null;
+    outboundStatus: "Pending";
+    syncStatus: "Pending";
   };
 }
 

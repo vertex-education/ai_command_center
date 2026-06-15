@@ -315,7 +315,9 @@ async function markTaskSyncSucceeded(env: AsanaTaskSyncEnv, job: AsanaTaskSyncJo
      SET asana_task_gid = ?,
          asana_synced_at = ?,
          asana_sync_queued_at = NULL,
-         asana_sync_error = NULL
+         asana_sync_error = NULL,
+         outbound_status = 'Sent',
+         sync_status = 'Sent'
      WHERE id = ?
        AND workspace_id = ?
        AND kind = 'task'`,
@@ -333,7 +335,9 @@ async function markTaskSyncFailed(
   await env.DB.prepare(
     `UPDATE workspace_actions
      SET asana_sync_queued_at = ?,
-         asana_sync_error = ?
+         asana_sync_error = ?,
+         outbound_status = ?,
+         sync_status = ?
      WHERE id = ?
        AND workspace_id = ?
        AND kind = 'task'`,
@@ -341,6 +345,8 @@ async function markTaskSyncFailed(
     .bind(
       finalAttempt ? null : job.requestedAt,
       error instanceof Error ? error.message : "Unknown Asana sync failure",
+      finalAttempt ? "Failed" : "Pending",
+      finalAttempt ? "Failed" : "Pending",
       job.taskId,
       job.workspaceId,
     )

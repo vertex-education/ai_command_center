@@ -2,6 +2,7 @@
 
 import serverEntry from "@tanstack/react-start/server-entry";
 import { Hono } from "hono";
+import { handleAsanaOutboundQueue, isAsanaOutboundJob, type AsanaOutboundEnv, type AsanaOutboundJob } from "./lib/asana-outbound-queue";
 import { handleAsanaTaskSyncQueue, isAsanaTaskSyncJob, type AsanaTaskSyncEnv, type AsanaTaskSyncJob } from "./lib/asana-task-sync-queue";
 import { handleAsanaWebhookRequest } from "./lib/asana-webhook";
 import {
@@ -11,6 +12,9 @@ import {
 } from "./lib/microsoft-graph-webhooks";
 import { runScheduledTaskEngine } from "./lib/scheduled-tasks";
 import { runWithCloudflareExecutionContext } from "./lib/cloudflare-execution-context";
+import { runWeeklyAgenticBriefings, shouldRunWeeklyAgenticBriefing, type WeeklyAgenticBriefingEnv } from "./lib/weekly-agentic-briefings";
+import { handleWorkspaceIntelligenceQueue, type WorkspaceIntelligenceEnv } from "./lib/workspace-intelligence-queue";
+import { isWorkspaceIntelligenceJob, type WorkspaceIntelligenceJob } from "./lib/workspace-intelligence-types";
 
 export { ChatSyncRealtimeDurableObject } from "./lib/chat-sync";
 
@@ -35,9 +39,22 @@ export default {
     });
   },
 
-  async queue(batch: MessageBatch<MicrosoftGraphWebhookJob | AsanaTaskSyncJob>, env: MicrosoftGraphWebhookEnv & AsanaTaskSyncEnv) {
+  async queue(
+    batch: MessageBatch<MicrosoftGraphWebhookJob | AsanaTaskSyncJob | AsanaOutboundJob | WorkspaceIntelligenceJob>,
+    env: MicrosoftGraphWebhookEnv & AsanaTaskSyncEnv & AsanaOutboundEnv & WorkspaceIntelligenceEnv,
+  ) {
     if (batch.queue === "asana-sync-queue") {
       await handleAsanaTaskSyncQueue(batch as MessageBatch<AsanaTaskSyncJob>, env);
+      return;
+    }
+
+    if (batch.queue === "asana-outbound-queue") {
+      await handleAsanaOutboundQueue(batch as MessageBatch<AsanaOutboundJob>, env);
+      return;
+    }
+
+    if (batch.queue === "workspace-intelligence-queue") {
+      await handleWorkspaceIntelligenceQueue(batch as MessageBatch<WorkspaceIntelligenceJob>, env);
       return;
     }
 
@@ -46,6 +63,14 @@ export default {
         const job = message.body;
         if (isAsanaTaskSyncJob(job)) {
           await handleAsanaTaskSyncQueue({ ...batch, messages: [message as Message<AsanaTaskSyncJob>] }, env);
+          continue;
+        }
+        if (isAsanaOutboundJob(job)) {
+          await handleAsanaOutboundQueue({ ...batch, messages: [message as Message<AsanaOutboundJob>] }, env);
+          continue;
+        }
+        if (isWorkspaceIntelligenceJob(job)) {
+          await handleWorkspaceIntelligenceQueue({ ...batch, messages: [message as Message<WorkspaceIntelligenceJob>] }, env);
           continue;
         }
         if (!isMicrosoftGraphWebhookJob(job)) throw new Error("Unexpected job body in Graph webhook queue.");
@@ -62,6 +87,9 @@ export default {
 
   async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext) {
     await runScheduledTaskEngine(env, controller.scheduledTime);
+    if (shouldRunWeeklyAgenticBriefing((controller as ScheduledController & { cron?: string }).cron)) {
+      await runWeeklyAgenticBriefings(env as WeeklyAgenticBriefingEnv, controller.scheduledTime);
+    }
   },
 };
 

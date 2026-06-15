@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   asanaTaskSyncColumnNames,
+  deriveAsanaTaskSyncStatus,
   getTaskAsanaSyncControlState,
   isMissingAsanaSyncColumnError,
   normalizePersistedTaskStatus,
@@ -34,7 +35,24 @@ describe("Asana task sync state", () => {
       asanaSyncedAt: null,
       asanaSyncQueuedAt: null,
       asanaSyncError: null,
+      outboundStatus: "Pending",
+      syncStatus: "NotQueued",
     });
+  });
+
+  it("derives durable sync status from persisted task sync fields", () => {
+    expect(deriveAsanaTaskSyncStatus({ asanaTaskGid: null, asanaSyncedAt: null, asanaSyncQueuedAt: null, asanaSyncError: null })).toBe(
+      "NotQueued",
+    );
+    expect(deriveAsanaTaskSyncStatus({ asanaTaskGid: null, asanaSyncedAt: null, asanaSyncQueuedAt: 123, asanaSyncError: null })).toBe(
+      "Pending",
+    );
+    expect(deriveAsanaTaskSyncStatus({ asanaTaskGid: "120", asanaSyncedAt: 456, asanaSyncQueuedAt: null, asanaSyncError: null })).toBe(
+      "Sent",
+    );
+    expect(deriveAsanaTaskSyncStatus({ asanaTaskGid: null, asanaSyncedAt: null, asanaSyncQueuedAt: 123, asanaSyncError: "Nope" })).toBe(
+      "Failed",
+    );
   });
 
   it("normalizes persisted task completion away from the app model", () => {
@@ -136,5 +154,9 @@ describe("Asana task sync state", () => {
     const queueMigrationPath = fileURLToPath(new URL("../../drizzle/0025_asana_sync_queue.sql", import.meta.url));
     const queueMigration = readFileSync(queueMigrationPath, "utf8");
     expect(queueMigration).toContain("ALTER TABLE workspace_actions ADD COLUMN asana_sync_queued_at INTEGER");
+    const phase3MigrationPath = fileURLToPath(new URL("../../drizzle/0029_phase3_agentic_backlog.sql", import.meta.url));
+    const phase3Migration = readFileSync(phase3MigrationPath, "utf8");
+    expect(phase3Migration).toContain("ALTER TABLE workspace_actions ADD COLUMN outbound_status TEXT NOT NULL DEFAULT 'Pending'");
+    expect(phase3Migration).toContain("ALTER TABLE workspace_actions ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'NotQueued'");
   });
 });

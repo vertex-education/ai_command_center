@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex, type AnySQLiteColumn } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text, uniqueIndex, type AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 
 export const user = sqliteTable(
   "user",
@@ -355,6 +355,26 @@ export const risks = sqliteTable(
   }),
 );
 
+export const projectRisks = sqliteTable(
+  "project_risks",
+  {
+    id: text("id").primaryKey(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    riskCategory: text("risk_category", { enum: ["security", "technical", "delivery", "operational", "compliance"] }).notNull(),
+    severityLevel: text("severity_level", { enum: ["low", "medium", "high", "critical"] }).notNull(),
+    mitigationSuggestion: text("mitigation_suggestion").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    projectIdx: index("project_risks_project_idx").on(table.projectId, table.severityLevel, table.createdAt),
+    categoryIdx: index("project_risks_category_idx").on(table.projectId, table.riskCategory),
+  }),
+);
+
 export const chats = sqliteTable(
   "chats",
   {
@@ -403,6 +423,26 @@ export const chatMessages = sqliteTable(
     chatIdx: index("chat_messages_chat_idx").on(table.chatId, table.createdAt),
     parentIdx: index("chat_messages_parent_idx").on(table.parentId),
     workspaceIdx: index("chat_messages_workspace_idx").on(table.workspaceId),
+  }),
+);
+
+export const extractedTasks = sqliteTable(
+  "extracted_tasks",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sourceMessageId: text("source_message_id").references(() => chatMessages.id, { onDelete: "set null" }),
+    taskDescription: text("task_description").notNull(),
+    confidenceScore: real("confidence_score").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    workspaceIdx: index("extracted_tasks_workspace_idx").on(table.workspaceId, table.createdAt),
+    sourceMessageIdx: index("extracted_tasks_source_message_idx").on(table.sourceMessageId),
   }),
 );
 
@@ -473,6 +513,7 @@ export const documentChunks = sqliteTable(
   "document_chunks",
   {
     id: text("id").primaryKey(),
+    vectorTenantId: integer("vector_tenant_id").references(() => vectorTenantMap.id, { onDelete: "set null" }),
     teamId: text("team_id").notNull(),
     projectId: text("project_id").notNull(),
     documentName: text("document_name").notNull(),
@@ -485,8 +526,29 @@ export const documentChunks = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (table) => ({
+    tenantIdx: index("document_chunks_vector_tenant_idx").on(table.vectorTenantId, table.projectId, table.teamId),
     scopeIdx: index("document_chunks_scope_idx").on(table.teamId, table.projectId, table.createdAt),
     r2KeyIdx: index("document_chunks_r2_key_idx").on(table.r2Key),
+  }),
+);
+
+export const vectorTenantMap = sqliteTable(
+  "vector_tenant_map",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    teamId: text("team_id"),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "cascade" }),
+    tenantKey: text("tenant_key").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    tenantKeyIdx: uniqueIndex("vector_tenant_map_tenant_key_idx").on(table.tenantKey),
+    scopeIdx: index("vector_tenant_map_scope_idx").on(table.workspaceId, table.teamId, table.projectId),
   }),
 );
 
@@ -510,6 +572,12 @@ export const workspaceActions = sqliteTable(
     asanaSyncedAt: integer("asana_synced_at", { mode: "timestamp_ms" }),
     asanaSyncQueuedAt: integer("asana_sync_queued_at", { mode: "timestamp_ms" }),
     asanaSyncError: text("asana_sync_error"),
+    outboundStatus: text("outbound_status", { enum: ["Pending", "Sent", "Failed"] })
+      .notNull()
+      .default("Pending"),
+    syncStatus: text("sync_status", { enum: ["NotQueued", "Pending", "Sent", "Failed"] })
+      .notNull()
+      .default("NotQueued"),
     createdAt: integer("created_at", { mode: "timestamp_ms" })
       .notNull()
       .$defaultFn(() => new Date()),
@@ -518,6 +586,7 @@ export const workspaceActions = sqliteTable(
     workspaceKindIdx: index("workspace_actions_workspace_kind_idx").on(table.workspaceId, table.kind),
     workspaceKindCreatedIdx: index("workspace_actions_kind_created_idx").on(table.workspaceId, table.kind, table.createdAt),
     asanaTaskGidIdx: index("workspace_actions_asana_task_gid_idx").on(table.asanaTaskGid, table.kind),
+    syncStatusIdx: index("workspace_actions_sync_status_idx").on(table.workspaceId, table.kind, table.syncStatus),
   }),
 );
 
@@ -641,6 +710,27 @@ export const briefingRuns = sqliteTable(
   (table) => ({
     scheduleIdx: index("briefing_runs_schedule_idx").on(table.scheduleId, table.createdAt),
     statusIdx: index("briefing_runs_status_idx").on(table.status, table.createdAt),
+  }),
+);
+
+export const briefings = sqliteTable(
+  "briefings",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
+    markdownContent: text("markdown_content").notNull(),
+    sourceDataHash: text("source_data_hash").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (table) => ({
+    sourceHashIdx: uniqueIndex("briefings_source_data_hash_idx").on(table.sourceDataHash),
+    workspaceIdx: index("briefings_workspace_idx").on(table.workspaceId, table.createdAt),
+    projectIdx: index("briefings_project_idx").on(table.projectId, table.createdAt),
   }),
 );
 

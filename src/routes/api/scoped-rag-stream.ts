@@ -19,6 +19,7 @@ export function parseScopedRagStreamInput(request: Request): ChatWithScopedRagIn
     workspaceId: url.searchParams.get("workspaceId") ?? "",
     projectId: url.searchParams.get("projectId")?.trim() || null,
     chatId: url.searchParams.get("chatId") ?? "",
+    userMessageId: url.searchParams.get("userMessageId")?.trim() || null,
     assistantMessageId: url.searchParams.get("assistantMessageId")?.trim() || null,
     asanaSearchEnabled: url.searchParams.get("asanaSearchEnabled") === "1",
     reasoningLevel: normalizeReasoningLevel(url.searchParams.get("reasoningLevel")),

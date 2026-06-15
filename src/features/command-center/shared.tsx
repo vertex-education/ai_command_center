@@ -224,6 +224,26 @@ export function addTaskToWorkspaceCache(current: PmoWorkspaceState | undefined, 
   } satisfies PmoWorkspaceState;
 }
 
+export function updateTaskInWorkspaceCache(
+  current: PmoWorkspaceState | undefined,
+  mode: WorkspaceMode,
+  id: string,
+  updateTask: (task: Task) => Task,
+) {
+  if (!current) return current;
+  const scopedWorkspace = current.workspaces[mode];
+  return {
+    ...current,
+    workspaces: {
+      ...current.workspaces,
+      [mode]: {
+        ...scopedWorkspace,
+        tasks: scopedWorkspace.tasks.map((task) => (task.id === id ? updateTask(task) : task)),
+      },
+    },
+  } satisfies PmoWorkspaceState;
+}
+
 export function removeTaskFromWorkspaceCache(current: PmoWorkspaceState | undefined, mode: WorkspaceMode, id: string) {
   if (!current) return current;
   const scopedWorkspace = current.workspaces[mode];

@@ -92,6 +92,14 @@
         "queue": "asana-sync-queue",
       },
       {
+        "binding": "ASANA_OUTBOUND_QUEUE",
+        "queue": "asana-outbound-queue",
+      },
+      {
+        "binding": "WORKSPACE_INTELLIGENCE_QUEUE",
+        "queue": "workspace-intelligence-queue",
+      },
+      {
         "binding": "AUTONOMOUS_RESEARCH_QUEUE",
         "queue": "autonomous-research-queue",
       },
@@ -110,10 +118,24 @@
         "max_retries": 5,
         "dead_letter_queue": "asana-sync-queue-dlq",
       },
+      {
+        "queue": "asana-outbound-queue",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "asana-outbound-queue-dlq",
+      },
+      {
+        "queue": "workspace-intelligence-queue",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "workspace-intelligence-queue-dlq",
+      },
     ],
   },
   "triggers": {
-    "crons": ["0 * * * *"],
+    "crons": ["0 * * * *", "0 12 * * 1"],
   },
   "ai": {
     "binding": "AI",
