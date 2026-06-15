@@ -1902,6 +1902,7 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
     pinned: boolean | number;
     version: number;
     commitMessage: string;
+    projectId: string | null;
   }>;
   try {
     const result = await getDb()
@@ -1918,6 +1919,7 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
                 r2_key as r2Key,
                 href,
                 preview_json as previewJson,
+                project_id as projectId,
                 pinned,
                 version,
                 commit_message as commitMessage
@@ -1940,7 +1942,7 @@ async function mergePersistedArtifacts(root: PmoWorkspaceState) {
     const parsedPreview = parseArtifactPreview(row.previewJson);
     const artifact: ArtifactVersion = {
       id: row.id,
-      projectId: parsedPreview.projectId,
+      projectId: row.projectId ?? parsedPreview.projectId,
       parentArtifactId: row.parentArtifactId,
       sourceChatTitle: parsedPreview.sourceChatTitle,
       title: row.title,
@@ -2980,6 +2982,7 @@ type ArtifactVersionSourceRow = {
   r2Key: string;
   href: string;
   previewJson: string;
+  projectId: string | null;
   pinned: boolean | number;
   version: number;
 };
@@ -2999,6 +3002,7 @@ async function findArtifactVersionSource(id: string) {
               r2_key as r2Key,
               href,
               preview_json as previewJson,
+              project_id as projectId,
               pinned,
               version
        FROM artifacts
@@ -3444,11 +3448,12 @@ export const commitArtifactPatch = createServerFn({ method: "POST" })
           r2_key,
           href,
           preview_json,
+          project_id,
           pinned,
           version,
           parent_artifact_id,
           commit_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         nextId,
@@ -3462,6 +3467,7 @@ export const commitArtifactPatch = createServerFn({ method: "POST" })
         nextR2Key,
         href,
         JSON.stringify(previewJson),
+        latest.source.projectId,
         latest.latest.pinned ? 1 : 0,
         nextVersion,
         latest.source.id,
@@ -3472,7 +3478,7 @@ export const commitArtifactPatch = createServerFn({ method: "POST" })
     const parsedPreview = parseArtifactPreview(JSON.stringify(previewJson));
     const artifact: Artifact = {
       id: nextId,
-      projectId: parsedPreview.projectId,
+      projectId: latest.source.projectId ?? parsedPreview.projectId,
       parentArtifactId: latest.source.id,
       sourceChatTitle: parsedPreview.sourceChatTitle,
       title: latest.source.title,
@@ -3550,11 +3556,12 @@ export const restoreArtifactVersion = createServerFn({ method: "POST" })
           r2_key,
           href,
           preview_json,
+          project_id,
           pinned,
           version,
           parent_artifact_id,
           commit_message
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         nextId,
@@ -3568,6 +3575,7 @@ export const restoreArtifactVersion = createServerFn({ method: "POST" })
         nextR2Key,
         href,
         source.previewJson,
+        source.projectId,
         latest.pinned ? 1 : 0,
         nextVersion,
         latest.id,
@@ -3620,12 +3628,13 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     }
     const latestBaseArtifact = baseArtifact ? await findLatestArtifactVersionInLineage(baseArtifact.id) : null;
     if (baseArtifact && !latestBaseArtifact) throw new Error("Latest artifact version was not found.");
+    const effectiveProjectId = projectId ?? baseArtifact?.projectId ?? null;
     const title =
       baseArtifact?.title ??
       (
         await generateArtifactTitle(seedTitle, rows, {
           mode,
-          projectId,
+          projectId: effectiveProjectId,
           userId: user.id,
           workspaceId,
         })
@@ -3641,7 +3650,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
     const artifactId = `artifact-${crypto.randomUUID()}`;
     const artifact: Artifact = {
       id: artifactId,
-      projectId,
+      projectId: effectiveProjectId,
       sourceChatTitle,
       title,
       type: "XLSX",
@@ -3652,7 +3661,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       href,
       r2Key,
       preview: ["Saved table export", fileName],
-      previewJson: buildTablePreviewJson(rows, ["Saved table export", fileName], projectId, sourceChatTitle),
+      previewJson: buildTablePreviewJson(rows, ["Saved table export", fileName], effectiveProjectId, sourceChatTitle),
       pinnedTo: latestBaseArtifact?.pinned ? [mode] : [],
       version: nextVersion,
       parentArtifactId: latestBaseArtifact?.id ?? null,
@@ -3666,7 +3675,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       customMetadata: {
         title,
         workspace_mode: mode,
-        project_id: projectId ?? "",
+        project_id: effectiveProjectId ?? "",
         source_chat_title: sourceChatTitle ?? "",
         parent_artifact_id: latestBaseArtifact?.id ?? "",
         version: String(nextVersion),
@@ -3687,11 +3696,12 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
           r2_key,
           href,
           preview_json,
+          project_id,
           pinned,
           version,
           parent_artifact_id,
           commit_message
-        ) VALUES (?, ?, ?, 'XLSX', 'You', ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, 'XLSX', 'You', ?, 'Draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         artifactId,
@@ -3702,6 +3712,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
         r2Key,
         href,
         JSON.stringify(artifact.previewJson),
+        effectiveProjectId,
         latestBaseArtifact?.pinned ? 1 : 0,
         nextVersion,
         latestBaseArtifact?.id ?? null,
@@ -3717,7 +3728,7 @@ export const saveTableArtifact = createServerFn({ method: "POST" })
       invalidates: ["workspace"],
       mode,
       operation: baseArtifact ? "version" : "insert",
-      projectId,
+      projectId: effectiveProjectId,
       sourceClientId: user.clientId,
       sourceUserId: user.id,
     });

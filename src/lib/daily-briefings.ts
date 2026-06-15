@@ -84,6 +84,7 @@ type ArtifactSourceRow = {
   r2Key: string;
   href: string;
   previewJson: string;
+  projectId: string | null;
   version: number;
   parentArtifactId: string | null;
   commitMessage: string;
@@ -191,12 +192,6 @@ function parseJsonRecord(value: string | null | undefined): Record<string, unkno
   } catch {
     return null;
   }
-}
-
-function projectIdFromArtifactPreview(previewJson: string) {
-  const record = parseJsonRecord(previewJson);
-  const projectId = record?.projectId;
-  return typeof projectId === "string" && projectId.trim() ? projectId.trim() : null;
 }
 
 function parseArtifactDate(value: string) {
@@ -639,17 +634,17 @@ async function collectProjectIntelligence(db: AppDb, project: BriefingProjectRow
         r2Key: schema.artifacts.r2Key,
         href: schema.artifacts.href,
         previewJson: schema.artifacts.previewJson,
+        projectId: schema.artifacts.projectId,
         version: schema.artifacts.version,
         parentArtifactId: schema.artifacts.parentArtifactId,
         commitMessage: schema.artifacts.commitMessage,
       })
       .from(schema.artifacts)
-      .where(eq(schema.artifacts.workspaceId, project.workspaceId))
+      .where(and(eq(schema.artifacts.workspaceId, project.workspaceId), eq(schema.artifacts.projectId, project.id)))
       .orderBy(asc(schema.artifacts.title), asc(schema.artifacts.version)),
   ]);
 
   const localModifiedArtifacts = (artifacts as ArtifactSourceRow[])
-    .filter((artifact) => projectIdFromArtifactPreview(artifact.previewJson) === project.id)
     .filter((artifact) => artifactDateFallsInWindow(artifact.artifactDate, windowStart, windowEnd))
     .map(
       (artifact): ModifiedArtifactRow => ({

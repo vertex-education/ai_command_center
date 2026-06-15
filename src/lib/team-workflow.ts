@@ -40,6 +40,8 @@ type CloudflareContext = {
   };
 };
 
+const initialChatMessagesPerChat = 100;
+
 export type ScopedInviteScope = "team" | "project";
 export type TeamSummary = {
   id: string;
@@ -861,24 +863,7 @@ export const deleteScopedProject = createServerFn({ method: "POST" })
       .first<{ id: string; workspaceId: string }>();
     if (!project) throw new Error("Project was not found.");
 
-    const projectChats = await getDb().prepare("SELECT id FROM chats WHERE project_id = ?").bind(data.projectId).all<{ id: string }>();
-    const chatIds = (projectChats.results ?? []).map((chat) => chat.id);
-    if (chatIds.length > 0) {
-      const placeholders = chatIds.map(() => "?").join(", ");
-      await getDb()
-        .prepare(`DELETE FROM chat_members WHERE chat_id IN (${placeholders})`)
-        .bind(...chatIds)
-        .run();
-      await getDb()
-        .prepare(`DELETE FROM chat_messages WHERE chat_id IN (${placeholders})`)
-        .bind(...chatIds)
-        .run();
-      await getDb()
-        .prepare(`DELETE FROM chats WHERE id IN (${placeholders})`)
-        .bind(...chatIds)
-        .run();
-    }
-
+    await getDb().prepare("DELETE FROM chats WHERE project_id = ?").bind(data.projectId).run();
     await getDb().prepare("DELETE FROM scoped_invites WHERE scope = 'project' AND target_id = ?").bind(data.projectId).run();
     await getDb().prepare("DELETE FROM project_members WHERE project_id = ?").bind(data.projectId).run();
     await getDb().prepare("DELETE FROM projects WHERE id = ?").bind(data.projectId).run();
@@ -944,12 +929,40 @@ async function listMessagesForChats({
   const placeholders = chatScopes.map(() => "?").join(", ");
   const result = await getDb()
     .prepare(
-      `SELECT chat_id as chatId, id, parent_id as parentId, author, role, avatar, message_time as time, body as text, artifact_title as artifactTitle, artifact_type as artifactType, artifact_meta as artifactMeta, attachments_json as attachmentsJson
-       FROM chat_messages
-       WHERE chat_id IN (${placeholders})
-       ORDER BY created_at ASC`,
+      `SELECT chatId,
+              id,
+              parentId,
+              author,
+              role,
+              avatar,
+              time,
+              text,
+              artifactTitle,
+              artifactType,
+              artifactMeta,
+              attachmentsJson
+       FROM (
+         SELECT chat_id as chatId,
+                id,
+                parent_id as parentId,
+                author,
+                role,
+                avatar,
+                message_time as time,
+                body as text,
+                artifact_title as artifactTitle,
+                artifact_type as artifactType,
+                artifact_meta as artifactMeta,
+                attachments_json as attachmentsJson,
+                created_at as createdAt,
+                ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY created_at DESC) as messageRank
+         FROM chat_messages
+         WHERE chat_id IN (${placeholders})
+       )
+       WHERE messageRank <= ?
+       ORDER BY createdAt ASC`,
     )
-    .bind(...chatScopes.map((chat) => chat.chatId))
+    .bind(...chatScopes.map((chat) => chat.chatId), initialChatMessagesPerChat)
     .all<{
       chatId: string;
       id: string;

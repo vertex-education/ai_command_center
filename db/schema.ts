@@ -454,6 +454,7 @@ export const artifacts = sqliteTable(
     r2Key: text("r2_key").notNull(),
     href: text("href").notNull(),
     previewJson: text("preview_json").notNull(),
+    projectId: text("project_id").references(() => projects.id, { onDelete: "set null" }),
     pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
     version: integer("version").notNull().default(1),
     parentArtifactId: text("parent_artifact_id").references((): AnySQLiteColumn => artifacts.id, { onDelete: "set null" }),
@@ -462,6 +463,7 @@ export const artifacts = sqliteTable(
   (table) => ({
     workspaceIdx: index("artifacts_workspace_idx").on(table.workspaceId),
     r2KeyIdx: uniqueIndex("artifacts_r2_key_idx").on(table.r2Key),
+    projectIdx: index("artifacts_workspace_project_idx").on(table.workspaceId, table.projectId),
     parentIdx: index("artifacts_parent_idx").on(table.parentArtifactId),
     versionIdx: index("artifacts_version_idx").on(table.workspaceId, table.title, table.version),
   }),
@@ -515,6 +517,7 @@ export const workspaceActions = sqliteTable(
   (table) => ({
     workspaceKindIdx: index("workspace_actions_workspace_kind_idx").on(table.workspaceId, table.kind),
     workspaceKindCreatedIdx: index("workspace_actions_kind_created_idx").on(table.workspaceId, table.kind, table.createdAt),
+    asanaTaskGidIdx: index("workspace_actions_asana_task_gid_idx").on(table.asanaTaskGid, table.kind),
   }),
 );
 
